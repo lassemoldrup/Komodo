@@ -1,0 +1,74 @@
+name: maria-db-cdc
+
+# Minimal CDC pipeline for Snapshot Isolation anomaly monitoring:
+#   MariaDB --binlog--> Debezium Server --> Redis Stream "cdc" --> C++ monitor
+#
+# Three containers, no Kafka, no Kafka Connect, no proxy.
+
+services:
+  mariadb:
+    # Pinned rather than :lts so experiment runs stay reproducible when the
+    # LTS alias advances. Override per run:
+    #   MARIADB_IMAGE=mariadb:11.8 make up
+    image: ${MARIADB_IMAGE:-mariadb:12.3}
+    container_name: cdc-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-rootpw}
+      MARIADB_DATABASE: sitest
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mariadb/conf.d:/etc/mysql/conf.d:ro
+      - ./mariadb/initdb:/docker-entrypoint-initdb.d:ro
+      # tmpfs datadir: this is a throwaway experiment harness, and keeping the
+      # data directory in RAM removes disk I/O from the measured workload.
+      # Everything is lost on container stop, which is what we want.
+    tmpfs:
+      - /var/lib/mysql:rw,size=2g
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [cdc]
+
+  redis:
+    image: redis:7-alpine
+    container_name: cdc-redis
+    # appendonly off + no RDB snapshots: the stream is a transient transport,
+    # not a system of record. Removes fsync from the hot path.
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 2gb
+      --maxmemory-policy noeviction
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [cdc]
+
+  debezium:
+    image: quay.io/debezium/server:3.2
+    container_name: cdc-debezium
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./debezium/application.properties:/debezium/config/application.properties:ro
+      - debezium-data:/debezium/data
+    networks: [cdc]
+
+volumes:
+  debezium-data:
+
+networks:
+  cdc:
+    name: cdc
