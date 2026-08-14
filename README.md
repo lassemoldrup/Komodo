@@ -312,19 +312,68 @@ The connector then **retries forever** rather than failing. Recreating the
 slot does not fix it; recreating the table does not fix it. `yugabyte/init.sh`
 enforces the order — schema, seed, then slot last.
 
-**2. Never INSERT and DELETE the same row in one transaction.** With
-`REPLICA IDENTITY FULL` this produces the same before-image error and the same
-infinite retry. Isolated precisely:
+**2. A row INSERTed inside a transaction must not be touched again in that
+same transaction.** Under `REPLICA IDENTITY FULL`, updating or deleting it
+afterwards produces the before-image error and the same infinite retry.
 
 | Pattern | Result |
 |---|---|
-| UPDATE only | works |
-| INSERT only | works |
-| DELETE only | works |
-| **INSERT + DELETE same row, one txn** | **0 events, connector stalls permanently** |
+| UPDATE only / INSERT only / DELETE only | works |
+| UPDATE + UPDATE, same pre-existing row | works |
+| INSERT row A + DELETE row B (B pre-existing) | works |
+| **INSERT then UPDATE the same row** | **0 events, connector stalls permanently** |
+| **INSERT then DELETE the same row** | **0 events, connector stalls permanently** |
 
-The marker protocol only ever upserts a single row and never deletes, so it
-cannot trigger this — but your workload can.
+The mechanism is visible in the working case. Two updates to the same
+pre-existing row both report the *snapshot* value as `before`:
+
+```
+update registers  before={"id":1,"val":0} after={"id":1,"val":10}
+update registers  before={"id":1,"val":0} after={"id":1,"val":20}
+                            ^^^^^^^ not 10
+```
+
+So the before-image is resolved against the transaction's **read snapshot**,
+not against the intra-transaction predecessor. A row inserted in the same
+transaction has no committed version at that snapshot, so the lookup has
+nothing to return — and it raises an error rather than yielding null.
+
+That snapshot semantics is worth noting for the monitor independently of the
+bug: `before` is the last *committed* value, not the immediately preceding
+write within the transaction.
+
+**This is a YugabyteDB server-side bug, not a connector bug.** `pg_recvlogical`
+— PostgreSQL's own stock replication client, with Debezium entirely out of the
+picture — reproduces it identically:
+
+```
+pg_recvlogical: error: unexpected termination of replication stream:
+ERROR:  Failed to get the beforeimage for tablet_id: ce9dff026bcd465b912ee67ee796dd22
+CONTEXT:  Catalog Version Mismatch: A DDL occurred while processing this query. Try again.
+```
+
+The `CONTEXT` line is misleading: no DDL occurs in that reproduction. It is a
+spurious error context, which is a large part of why the failure is hard to
+diagnose.
+
+What the connector *does* contribute is the failure mode. `PostgresErrorHandler`
+in the YB fork classifies everything as retriable:
+
+```java
+@Override
+protected boolean isCustomRetriable(Throwable throwable) {
+    // YB Note: Yes, all the errors are custom retriable.
+    return true;
+}
+```
+
+Combined with `errors.max.retries = -1`, a permanent server-side error becomes
+an infinite retry loop: the connector never fails, never advances, and emits no
+events. The stack looks healthy while silently capturing nothing — so monitor
+`make status` error counts, not just liveness.
+
+The marker protocol upserts a single row and never touches it again in the same
+transaction, so it cannot trigger this — but your workload can.
 
 ### The slot must be HYBRID_TIME
 
