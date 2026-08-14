@@ -82,9 +82,13 @@ services:
     profiles: [yugabyte]
     image: ${YUGABYTE_IMAGE:-yugabytedb/yugabyte:latest}
     container_name: cdc-yugabyte
+    # cdc_enable_intra_transactional_before_image: without it, touching a row
+    # again after INSERTing it in the same transaction makes the CDC service
+    # fail to compute a before-image, and the connector then retries forever.
+    # See "Two operational rules" in the README.
     command: >
       bin/yugabyted start --background=false
-      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true
+      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true,cdc_enable_intra_transactional_before_image=true
     ports:
       - "5433:5433"
       - "15433:15433"

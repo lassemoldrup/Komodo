@@ -120,6 +120,9 @@ Why a fixed row per session rather than an inserted row per transaction:
 - `REPLICA IDENTITY FULL` means the before-image carries the *previous*
   `txn_id`, giving a free per-session chain check: if `prev` is not the last
   `txn_id` you saw for that session, a transaction went missing
+- the workload is unconstrained: with
+  `cdc_enable_intra_transactional_before_image` on (see below), it may insert,
+  update and delete the same row within one transaction
 
 Upsert rather than plain `UPDATE` means **sessions need no provisioning**:
 `session_txn` starts empty and a new session id creates its own row on first
@@ -312,68 +315,60 @@ The connector then **retries forever** rather than failing. Recreating the
 slot does not fix it; recreating the table does not fix it. `yugabyte/init.sh`
 enforces the order — schema, seed, then slot last.
 
-**2. A row INSERTed inside a transaction must not be touched again in that
-same transaction.** Under `REPLICA IDENTITY FULL`, updating or deleting it
-afterwards produces the before-image error and the same infinite retry.
-
-| Pattern | Result |
-|---|---|
-| UPDATE only / INSERT only / DELETE only | works |
-| UPDATE + UPDATE, same pre-existing row | works |
-| INSERT row A + DELETE row B (B pre-existing) | works |
-| **INSERT then UPDATE the same row** | **0 events, connector stalls permanently** |
-| **INSERT then DELETE the same row** | **0 events, connector stalls permanently** |
-
-The mechanism is visible in the working case. Two updates to the same
-pre-existing row both report the *snapshot* value as `before`:
+**2. Enable `cdc_enable_intra_transactional_before_image`.** It is **off by
+default**, and with it off, touching a row again after `INSERT`ing it in the
+same transaction makes the CDC service fail to compute a before-image:
 
 ```
-update registers  before={"id":1,"val":0} after={"id":1,"val":10}
-update registers  before={"id":1,"val":0} after={"id":1,"val":20}
-                            ^^^^^^^ not 10
-```
-
-So the before-image is resolved against the transaction's **read snapshot**,
-not against the intra-transaction predecessor. A row inserted in the same
-transaction has no committed version at that snapshot, so the lookup has
-nothing to return — and it raises an error rather than yielding null.
-
-That snapshot semantics is worth noting for the monitor independently of the
-bug: `before` is the last *committed* value, not the immediately preceding
-write within the transaction.
-
-**This is a YugabyteDB server-side bug, not a connector bug.** `pg_recvlogical`
-— PostgreSQL's own stock replication client, with Debezium entirely out of the
-picture — reproduces it identically:
-
-```
-pg_recvlogical: error: unexpected termination of replication stream:
 ERROR:  Failed to get the beforeimage for tablet_id: ce9dff026bcd465b912ee67ee796dd22
 CONTEXT:  Catalog Version Mismatch: A DDL occurred while processing this query. Try again.
 ```
 
-The `CONTEXT` line is misleading: no DDL occurs in that reproduction. It is a
-spurious error context, which is a large part of why the failure is hard to
-diagnose.
+This is a **YugabyteDB server-side limitation, not a connector bug** —
+`pg_recvlogical`, with Debezium entirely out of the picture, reproduces it
+identically. (The `CONTEXT` line is spurious: no DDL is involved. That
+misattribution is much of why it is hard to diagnose.)
 
-What the connector *does* contribute is the failure mode. `PostgresErrorHandler`
-in the YB fork classifies everything as retriable:
+The compose file sets the flag on the tserver, which fixes it properly:
+
+| Pattern | flag off (default) | flag on |
+|---|---|---|
+| INSERT then UPDATE same row | **stalls permanently** | works |
+| INSERT then DELETE same row | **stalls permanently** | works |
+| everything else | works | works |
+
+The flag does more than suppress the error — it changes before-images to be
+**intra-transactional**, which is the semantics a version-chain reconstruction
+wants:
+
+```
+                                   flag off              flag on
+UPDATE ... val=10   before=  {"val":0}             {"val":0}
+UPDATE ... val=20   before=  {"val":0}   <-- snapshot   {"val":10}  <-- predecessor
+```
+
+So with the flag on, `before` is the immediately preceding value *within the
+transaction*; with it off, every write in a transaction reports the value as
+of the transaction's read snapshot.
+
+There is also a weaker flag, `cdc_send_null_before_image_if_not_exists`, which
+merely returns a null before-image instead of erroring. Prefer the
+intra-transactional flag: it yields real values rather than nulls.
+
+**Why this matters operationally:** the YB fork's `PostgresErrorHandler`
+classifies every error as retriable —
 
 ```java
-@Override
 protected boolean isCustomRetriable(Throwable throwable) {
     // YB Note: Yes, all the errors are custom retriable.
     return true;
 }
 ```
 
-Combined with `errors.max.retries = -1`, a permanent server-side error becomes
-an infinite retry loop: the connector never fails, never advances, and emits no
-events. The stack looks healthy while silently capturing nothing — so monitor
-`make status` error counts, not just liveness.
-
-The marker protocol upserts a single row and never touches it again in the same
-transaction, so it cannot trigger this — but your workload can.
+— and `errors.max.retries = -1`. So without the flag, a permanent server-side
+error becomes an infinite retry loop: the connector never fails, never
+advances, and emits nothing, while the stack still looks healthy. Watch the
+error count in `make status`, not just liveness.
 
 ### The slot must be HYBRID_TIME
 
