@@ -1,38 +1,20 @@
-name: maria-db-cdc
+name: si-monitoring
 
-# Minimal CDC pipeline for Snapshot Isolation anomaly monitoring:
-#   MariaDB --binlog--> Debezium Server --> Redis Stream "cdc" --> C++ monitor
+# CDC pipeline for Snapshot Isolation anomaly monitoring. Two interchangeable
+# backends, one shared downstream half:
 #
-# Three containers, no Kafka, no Kafka Connect, no proxy.
+#   MariaDB    --binlog--------\
+#                               >-- Debezium Server --> Redis stream "cdc" --> C++ monitor
+#   YugabyteDB --logical repl--/
+#
+# Exactly one backend runs at a time; both write to the same Redis stream, so
+# the monitor reads one place regardless of backend.
+#
+#   make up              # MariaDB   (default)
+#   make up DB=yugabyte  # YugabyteDB
 
 services:
-  mariadb:
-    # Pinned rather than :lts so experiment runs stay reproducible when the
-    # LTS alias advances. Override per run:
-    #   MARIADB_IMAGE=mariadb:11.8 make up
-    image: ${MARIADB_IMAGE:-mariadb:12.3}
-    container_name: cdc-mariadb
-    environment:
-      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-rootpw}
-      MARIADB_DATABASE: sitest
-    ports:
-      - "3306:3306"
-    volumes:
-      - ./mariadb/conf.d:/etc/mysql/conf.d:ro
-      - ./mariadb/initdb:/docker-entrypoint-initdb.d:ro
-      # tmpfs datadir: this is a throwaway experiment harness, and keeping the
-      # data directory in RAM removes disk I/O from the measured workload.
-      # Everything is lost on container stop, which is what we want.
-    tmpfs:
-      - /var/lib/mysql:rw,size=2g
-    healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      interval: 3s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
-    networks: [cdc]
-
+  # ---------------------------------------------------------------- shared --
   redis:
     image: redis:7-alpine
     container_name: cdc-redis
@@ -53,7 +35,36 @@ services:
       retries: 20
     networks: [cdc]
 
+  # --------------------------------------------------------------- MariaDB --
+  mariadb:
+    profiles: [mariadb]
+    # Pinned rather than :lts so experiment runs stay reproducible when the
+    # LTS alias advances. Override per run:
+    #   MARIADB_IMAGE=mariadb:11.8 make up
+    image: ${MARIADB_IMAGE:-mariadb:12.3}
+    container_name: cdc-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-rootpw}
+      MARIADB_DATABASE: sitest
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./mariadb/conf.d:/etc/mysql/conf.d:ro
+      - ./mariadb/initdb:/docker-entrypoint-initdb.d:ro
+    # tmpfs datadir: throwaway harness; keeps disk I/O out of the measured
+    # workload. Everything is lost on container stop, which is what we want.
+    tmpfs:
+      - /var/lib/mysql:rw,size=2g
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [cdc]
+
   debezium:
+    profiles: [mariadb]
     image: quay.io/debezium/server:3.2
     container_name: cdc-debezium
     depends_on:
@@ -66,8 +77,65 @@ services:
       - debezium-data:/debezium/data
     networks: [cdc]
 
+  # ------------------------------------------------------------ YugabyteDB --
+  yugabyte:
+    profiles: [yugabyte]
+    image: ${YUGABYTE_IMAGE:-yugabytedb/yugabyte:latest}
+    container_name: cdc-yugabyte
+    command: >
+      bin/yugabyted start --background=false
+      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true
+    ports:
+      - "5433:5433"
+      - "15433:15433"
+    healthcheck:
+      test: ["CMD", "bin/ysqlsh", "-h", "cdc-yugabyte", "-c", "SELECT 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 30s
+    networks: [cdc]
+
+  # Init must complete before the connector starts, and ORDER MATTERS:
+  # all schema first, replication slot last. DDL against a table with an
+  # active slot permanently breaks before-images (see README).
+  yugabyte-init:
+    profiles: [yugabyte]
+    image: ${YUGABYTE_IMAGE:-yugabytedb/yugabyte:latest}
+    container_name: cdc-yugabyte-init
+    depends_on:
+      yugabyte:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/init/init.sh"]
+    environment:
+      YB_HOST: cdc-yugabyte
+      SLOT_NAME: ${YB_SLOT:-dbz_si}
+    volumes:
+      - ./yugabyte:/init:ro
+    restart: "no"
+    networks: [cdc]
+
+  debezium-yb:
+    profiles: [yugabyte]
+    build:
+      context: ./debezium
+      dockerfile: Dockerfile.yugabyte
+    image: si-dbz-yb:2.5.2
+    container_name: cdc-debezium-yb
+    depends_on:
+      yugabyte-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      # 2.5.2 reads /debezium/conf; the 3.x MariaDB server reads /debezium/config
+      - ./debezium/application-yugabyte.properties:/debezium/conf/application.properties:ro
+      - debezium-yb-data:/debezium/data
+    networks: [cdc]
+
 volumes:
   debezium-data:
+  debezium-yb-data:
 
 networks:
   cdc:

@@ -1,39 +1,54 @@
-# maria-db-cdc
+# si-monitoring
 
 CDC harness for monitoring isolation anomalies under Snapshot Isolation.
 
 Debezium captures the **commit order** of transactions and the **values written**
 by each write. The client logs its own **read events**. The two halves are
-joined on the MariaDB **GTID**.
+joined on a per-transaction key.
+
+Two interchangeable backends share one downstream half:
 
 ```
-                    binlog (ROW, GTID)          single ordered stream
-   MariaDB  ──────────────────────────▶  Debezium Server  ──────────▶  Redis "cdc"  ──▶  C++ monitor
-      ▲                                                                                      ▲
-      │ SQL + @@session.last_gtid                                                            │
-      └──────────────────────────  workload client  ─────────────────────────────────────────┘
-                                    (logs read events, tagged by GTID)
+   MariaDB     --binlog (ROW, GTID)-----\
+                                         >-- Debezium Server --> Redis "cdc" --> C++ monitor
+   YugabyteDB  --logical repl (HT LSN)--/                                             ^
+                       ^                                                              |
+                       └──────────────── workload client ─────────────────────────────┘
+                                   (logs read events, tagged by txn key)
 ```
 
-Three containers. No Kafka, no Kafka Connect, no proxy.
+Exactly one backend runs at a time and both write to the same Redis stream, so
+the monitor reads one place regardless of backend.
 
-| Service    | Container      | Port | Role |
-|------------|----------------|------|------|
-| `mariadb`  | `cdc-mariadb`  | 3306 | Source. MariaDB 12.3, ROW binlog + GTID, datadir on tmpfs |
-| `debezium` | `cdc-debezium` | –    | Debezium Server 3.2, embedded engine |
-| `redis`    | `cdc-redis`    | 6379 | Single ordered stream `cdc` |
+| Service       | Container         | Port | Role |
+|---------------|-------------------|------|------|
+| `redis`       | `cdc-redis`       | 6379 | Single ordered stream `cdc` (shared) |
+| `mariadb`     | `cdc-mariadb`     | 3306 | MariaDB 12.3, ROW binlog + GTID, tmpfs datadir |
+| `debezium`    | `cdc-debezium`    | –    | Debezium Server 3.2 |
+| `yugabyte`    | `cdc-yugabyte`    | 5433 | YugabyteDB, logical replication |
+| `debezium-yb` | `cdc-debezium-yb` | –    | Debezium Server 2.5.2 + YugabyteDB connector |
 
 ## Quick start
 
 ```bash
-make up        # start; blocks until Debezium is streaming
-make txn       # run a write transaction, print its GTID
-make stream    # show what Debezium captured
-make bench     # throughput + latency
-make reset     # wipe everything
+make up                  # MariaDB (default); blocks until Debezium is streaming
+make up DB=yugabyte      # YugabyteDB instead
+
+make txn                 # run a write transaction, print its correlation marker
+make stream              # show what Debezium captured
+make status              # health of the active backend
+make reset               # wipe everything for the active backend
 ```
 
+Every target takes `DB=`; it defaults to `mariadb`. The scripts infer the
+backend from the running containers, so `./scripts/*.sh` need no flag.
+
 ## The join key
+
+The two backends differ here, because MariaDB hands out a usable key and
+YugabyteDB does not.
+
+### MariaDB — server-supplied GTID
 
 `SELECT @@session.last_gtid` on the **same session**, immediately after
 `COMMIT`, returns the GTID that transaction committed under. Every Debezium
@@ -42,16 +57,14 @@ record for that transaction carries the identical string in `source.gtid`,
 
 ```console
 $ ./scripts/txn.sh
-0-1-8
+marker: gtid=0-1-9
 
 $ ./scripts/stream.sh
-BEGIN 0-1-8
-  update registers    before={"id":1,"val":0} after={"id":1,"val":1}
-  update registers    before={"id":2,"val":0} after={"id":2,"val":-1}
-END   0-1-8  events=2  sitest.registers=2
+BEGIN 0-1-9
+  update registers    before={"id":1,"val":1} after={"id":1,"val":2}
+  update registers    before={"id":2,"val":-1} after={"id":2,"val":-2}
+END   0-1-9  events=2  sitest.registers=2
 ```
-
-So the client protocol is just:
 
 ```sql
 START TRANSACTION;
@@ -60,12 +73,71 @@ COMMIT;
 SELECT @@session.last_gtid;   -- tag this transaction's read log with this
 ```
 
-One caveat worth knowing: `last_gtid` is a *session* variable that only
-advances when the session writes to the binlog. After a read-only or
-rolled-back transaction it still holds the previous write transaction's GTID
-rather than an empty string. That is harmless here because only committed
-write transactions are correlated with Debezium, but a client that queried it
-after a read-only transaction would silently get the wrong ID.
+Caveat: `last_gtid` only advances when the session writes to the binlog. After
+a read-only, rolled-back, or conflict-aborted transaction it still holds the
+*previous* write transaction's GTID rather than an empty string. Harmless
+here, since only committed write transactions are correlated — but read it
+only after a successful `COMMIT`.
+
+### YugabyteDB — client-supplied marker table
+
+YugabyteDB exposes no equivalent. Every server-side channel was tested and
+rejected (see *Why YugabyteDB needs a marker table* below), so the client
+supplies the key itself.
+
+`session_txn` holds **one row per client session, upserted in place**. The
+marker is the **last statement before `COMMIT`**, so the workload runs first
+and the bookkeeping write cannot perturb it:
+
+```sql
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+  -- ... reads and writes; the client logs each read locally ...
+INSERT INTO session_txn (session_id, txn_id) VALUES ('<sid>', <client counter>)
+  ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+```
+
+```console
+$ SESSION=sessA TXN_ID=102 ./scripts/txn.sh
+marker: session_id=sessA txn_id=102
+
+$ ./scripts/stream.sh
+BEGIN 3:7318325031662411776
+  update registers      before={"id":1,"val":1} after={"id":1,"val":2}
+  update registers      before={"id":2,"val":-1} after={"id":2,"val":-2}
+  MARKER  session=sessA txn_id=102 (prev=101)  txn=7318325031662411776
+END   3:7318325031662411777  events=3  public.session_txn=1 public.registers=2
+```
+
+The marker always arrives with the **highest `transaction.total_order`** in
+its transaction, after every workload event.
+
+Why a fixed row per session rather than an inserted row per transaction:
+
+- the table never grows
+- sessions only touch their **own** row, so the marker introduces no
+  cross-session write conflicts under SI
+- `REPLICA IDENTITY FULL` means the before-image carries the *previous*
+  `txn_id`, giving a free per-session chain check: if `prev` is not the last
+  `txn_id` you saw for that session, a transaction went missing
+
+Upsert rather than plain `UPDATE` means **sessions need no provisioning**:
+`session_txn` starts empty and a new session id creates its own row on first
+use. That first marker is `op=c` with `before=null`; every later one is `op=u`
+carrying the previous `txn_id`.
+
+Verified on a clean stack, 4 concurrent sessions × 6 transactions:
+
+```
+committed transactions        : 24
+commit-HT strictly increasing : True
+transactions WITHOUT a marker : 0
+duplicate (session,txn_id)    : 0
+marker is LAST event in txn   : True
+op=c count (first use)        : 4
+op=u count (subsequent)       : 20
+per-session prev-chain intact : True (all 4)
+```
 
 ## Ordering guarantee
 
@@ -206,24 +278,94 @@ transaction. Boundaries remain recoverable because events of one transaction
 are contiguous and share a GTID, but the monitor then cannot tell that the
 *most recent* transaction is complete until the next one arrives.
 
+## YugabyteDB specifics
+
+### Why a marker table
+
+Four server-side correlation channels were tested against YugabyteDB 2026.1.
+All four fail, which is why the client supplies the key:
+
+| Channel | Outcome |
+|---|---|
+| `pg_current_xact_id()` | Global, not per-session. Offset vs `source.txId` **drifts** (16→18 over 40 txns) and the two orders disagree — xid is assigned at transaction start, `txId` at commit |
+| `yb_get_current_transaction()` UUID | Client-visible but **never appears in the stream**; also returns NULL during the first write statement |
+| `pg_logical_emit_message()` | Exists and returns an LSN, but is a **silent no-op** — the message is never decoded |
+| Replication origins | Work, but concurrent origin sessions are capped by `max_replication_slots` (10, shared with real slots — 16 sessions → 6 succeeded), and origin-tagged changes are by convention filterable downstream |
+
+The mapping you'd actually want — transaction UUID → commit hybrid time —
+does exist, inside the `System.transactions` status tablets. It is not
+queryable at any level (`relation "transactions" does not exist`; `yb-admin`
+has only management commands), and the records are garbage-collected once the
+transaction resolves.
+
+### Two operational rules
+
+**1. All schema before the replication slot.** DDL against a table with an
+active slot permanently breaks before-image computation for that tablet:
+
+```
+ERROR: Failed to get the beforeimage for tablet_id: …
+Where: Catalog Version Mismatch: A DDL occurred while processing this query.
+```
+
+The connector then **retries forever** rather than failing. Recreating the
+slot does not fix it; recreating the table does not fix it. `yugabyte/init.sh`
+enforces the order — schema, seed, then slot last.
+
+**2. Never INSERT and DELETE the same row in one transaction.** With
+`REPLICA IDENTITY FULL` this produces the same before-image error and the same
+infinite retry. Isolated precisely:
+
+| Pattern | Result |
+|---|---|
+| UPDATE only | works |
+| INSERT only | works |
+| DELETE only | works |
+| **INSERT + DELETE same row, one txn** | **0 events, connector stalls permanently** |
+
+The marker protocol only ever upserts a single row and never deletes, so it
+cannot trigger this — but your workload can.
+
+### The slot must be HYBRID_TIME
+
+`init.sh` creates it explicitly because Debezium's auto-creation defaults to
+`SEQUENCE`:
+
+```sql
+SELECT pg_create_logical_replication_slot('dbz_si','yboutput',false,false,'HYBRID_TIME');
+```
+
+Under `HYBRID_TIME`, `source.lsn` **is** the commit hybrid time: identical
+across every event of a transaction, unique, and monotonic in commit order —
+verified across tablets under concurrency. Under `SEQUENCE` it increments per
+row and loses that property. `debezium.source.publication.autocreate.mode` is
+`disabled` so Debezium cannot replace the slot with a `SEQUENCE` one.
+
+Do not use `source.txId` as an identifier: it is a per-slot 32-bit counter
+read straight off the pgoutput BEGIN message, and it resets when the slot is
+recreated.
+
 ## Layout
 
 ```
-docker-compose.yml
-mariadb/conf.d/cdc.cnf            # binlog, GTID, durability, throughput
-mariadb/initdb/01-users.sql       # debezium + app accounts
-mariadb/initdb/02-schema.sql      # placeholder registers table
-debezium/application.properties   # source, routing, sink, tuning
-scripts/txn.sh                    # correlation protocol reference
-scripts/stream.sh                 # read/follow the stream
-scripts/bench.sh                  # throughput + latency
-scripts/sql.sh, scripts/status.sh
+docker-compose.yml                        # profiles: mariadb | yugabyte
+mariadb/conf.d/cdc.cnf                    # binlog, GTID, isolation, durability
+mariadb/initdb/*.sql                      # accounts + placeholder schema
+yugabyte/init.sql                         # schema + session_txn marker table
+yugabyte/init.sh                          # schema first, HYBRID_TIME slot last
+debezium/application.properties           # MariaDB source (Debezium 3.2)
+debezium/application-yugabyte.properties  # YugabyteDB source (Debezium 2.5.2)
+debezium/Dockerfile.yugabyte              # YB connector on a Java 17 base
+(no vendored jars — Dockerfile pulls them in a build stage)
+scripts/lib.sh                            # backend detection, shared SQL helpers
+scripts/txn.sh                            # correlation protocol, both backends
+scripts/stream.sh                         # read/follow, handles both envelopes
+scripts/bench.sh, sql.sh, status.sh
 ```
 
-`mariadb/initdb/02-schema.sql` is a placeholder — a bank of integer registers,
-the usual write-skew testbed. Replace it with your workload schema and update
-`debezium.source.database.include.list` if you rename the database. Nothing
-else depends on the table definitions.
+The `registers` table is a placeholder in both backends — a bank of integer
+registers, the usual write-skew testbed. Replace it with your workload schema;
+only `table.include.list` / `database.include.list` need updating.
 
 ## MariaDB version
 

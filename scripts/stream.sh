@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Read the CDC stream.
+# Read the CDC stream. Backend-agnostic: handles both the MariaDB (Debezium
+# 3.2) and YugabyteDB (Debezium 2.5.2) envelope shapes.
 #
 #   ./scripts/stream.sh              # dump everything so far, readable
 #   ./scripts/stream.sh -f           # follow live (Ctrl-C to stop)
 #   ./scripts/stream.sh --raw        # raw envelopes, one JSON per line
-#   ./scripts/stream.sh -f --raw
 set -euo pipefail
 
 STREAM="${STREAM:-cdc}"
@@ -17,19 +17,7 @@ for a in "$@"; do
   esac
 done
 
-# Emit "<redis-id>\t<envelope-json>" per entry, then format in python.
-emit() {
-  if [ "$FOLLOW" = "1" ]; then
-    # $ = only entries added after we start blocking.
-    docker exec -i cdc-redis redis-cli --timeout 0 XREAD BLOCK 0 COUNT 1000 STREAMS "$STREAM" '$' 2>/dev/null
-    return
-  fi
-  docker exec -i cdc-redis redis-cli XRANGE "$STREAM" - + 2>/dev/null
-}
-
 if [ "$FOLLOW" = "1" ]; then
-  # redis-cli's blocking XREAD returns one batch then exits, so loop it and
-  # track the last id we saw.
   LAST='$'
   while true; do
     OUT=$(docker exec -i cdc-redis redis-cli XREAD BLOCK 0 COUNT 1000 STREAMS "$STREAM" "$LAST" 2>/dev/null || true)
@@ -39,25 +27,47 @@ if [ "$FOLLOW" = "1" ]; then
     printf '%s\n' "$OUT"
   done
 else
-  emit
+  docker exec -i cdc-redis redis-cli XRANGE "$STREAM" - + 2>/dev/null
 fi | python3 -u -c '
 import json, sys
 
 RAW = '"$RAW"'
 OPS = {"r": "read", "c": "insert", "u": "update", "d": "delete"}
 
+def unwrap(v):
+    # YugabyteDB wraps every column as {"value": X, "set": true}
+    if isinstance(v, dict) and "value" in v and "set" in v:
+        return v["value"]
+    return v
+
+def row(d):
+    if not isinstance(d, dict):
+        return d
+    return {k: unwrap(v) for k, v in d.items()}
+
+def txn_key(src):
+    # MariaDB: the GTID is the identity. YugabyteDB: the commit hybrid time
+    # (source.lsn under yb_lsn_type=HYBRID_TIME) is. source.txId is only a
+    # per-slot counter and resets, so it is not used as identity.
+    if src.get("gtid"):
+        return src["gtid"]
+    return src.get("lsn")
+
 for line in sys.stdin:
     line = line.strip()
     if not line.startswith("{"):
-        continue                      # redis-cli id / stream-name lines
+        continue
     try:
         e = json.loads(line)
     except ValueError:
         continue
     if not isinstance(e, dict):
         continue
-    if "id" in e and len(e) == 1:
-        continue                      # the message-key field name
+    # Each Redis entry has one field: the field NAME is the Debezium message
+    # key, the field VALUE is the envelope. Only envelopes carry "status"
+    # (transaction marker) or "source" (change event); skip the keys.
+    if "status" not in e and "source" not in e:
+        continue
 
     if RAW:
         print(json.dumps(e, separators=(",", ":")))
@@ -73,10 +83,19 @@ for line in sys.stdin:
         continue
 
     src = e.get("source") or {}
-    print("  %-6s %-16s before=%s after=%s" % (
-        OPS.get(e.get("op"), e.get("op")),
-        src.get("table"),
-        json.dumps(e.get("before"), separators=(",", ":")),
-        json.dumps(e.get("after"), separators=(",", ":")),
-    ))
+    before, after = row(e.get("before")), row(e.get("after"))
+    table = src.get("table")
+
+    # Surface the session marker: this is the client-supplied join key.
+    if table == "session_txn":
+        a = after or {}
+        b = before or {}
+        print("  MARKER  session=%s txn_id=%s (prev=%s)  txn=%s" % (
+            a.get("session_id"), a.get("txn_id"), b.get("txn_id"), txn_key(src)))
+        continue
+
+    print("  %-6s %-14s before=%s after=%s" % (
+        OPS.get(e.get("op"), e.get("op")), table,
+        json.dumps(before, separators=(",", ":")),
+        json.dumps(after, separators=(",", ":"))))
 '

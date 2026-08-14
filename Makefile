@@ -1,43 +1,48 @@
+# Backend selection: DB=mariadb (default) or DB=yugabyte
+DB ?= mariadb
+COMPOSE = docker compose --profile $(DB)
+
 .PHONY: up down reset status stream follow txn bench sql logs
 
-## Start the stack
+## Start the stack for $(DB)
 up:
-	docker compose up -d
+	$(COMPOSE) up -d --build
 	@echo "waiting for Debezium to reach streaming ..."
-	@until docker logs cdc-debezium 2>&1 | grep -q 'Starting streaming'; do sleep 1; done
-	@echo "ready. stream: redis://localhost:6379 key 'cdc'"
+	@if [ "$(DB)" = "yugabyte" ]; then C=cdc-debezium-yb; else C=cdc-debezium; fi; \
+	  until docker logs $$C 2>&1 | grep -q 'Starting streaming'; do sleep 2; done
+	@echo "ready ($(DB)). stream: redis://localhost:6379 key 'cdc'"
 
-## Stop everything
+## Stop the stack for $(DB)
 down:
-	docker compose down
+	$(COMPOSE) down
 
-## Stop and wipe all state (DB is tmpfs, so this also clears the schema)
+## Stop and wipe all state for $(DB)
 reset:
-	docker compose down -v
+	$(COMPOSE) down -v
 
 ## Health overview
 status:
-	./scripts/status.sh
+	@DB=$(DB) ./scripts/status.sh
 
 ## Dump the CDC stream so far
 stream:
-	./scripts/stream.sh
+	@DB=$(DB) ./scripts/stream.sh
 
 ## Follow the CDC stream live
 follow:
-	./scripts/stream.sh -f
+	@DB=$(DB) ./scripts/stream.sh -f
 
-## Run one write transaction and print its GTID
+## Run one write transaction and print its correlation marker
 txn:
-	./scripts/txn.sh
+	@DB=$(DB) ./scripts/txn.sh
 
-## Throughput + latency benchmark
+## Throughput + latency benchmark (MariaDB only for now)
 bench:
-	./scripts/bench.sh
+	@DB=$(DB) ./scripts/bench.sh
 
 ## SQL shell
 sql:
-	./scripts/sql.sh
+	@DB=$(DB) ./scripts/sql.sh
 
 logs:
-	docker compose logs -f --tail=100
+	$(COMPOSE) logs -f --tail=100

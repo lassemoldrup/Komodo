@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# SQL shell against the workload database.
+# SQL shell / one-shot query against the active backend.
 #
-#   ./scripts/sql.sh                          # interactive
+#   ./scripts/sql.sh                                  # interactive
 #   ./scripts/sql.sh "SELECT * FROM registers"
-#   ./scripts/sql.sh < some_script.sql        # whole file in ONE session
-#
-# --skip-ssl: the MariaDB 11.8 client requires TLS by default; this listener
-# is plaintext.
+#   DB=yugabyte ./scripts/sql.sh "SELECT * FROM session_txn LIMIT 5"
 set -euo pipefail
-
-FLAGS=(--skip-ssl -u"${DB_USER:-app}" -p"${DB_PASSWORD:-app_pw}" sitest)
+cd "$(dirname "$0")/.."
+. scripts/lib.sh
 
 if [ $# -gt 0 ]; then
-  exec docker exec -i cdc-mariadb mariadb "${FLAGS[@]}" -e "$*"
-elif [ -t 0 ]; then
-  exec docker exec -it cdc-mariadb mariadb "${FLAGS[@]}"
+  db_query "$*"
+  exit 0
+fi
+
+if [ "$DB" = "yugabyte" ]; then
+  exec docker exec -it cdc-yugabyte bin/ysqlsh -h cdc-yugabyte -U yugabyte -d yugabyte
 else
-  exec docker exec -i cdc-mariadb mariadb "${FLAGS[@]}"
+  # --skip-ssl: the MariaDB 11.8+ client requires TLS by default.
+  exec docker exec -it cdc-mariadb mariadb --skip-ssl \
+    -u"${DB_USER:-app}" -p"${DB_PASSWORD:-app_pw}" sitest
 fi
