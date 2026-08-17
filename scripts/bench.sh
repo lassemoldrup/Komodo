@@ -21,7 +21,7 @@ N = int(sys.argv[1])
 def mariadb(sql, user="app", pw="app_pw"):
     return subprocess.run(
         ["docker", "exec", "-i", "cdc-mariadb", "mariadb", "--skip-ssl",
-         f"-u{user}", f"-p{pw}", "sitest", "-N", "-B"],
+         f"-u{user}", f"-p{pw}", "benchbase", "-N", "-B"],
         input=sql, capture_output=True, text=True).stdout
 
 def redis(*args):
@@ -29,10 +29,18 @@ def redis(*args):
                           capture_output=True, text=True).stdout
 
 # --- Throughput -----------------------------------------------------------
+initial = []
+for key in range(1, 5):
+    initial.append(
+        "INSERT INTO usertable (ycsb_key, field1) VALUES (%d,'a') "
+        "ON DUPLICATE KEY UPDATE field1='a';" % key)
+mariadb("\n".join(initial))
+
 stmts = []
 for i in range(N):
     stmts.append(
-        "START TRANSACTION; UPDATE registers SET val=val+1 WHERE id=%d; COMMIT;"
+        "START TRANSACTION; UPDATE usertable "
+        "SET field1=IF(field1='a','b','a') WHERE ycsb_key=%d; COMMIT;"
         % (i % 4 + 1))
 # Report each commit's GTID and the wall-clock ms at which it committed.
 stmts.append("SELECT CONCAT(@@session.last_gtid,' ',ROUND(UNIX_TIMESTAMP(SYSDATE(3))*1000));")

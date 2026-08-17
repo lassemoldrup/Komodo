@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
-# Reference implementation of the client-side correlation protocol.
+# Manual CDC transaction helper.
 #
 #   ./scripts/txn.sh                                  # default workload body
-#   ./scripts/txn.sh "UPDATE registers SET val=9 WHERE id=2"
+#   ./scripts/txn.sh "UPDATE usertable SET field1='x' WHERE ycsb_key=2"
+#   DB=yugabyte ./scripts/txn.sh "UPDATE registers SET val=9 WHERE id=2"
 #   SESSION=sess7 TXN_ID=42 ./scripts/txn.sh
 #
-# One protocol for every backend: the client mints its own (session_id, txn_id)
-# and upserts it into its session's row in session_txn as the LAST statement of
-# the transaction. The marker then travels inside that transaction's own change
-# set, arriving after the workload writes, and identifies the transaction in
-# the CDC stream.
-#
-# Only the upsert dialect differs — ON CONFLICT (Postgres/YugabyteDB),
-# ON DUPLICATE KEY (MariaDB), MERGE (Oracle). No isolation statement is issued
-# anywhere: all three backends default to Snapshot Isolation server-side.
+# MariaDB correlation is the connection-local GTID change and never adds a
+# marker write. The YugabyteDB/Oracle exploratory adapters still use their
+# pre-existing session marker; they are outside the frozen MariaDB scope.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . scripts/lib.sh
 
-BODY_DEFAULT="UPDATE registers SET val = val + 1 WHERE id = 1;
+if (( $# > 0 )); then
+  BODY=$*
+elif [[ $DB == mariadb ]]; then
+  BODY="INSERT INTO usertable (ycsb_key, field1) VALUES (1, 'a')
+    ON DUPLICATE KEY UPDATE field1 = IF(field1 = 'a', 'b', 'a');"
+else
+  BODY="UPDATE registers SET val = val + 1 WHERE id = 1;
 UPDATE registers SET val = val - 1 WHERE id = 2;"
-BODY="${*:-$BODY_DEFAULT}"
+fi
 
 SESSION="${SESSION:-sess1}"
 TXN_ID="${TXN_ID:-$(date +%s)}"
@@ -51,15 +52,16 @@ SQL
     cat > "$TMP" <<SQL
 START TRANSACTION;
 ${BODY}
-INSERT INTO session_txn (session_id, txn_id) VALUES ('${SESSION}', ${TXN_ID})
-  ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
 COMMIT;
+SELECT @@session.last_gtid;
 SQL
     OUT=$(db_run_file "$TMP" 2>&1)
     if echo "$OUT" | grep -qi 'ERROR'; then
-      echo "marker: ABORTED - $(echo "$OUT" | grep -i 'ERROR' | head -1)"
+      echo "transaction: ABORTED - $(echo "$OUT" | grep -i 'ERROR' | head -1)"
       exit 1
     fi
+    echo "gtid: $(printf '%s' "$OUT" | tail -1)"
+    exit 0
     ;;
 
   oracle)

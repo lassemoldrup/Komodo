@@ -18,5 +18,5 @@ if [ "$DB" = "yugabyte" ]; then
 else
   # --skip-ssl: the MariaDB 11.8+ client requires TLS by default.
   exec docker exec -it cdc-mariadb mariadb --skip-ssl \
-    -u"${DB_USER:-app}" -p"${DB_PASSWORD:-app_pw}" sitest
+    -u"${DB_USER:-app}" -p"${DB_PASSWORD:-app_pw}" benchbase
 fi

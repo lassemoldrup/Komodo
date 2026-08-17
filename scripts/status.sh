@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Health overview of whichever backend is running.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit
 . scripts/lib.sh
 
 echo "=== Backend: $DB ==="
@@ -47,8 +47,9 @@ elif [ "$DB" = "yugabyte" ]; then
 else
   echo "=== Isolation ==="
   db_query "SELECT CONCAT(@@innodb_snapshot_isolation, ' / ', @@transaction_isolation)"
-  echo "=== Session markers ==="
-  db_query "SELECT CONCAT(session_id, ' -> ', txn_id) FROM session_txn ORDER BY session_id"
+  echo "=== Black-box state ==="
+  db_query "SELECT CONCAT('usertable rows=', COUNT(*)) FROM usertable"
+  db_query "SELECT CONCAT(run_id, ' -> ', phase) FROM checker_run_fence ORDER BY run_id, phase"
   DBZ=cdc-debezium
 fi
 

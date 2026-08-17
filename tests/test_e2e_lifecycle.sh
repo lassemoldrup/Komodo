@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+TEST_ROOT=$(mktemp -d /tmp/blackbox-lifecycle-test.XXXXXX)
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+
+
+fail() {
+  printf 'lifecycle test failed: %s\n' "$*" >&2
+  exit 1
+}
+
+
+write_test_programs() {
+  local case_root=$1
+  mkdir -p "$case_root/bin"
+
+  cat >"$case_root/bin/docker" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $1 == compose ]]; then
+  if [[ " $* " == *" up "* && " $* " == *" redis mariadb "* ]]; then
+    echo 'stack:database' >>"$EVENT_LOG"
+  elif [[ " $* " == *" up "* && " $* " == *" debezium "* ]]; then
+    echo 'stack:cdc' >>"$EVENT_LOG"
+  fi
+  exit 0
+fi
+if [[ $1 == inspect ]]; then
+  if [[ $* == *Health* ]]; then
+    echo healthy
+  else
+    echo running
+  fi
+  exit 0
+fi
+if [[ $1 == logs ]]; then
+  echo 'Starting streaming'
+  exit 0
+fi
+exit 2
+SCRIPT
+
+  cat >"$case_root/bin/mariadb" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+query=
+while (( $# > 0 )); do
+  if [[ $1 == --execute ]]; then
+    query=$2
+    break
+  fi
+  shift
+done
+case "$query" in
+  *"information_schema.TABLES"*)
+    printf 'checker_run_fence\nusertable\n'
+    ;;
+  *"COUNT(*) FROM usertable"*|*"COUNT(*) FROM checker_run_fence"*)
+    echo 0
+    ;;
+  *"@@innodb_snapshot_isolation"*)
+    echo 1
+    ;;
+  *"information_schema.PROCESSLIST"*)
+    cat "$ACTIVE_CONNECTIONS_FILE"
+    ;;
+  *"SELECT ycsb_key,"*)
+    : # Empty bootstrap state.
+    ;;
+  *"INSERT INTO checker_run_fence"*)
+    phase=$(sed -n "s/.*VALUES ('[^']*', '\([^']*\)',.*/\1/p" <<<"$query")
+    [[ -n $phase ]]
+    echo "fence:$phase" >>"$EVENT_LOG"
+    ;;
+  *)
+    printf 'unexpected fake MariaDB query: %s\n' "$query" >&2
+    exit 2
+    ;;
+esac
+SCRIPT
+
+  cat >"$case_root/bin/redis-cli" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+json_output=0
+while [[ ${1:-} == -* ]]; do
+  case "$1" in
+    -h|-p|--pass) shift 2 ;;
+    --raw) shift ;;
+    --json) json_output=1; shift ;;
+    *) printf 'unexpected redis option: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+command=$1
+shift
+case "$command" in
+  EXISTS|DBSIZE)
+    echo 0
+    ;;
+  XADD)
+    stream=$1
+    field=$3
+    payload=$4
+    [[ $field == payload ]]
+    kind=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["kind"])' "$payload")
+    echo "publish:$kind" >>"$EVENT_LOG"
+    counter=1
+    if [[ -f $REDIS_COUNTER_FILE ]]; then
+      counter=$(( $(cat "$REDIS_COUNTER_FILE") + 1 ))
+    fi
+    echo "$counter" >"$REDIS_COUNTER_FILE"
+    echo "$counter-0"
+    ;;
+  XREAD)
+    (( json_output == 1 ))
+    stream=${@: -2:1}
+    cursor=${@: -1}
+    run_id=${stream##*:}
+    lifecycle=
+    entry_id=
+    if [[ $cursor != 3-0 ]] && grep -q '^publish:run_failed$' "$EVENT_LOG"; then
+      lifecycle=FINAL
+      entry_id=3-0
+    elif [[ $cursor == 0-0 && ${SUPPRESS_START_ACK:-0} != 1 ]] && grep -q '^fence:RUN_START$' "$EVENT_LOG"; then
+      lifecycle=START_FENCE_SEEN
+      entry_id=1-0
+    elif [[ $cursor == 1-0 && ${EMIT_LIFECYCLE_REGRESSION:-0} == 1 ]]; then
+      lifecycle=STARTING
+      entry_id=1-1
+    elif [[ $cursor == 1-0 ]] && grep -q '^fence:LOAD_FINISHED$' "$EVENT_LOG"; then
+      lifecycle=LOAD_FINISHED_SEEN
+      entry_id=2-0
+    elif [[ $cursor == 2-0 ]] && { grep -q '^fence:END_FENCE$' "$EVENT_LOG" || grep -q '^publish:run_failed$' "$EVENT_LOG"; }; then
+      lifecycle=FINAL
+      entry_id=3-0
+    fi
+    if [[ -z $lifecycle ]]; then
+      sleep 0.05
+      echo null
+      exit 0
+    fi
+    echo "status:$lifecycle" >>"$EVENT_LOG"
+    python3 - "$stream" "$run_id" "$lifecycle" "$entry_id" <<'PY'
+import json
+import sys
+
+stream, run_id, lifecycle, entry_id = sys.argv[1:]
+with open(__import__("os").environ["EVENT_LOG"], encoding="utf-8") as event_file:
+    event_lines = {line.rstrip("\n") for line in event_file}
+failed = lifecycle == "FINAL" and "publish:run_failed" in event_lines
+end_seen = "fence:END_FENCE" in event_lines
+record = {
+    "kind": "status",
+    "run_id": run_id,
+    "lifecycle_state": lifecycle,
+    "outcome": ("INVALID" if failed else "PASS") if lifecycle == "FINAL" else "RUNNING",
+    "checker_observation": "PASS_SO_FAR" if lifecycle == "FINAL" else "NOT_STARTED",
+    "last_cdc_stream_id": "0-0",
+    "last_client_stream_id": "0-0",
+    "assembled_cdc_transactions": 3,
+    "joined_transactions": 0,
+    "checked_transactions": 1,
+    "pending_cdc_slots": 0,
+    "unmatched_client_records": 0,
+    "diagnostics": [],
+}
+if lifecycle == "FINAL":
+    record["reconciliation"] = {
+        "evidence_reconciled": not failed,
+        "bootstrap_manifest_validated": True,
+        "end_fence_seen": end_seen,
+        "expected_sessions": 1,
+        "completed_sessions": 1,
+        "accepted_client_transactions": 0,
+        "joined_workload_transactions": 0,
+        "bootstrap_cdc_transactions": 0,
+        "bootstrap_checker_transactions": 0,
+        "phase_anchor_transactions": 1,
+        "checker_consumed_transactions": 1,
+        "unmatched_client_records": 0,
+        "unmatched_workload_cdc_slots": 0,
+        "ambiguous_attempts": 0,
+    }
+payload = json.dumps(record, separators=(",", ":"))
+print(json.dumps({stream: [[entry_id, ["payload", payload]]]}, separators=(",", ":")))
+PY
+    ;;
+  *)
+    printf 'unexpected fake Redis command: %s\n' "$command" >&2
+    exit 2
+    ;;
+esac
+SCRIPT
+
+  cat >"$case_root/bin/monitor" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+echo 'monitor:start' >>"$EVENT_LOG"
+while ! grep -q '^fence:END_FENCE$' "$EVENT_LOG"; do
+  sleep 0.05
+done
+SCRIPT
+
+  cat >"$case_root/bin/loader" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+echo 'phase:loader' >>"$EVENT_LOG"
+if [[ ${HANG_LOADER:-0} == 1 ]]; then
+  sleep 30
+fi
+exit "${LOADER_EXIT_STATUS:-0}"
+SCRIPT
+
+  cat >"$case_root/bin/workload" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+echo 'phase:workload' >>"$EVENT_LOG"
+if [[ ${LEAVE_ACTIVE_CONNECTION:-0} == 1 ]]; then
+  echo 1 >"$ACTIVE_CONNECTIONS_FILE"
+fi
+SCRIPT
+
+  chmod +x "$case_root/bin/"*
+}
+
+
+line_of() {
+  local pattern=$1
+  local log=$2
+  grep -n -m1 "^${pattern}$" "$log" | cut -d: -f1
+}
+
+
+run_case() {
+  local name=$1
+  local leave_active=$2
+  local suppress_start_ack=${3:-0}
+  local loader_exit_status=${4:-0}
+  local emit_lifecycle_regression=${5:-0}
+  local hang_loader=${6:-0}
+  local case_root="$TEST_ROOT/$name"
+  mkdir -p "$case_root"
+  write_test_programs "$case_root"
+  : >"$case_root/events"
+  echo 0 >"$case_root/active-connections"
+
+  export EVENT_LOG="$case_root/events"
+  export ACTIVE_CONNECTIONS_FILE="$case_root/active-connections"
+  export REDIS_COUNTER_FILE="$case_root/redis-counter"
+  export LEAVE_ACTIVE_CONNECTION=$leave_active
+  export SUPPRESS_START_ACK=$suppress_start_ack
+  export LOADER_EXIT_STATUS=$loader_exit_status
+  export EMIT_LIFECYCLE_REGRESSION=$emit_lifecycle_regression
+  export HANG_LOADER=$hang_loader
+
+  local status
+  if BLACKBOX_DOCKER="$case_root/bin/docker" \
+      BLACKBOX_REDIS_CLI="$case_root/bin/redis-cli" \
+      BLACKBOX_MARIADB_CLI="$case_root/bin/mariadb" \
+      BLACKBOX_REDIS_HOST=fake \
+      BLACKBOX_REDIS_PORT=0 \
+      BLACKBOX_DB_HOST=fake \
+      BLACKBOX_DB_PORT=0 \
+      BLACKBOX_MONITOR_COMMAND="$case_root/bin/monitor" \
+      BLACKBOX_LOADER_COMMAND="$case_root/bin/loader" \
+      BLACKBOX_WORKLOAD_COMMAND="$case_root/bin/workload" \
+      BLACKBOX_EXPECTED_SESSION_IDS=ycsb/worker/1 \
+      BLACKBOX_STACK_TIMEOUT_SECONDS=2 \
+      BLACKBOX_STATUS_TIMEOUT_SECONDS=2 \
+      BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS=1 \
+      BLACKBOX_LOADER_TIMEOUT_SECONDS=1 \
+      BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=2 \
+      BLACKBOX_TERMINATION_GRACE_SECONDS=1 \
+      "$ROOT/scripts/e2e.sh" >"$case_root/stdout" 2>"$case_root/stderr"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  CASE_STATUS=$status
+  CASE_LOG="$case_root/events"
+}
+
+
+run_case clean 0
+[[ $CASE_STATUS == 0 ]] || fail "clean lifecycle exited $CASE_STATUS: $(cat "$TEST_ROOT/clean/stderr")"
+
+manifest_line=$(line_of 'publish:run_manifest' "$CASE_LOG")
+start_fence_line=$(line_of 'fence:RUN_START' "$CASE_LOG")
+start_ack_line=$(line_of 'status:START_FENCE_SEEN' "$CASE_LOG")
+loader_line=$(line_of 'phase:loader' "$CASE_LOG")
+bootstrap_line=$(line_of 'publish:bootstrap_manifest' "$CASE_LOG")
+load_fence_line=$(line_of 'fence:LOAD_FINISHED' "$CASE_LOG")
+load_ack_line=$(line_of 'status:LOAD_FINISHED_SEEN' "$CASE_LOG")
+workload_line=$(line_of 'phase:workload' "$CASE_LOG")
+end_fence_line=$(line_of 'fence:END_FENCE' "$CASE_LOG")
+final_line=$(line_of 'status:FINAL' "$CASE_LOG")
+
+(( manifest_line < start_fence_line )) || fail 'RunManifest was not published before RUN_START'
+(( start_fence_line < start_ack_line && start_ack_line < loader_line )) || fail 'loader bypassed START acknowledgement'
+(( loader_line < bootstrap_line && bootstrap_line < load_fence_line )) || fail 'bootstrap manifest/fence order is wrong'
+(( load_fence_line < load_ack_line && load_ack_line < workload_line )) || fail 'workload bypassed LOAD acknowledgement'
+(( workload_line < end_fence_line && end_fence_line < final_line )) || fail 'END/final order is wrong'
+
+run_case active_connection 1
+[[ $CASE_STATUS != 0 ]] || fail 'unproven quiescence unexpectedly succeeded'
+if grep -q '^fence:END_FENCE$' "$CASE_LOG"; then
+  fail 'END_FENCE was written without proven client quiescence'
+fi
+grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'quiescence failure did not publish a diagnostic'
+grep -q '^status:FINAL$' "$CASE_LOG" || fail 'quiescence failure did not wait for final monitor status'
+
+run_case missing_start_ack 0 1
+[[ $CASE_STATUS != 0 ]] || fail 'missing START acknowledgement unexpectedly succeeded'
+if grep -q '^phase:loader$' "$CASE_LOG"; then
+  fail 'loader ran without START_FENCE_SEEN acknowledgement'
+fi
+grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'missing START acknowledgement did not publish a diagnostic'
+grep -q '^fence:END_FENCE$' "$CASE_LOG" || fail 'proven-quiescent START failure did not close with END_FENCE'
+grep -q '^status:FINAL$' "$CASE_LOG" || fail 'missing START acknowledgement did not await final INVALID'
+
+run_case loader_failure 0 0 9
+[[ $CASE_STATUS == 1 ]] || fail "loader failure did not map child exit 9 to operational exit 1"
+grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'loader failure did not publish a diagnostic'
+grep -q '^fence:END_FENCE$' "$CASE_LOG" || fail 'quiescent loader failure did not close with END_FENCE'
+grep -q '^status:FINAL$' "$CASE_LOG" || fail 'loader failure did not await final INVALID'
+if grep -q '^fence:LOAD_FINISHED$\|^phase:workload$' "$CASE_LOG"; then
+  fail 'loader failure advanced into LOAD_FINISHED/workload'
+fi
+
+run_case lifecycle_regression 0 0 0 1
+[[ $CASE_STATUS == 1 ]] || fail 'lifecycle regression did not fail operationally'
+grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'lifecycle regression did not publish a diagnostic'
+if grep -q '^phase:workload$' "$CASE_LOG"; then
+  fail 'workload ran after a monitor lifecycle regression'
+fi
+
+run_case hung_loader 0 0 0 0 1
+[[ $CASE_STATUS == 1 ]] || fail 'hung loader did not fail operationally'
+grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'hung loader did not publish a diagnostic'
+grep -q '^fence:END_FENCE$' "$CASE_LOG" || fail 'terminated/quiescent loader did not close with END_FENCE'
+grep -q '^status:FINAL$' "$CASE_LOG" || fail 'hung loader did not await final INVALID'
+
+echo 'lifecycle tests passed'

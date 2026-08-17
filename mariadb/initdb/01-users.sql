@@ -6,4 +6,4 @@ GRANT SELECT, RELOAD, SHOW DATABASES, LOCK TABLES,
 
 -- Workload client.
 CREATE USER IF NOT EXISTS 'app'@'%' IDENTIFIED BY 'app_pw';
-GRANT ALL PRIVILEGES ON sitest.* TO 'app'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON benchbase.* TO 'app'@'%';

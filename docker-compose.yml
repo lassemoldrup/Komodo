@@ -46,7 +46,9 @@ services:
     container_name: cdc-mariadb
     environment:
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-rootpw}
-      MARIADB_DATABASE: sitest
+      # The application/control schema is created empty by initdb before the
+      # connector is allowed to start. BenchBase's loader is the first writer.
+      MARIADB_DATABASE: benchbase
     ports:
       - "3306:3306"
     volumes:

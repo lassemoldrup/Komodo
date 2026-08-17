@@ -45,7 +45,7 @@ db_run_file() {
     # -N -B: no column headers, tab-separated. (Do NOT use -t here: in the
     # MariaDB client -t means table-formatted output, not psql's "tuples only".)
     docker exec -i cdc-mariadb mariadb --skip-ssl \
-      -u"${DB_USER:-app}" -p"${DB_PASSWORD:-app_pw}" sitest -N -B < "$f" 2>/dev/null
+      -u"${DB_USER:-app}" -p"${DB_PASSWORD:-app_pw}" benchbase -N -B < "$f" 2>/dev/null
   fi
 }
 
@@ -60,6 +60,6 @@ db_query() {
     docker exec cdc-yugabyte bin/ysqlsh -h cdc-yugabyte -U yugabyte -d yugabyte -qtAc "$sql"
   else
     docker exec -i cdc-mariadb mariadb --skip-ssl \
-      -u"${DB_USER:-app}" -p"${DB_PASSWORD:-app_pw}" sitest -N -B -e "$sql" 2>/dev/null
+      -u"${DB_USER:-app}" -p"${DB_PASSWORD:-app_pw}" benchbase -N -B -e "$sql" 2>/dev/null
   fi
 }
