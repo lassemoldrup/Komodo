@@ -10,7 +10,7 @@ database consistency violations.
 |---|---:|---|
 | `PASS_SO_FAR` | no | Every transaction in the currently checked complete prefix passes. |
 | `VIOLATION_OBSERVED` | no | The checker observed a violation in the current complete prefix; reconciliation is still running. |
-| `PASS` | yes | Reconciliation succeeded and the complete captured projection passes. |
+| `PASS` | yes | Reconciliation succeeded and every successful supported point transaction passes. |
 | `VIOLATION` | yes | Reconciliation succeeded and at least one captured transaction violates SOWW. |
 | `INVALID` | yes | Evidence/lifecycle validation failed; no consistency verdict is available. |
 
@@ -52,7 +52,7 @@ FINAL
 | `CLIENT_RECORD_MALFORMED` | Client JSON fails schema or semantic validation. |
 | `CLIENT_READ_COUNT_MISMATCH` | `read_count` differs from the reads array length. |
 | `CLIENT_READ_DIGEST_MISMATCH` | Recomputed read digest differs from the record. |
-| `CLIENT_DUPLICATE_CORRELATION` | More than one client record uses a correlation ID. |
+| `CLIENT_DUPLICATE_CORRELATION` | More than one client record uses a marker identity. |
 | `LOGICAL_TRANSACTION_DUPLICATE` | A logical transaction identity is reused. |
 | `ATTEMPT_DUPLICATE` | A committed attempt identity is reused. |
 | `MULTIPLE_COMMITTED_ATTEMPTS` | More than one attempt of one logical transaction committed. |
@@ -62,10 +62,7 @@ FINAL
 | `SESSION_DONE_MISMATCH` | Session counters/digest do not reconcile. |
 | `CLIENT_RECORD_AFTER_DONE` | A session publishes transaction evidence after `SessionDone`. |
 | `COMMIT_OUTCOME_AMBIGUOUS` | A commit call returned an unknown outcome. |
-| `GTID_BASELINE_INVALID` | GTID comparison was attempted without a valid connection-local baseline. |
-| `GTID_LOOKUP_FAILED` | Post-commit GTID correlation could not be obtained. |
-| `GTID_WRITE_CLASSIFICATION_CONFLICT` | Definite application mutation evidence contradicts an unchanged GTID. |
-| `GTID_WITHOUT_MODELED_WRITE` | A new client GTID has no CDC transaction containing modeled application writes. |
+| `MARKER_WRITE_FAILED` | The last-statement marker upsert failed; the attempt must roll back. |
 | `REDIS_PUBLICATION_FAILED` | A required client/status record was not acknowledged by Redis. |
 
 ### CDC evidence
@@ -79,6 +76,14 @@ FINAL
 | `CDC_EVENT_ORDINAL_INVALID` | Event ordinals repeat, regress, or contain a gap. |
 | `CDC_EVENT_COUNT_MISMATCH` | Observed rows disagree with `END.event_count` or table counts. |
 | `CDC_DUPLICATE_CONFLICT` | A stable CDC identity is replayed with different content. |
+| `MARKER_MISSING` | A post-load workload transaction has no marker row event. |
+| `MARKER_MULTIPLE` | A workload transaction contains more than one marker event. |
+| `MARKER_MALFORMED` | Marker session/transaction fields are absent or out of range. |
+| `MARKER_NOT_LAST` | The marker is not the final row event in its CDC transaction. |
+| `MARKER_BEFORE_IMAGE_MISSING` | A marker update lacks the complete previous marker value. |
+| `MARKER_CHAIN_MISMATCH` | A marker before-image disagrees with the previous committed marker for that session. |
+| `MARKER_DUPLICATE` | A run/session/transaction marker identity is reused. |
+| `UNMARKED_APPLICATION_TRANSACTION` | A post-load application transaction commits without exactly one marker. |
 | `CDC_APPLICATION_AFTER_END` | An application commit appears after `END_FENCE`. |
 | `CDC_ORDER_INVALID` | The source stream violates the backend CO contract. |
 
@@ -86,9 +91,9 @@ FINAL
 
 | Code | Meaning |
 |---|---|
-| `CLIENT_HALF_MISSING` | A workload CDC slot has no client half at closure. |
-| `CDC_HALF_MISSING` | A client write record has no CDC half at closure. |
-| `CORRELATION_MISMATCH` | Joined halves disagree on run/backend/source identity. |
+| `CLIENT_HALF_MISSING` | A workload marker slot has no client half at closure. |
+| `CDC_HALF_MISSING` | A successful client transaction has no marker-bearing CDC half at closure. |
+| `CORRELATION_MISMATCH` | Joined halves disagree on run/session/transaction marker identity. |
 | `CANONICAL_ENCODING_FAILED` | A key/value cannot be represented by the frozen codec. |
 | `PRIMARY_KEY_IMAGE_INCOMPLETE` | A key-changing CDC event lacks a complete before/after key. |
 | `COMMIT_SEQUENCE_INVALID` | Dense checker sequence assignment is inconsistent. |

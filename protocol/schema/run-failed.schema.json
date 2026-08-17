@@ -16,7 +16,7 @@
         "ATTEMPT_BODY",
         "ROLLBACK",
         "COMMIT",
-        "GTID_LOOKUP",
+        "MARKER_WRITE",
         "REDIS_PUBLICATION",
         "SESSION_SHUTDOWN",
         "COORDINATOR"

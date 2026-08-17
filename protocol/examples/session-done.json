@@ -4,13 +4,12 @@
   "session_id": "ycsb/worker/1",
   "final_session_seq": 3,
   "logical_transactions_started": 3,
-  "successful_transactions": 3,
-  "terminal_aborted_transactions": 0,
+  "successful_transactions": 2,
+  "terminal_aborted_transactions": 1,
   "physical_attempts_started": 3,
-  "definitively_aborted_attempts": 0,
-  "published_write_transactions": 2,
-  "ignored_successful_no_write_transactions": 1,
+  "definitively_aborted_attempts": 1,
+  "published_transactions": 2,
   "retry_attempts": 0,
   "ambiguous_attempts": 0,
-  "rolling_correlation_digest": "f9c4629a6758d0ee002aa29c46a47d952eebab35a2dd9397a4f44d1cc1961522"
+  "rolling_correlation_digest": "69d3511b963663dd9215557af81380e3b6c779cf97505da7204f2e510a5d5dea"
 }

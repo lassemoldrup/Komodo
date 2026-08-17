@@ -69,16 +69,13 @@
       "additionalProperties": false,
       "required": [
         "run_id",
-        "backend_source_id",
-        "source_transaction_id"
+        "session_id",
+        "txn_id"
       ],
       "properties": {
         "run_id": { "$ref": "#/$defs/uuid" },
-        "backend_source_id": { "$ref": "#/$defs/nonEmptyString" },
-        "source_transaction_id": {
-          "type": "string",
-          "pattern": "^(?:0|[1-9][0-9]*)-(?:0|[1-9][0-9]*)-[1-9][0-9]*$"
-        }
+        "session_id": { "$ref": "#/$defs/sessionId" },
+        "txn_id": { "$ref": "#/$defs/positiveUint64" }
       }
     },
     "read": {

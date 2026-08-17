@@ -38,6 +38,11 @@ blackbox:status:<run_id>         monitor status and final result
 Every black-box stream entry has exactly one field named `payload`. Its value is
 one complete UTF-8 JSON object. A record is never split across Redis entries.
 
+Every successful supported workload transaction is correlated by
+`(run_id, session_id, txn_id)`. The database marker row stores only
+`(session_id, txn_id)`; the active fenced run supplies `run_id`. Connector/server
+transaction identifiers are not part of the join contract.
+
 The `cdc` stream retains Debezium's existing key/envelope field layout and is
 validated by the CDC assembler rather than these client-record schemas.
 

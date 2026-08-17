@@ -29,14 +29,13 @@ GOLDEN_ROOT = PROTOCOL_ROOT / "golden"
 
 READ_DOMAIN = b"db-monitoring/read-digest\x00"
 BOOTSTRAP_DOMAIN = b"db-monitoring/bootstrap-state-digest\x00"
-CORRELATION_SEED_DOMAIN = b"db-monitoring/session-correlation-seed\x00"
-CORRELATION_STEP_DOMAIN = b"db-monitoring/session-correlation-step\x00"
+CORRELATION_SEED_DOMAIN = b"db-monitoring/session-marker-seed\x00"
+CORRELATION_STEP_DOMAIN = b"db-monitoring/session-marker-step\x00"
 
 PRESENT = 0x01
 ABSENT = 0x02
 SNAPSHOT = 0x01
 LOCAL = 0x02
-MARIADB_GTID = 0x01
 SAFE_JSON_INTEGER = 9_007_199_254_740_991
 
 
@@ -164,34 +163,18 @@ def bootstrap_digest_preimage(rows: list[dict[str, Any]]) -> bytes:
     return BOOTSTRAP_DOMAIN + u64(len(decoded_rows)) + body
 
 
-GTID_PATTERN = re.compile(r"(0|[1-9][0-9]*)-(0|[1-9][0-9]*)-([1-9][0-9]*)\Z")
-
-
-def parse_gtid(value: str) -> tuple[int, int, int]:
-    match = GTID_PATTERN.fullmatch(value)
-    require(match is not None, f"noncanonical MariaDB GTID: {value}")
-    domain, server, sequence = (int(part) for part in match.groups())
-    require(domain <= 0xFFFFFFFF, f"GTID domain out of range: {domain}")
-    require(server <= 0xFFFFFFFF, f"GTID server out of range: {server}")
-    require(sequence <= 0xFFFFFFFFFFFFFFFF, f"GTID sequence out of range: {sequence}")
-    return domain, server, sequence
-
-
-def correlation_seed(run_id: str) -> tuple[bytes, bytes]:
-    preimage = CORRELATION_SEED_DOMAIN + uuid.UUID(run_id).bytes
+def correlation_seed(run_id: str, session_id: str) -> tuple[bytes, bytes]:
+    preimage = (
+        CORRELATION_SEED_DOMAIN
+        + uuid.UUID(run_id).bytes
+        + lp(session_id.encode("utf-8", "strict"))
+    )
     return preimage, hashlib.sha256(preimage).digest()
 
 
-def correlation_entry(session_seq: int, backend_source_id: str, gtid: str) -> bytes:
-    domain, server, sequence = parse_gtid(gtid)
-    return (
-        u64(session_seq)
-        + u8(MARIADB_GTID)
-        + lp(backend_source_id.encode("utf-8", "strict"))
-        + u32(domain)
-        + u32(server)
-        + u64(sequence)
-    )
+def correlation_entry(session_seq: int, txn_id: int) -> bytes:
+    require(1 <= txn_id <= SAFE_JSON_INTEGER, f"txn_id out of range: {txn_id}")
+    return u64(session_seq) + u64(txn_id)
 
 
 def correlation_step(previous: bytes, entry: bytes) -> bytes:
@@ -273,14 +256,12 @@ def verify_golden_vectors() -> None:
 
     correlations = load_json(GOLDEN_ROOT / "session_correlation_digests.json")
     for vector in correlations["vectors"]:
-        seed_preimage, digest = correlation_seed(vector["run_id"])
+        seed_preimage, digest = correlation_seed(vector["run_id"], vector["session_id"])
         require(seed_preimage.hex() == vector["seed_preimage_hex"], f"correlation {vector['name']}: seed")
         require(digest.hex() == vector["seed_digest"], f"correlation {vector['name']}: D0")
         require(len(vector["entries"]) == len(vector["steps"]), "correlation step count mismatch")
         for entry_spec, step_spec in zip(vector["entries"], vector["steps"], strict=True):
-            entry = correlation_entry(
-                entry_spec["session_seq"], vector["backend_source_id"], entry_spec["gtid"]
-            )
+            entry = correlation_entry(entry_spec["session_seq"], entry_spec["txn_id"])
             require(entry.hex() == step_spec["entry_hex"], "correlation entry hex mismatch")
             require(canonical_base64(entry) == step_spec["entry_base64"], "correlation entry Base64 mismatch")
             digest = correlation_step(digest, entry)
@@ -293,6 +274,12 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
     require(len(manifests) == 1, "examples require exactly one RunManifest")
     manifest = manifests[0]
     run_id = manifest["run_id"]
+    application_tables = set(manifest["application_table_allowlist"])
+    control_tables = set(manifest["control_table_allowlist"])
+    marker_table = manifest["transaction_marker_table"]
+    require(marker_table not in application_tables, "marker table is in application allowlist")
+    require(marker_table not in control_tables, "marker table is in control allowlist")
+    require(not application_tables.intersection(control_tables), "application/control tables overlap")
 
     for kind, kind_records in records.items():
         for record in kind_records:
@@ -301,7 +288,7 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
     clients = records["client_txn"]
     logical_ids: set[str] = set()
     attempt_ids: set[str] = set()
-    correlations: set[tuple[str, str, str]] = set()
+    correlations: set[tuple[str, str, int]] = set()
     clients_by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
     expected_sessions = set(manifest["expected_session_ids"])
 
@@ -312,15 +299,12 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
         require(sha256_hex(preimage) == client["read_digest"], "ClientTxn read digest mismatch")
         correlation = client["correlation_id"]
         require(correlation["run_id"] == run_id, "nested correlation run_id mismatch")
-        require(
-            correlation["backend_source_id"] == manifest["backend_source_id"],
-            "nested backend_source_id mismatch",
-        )
-        parse_gtid(correlation["source_transaction_id"])
+        require(correlation["session_id"] == client["session_id"], "nested session_id mismatch")
+        correlation_entry(client["session_seq"], correlation["txn_id"])
         correlation_key = (
             correlation["run_id"],
-            correlation["backend_source_id"],
-            correlation["source_transaction_id"],
+            correlation["session_id"],
+            correlation["txn_id"],
         )
         require(correlation_key not in correlations, "duplicate correlation ID")
         require(client["logical_txn_id"] not in logical_ids, "duplicate logical transaction ID")
@@ -340,9 +324,7 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
             "logical SessionDone arithmetic mismatch",
         )
         require(
-            done["successful_transactions"]
-            == done["published_write_transactions"]
-            + done["ignored_successful_no_write_transactions"],
+            done["successful_transactions"] == done["published_transactions"],
             "successful SessionDone arithmetic mismatch",
         )
         require(
@@ -359,20 +341,22 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
         )
         require(done["ambiguous_attempts"] == 0, "clean SessionDone has ambiguous attempt")
 
-        _, digest = correlation_seed(run_id)
+        _, digest = correlation_seed(run_id, done["session_id"])
         session_clients = sorted(clients_by_session[done["session_id"]], key=lambda item: item["session_seq"])
         sequences = [client["session_seq"] for client in session_clients]
         require(sequences == sorted(set(sequences)), "published session sequence is not increasing")
+        txn_ids = [client["correlation_id"]["txn_id"] for client in session_clients]
+        require(txn_ids == sorted(set(txn_ids)), "marker txn_id is not increasing")
+        require(
+            not txn_ids or txn_ids[-1] <= done["physical_attempts_started"],
+            "marker txn_id exceeds physical attempt count",
+        )
         for client in session_clients:
             digest = correlation_step(
                 digest,
-                correlation_entry(
-                    client["session_seq"],
-                    client["correlation_id"]["backend_source_id"],
-                    client["correlation_id"]["source_transaction_id"],
-                ),
+                correlation_entry(client["session_seq"], client["correlation_id"]["txn_id"]),
             )
-        require(len(session_clients) == done["published_write_transactions"], "published count mismatch")
+        require(len(session_clients) == done["published_transactions"], "published count mismatch")
         require(digest.hex() == done["rolling_correlation_digest"], "rolling correlation digest mismatch")
 
     bootstrap = records["bootstrap_manifest"]

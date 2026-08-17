@@ -13,8 +13,7 @@
     "terminal_aborted_transactions",
     "physical_attempts_started",
     "definitively_aborted_attempts",
-    "published_write_transactions",
-    "ignored_successful_no_write_transactions",
+    "published_transactions",
     "retry_attempts",
     "ambiguous_attempts",
     "rolling_correlation_digest"
@@ -29,8 +28,7 @@
     "terminal_aborted_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
     "physical_attempts_started": { "$ref": "common.schema.json#/$defs/uint64" },
     "definitively_aborted_attempts": { "$ref": "common.schema.json#/$defs/uint64" },
-    "published_write_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
-    "ignored_successful_no_write_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+    "published_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
     "retry_attempts": { "$ref": "common.schema.json#/$defs/uint64" },
     "ambiguous_attempts": { "const": 0 },
     "rolling_correlation_digest": { "$ref": "common.schema.json#/$defs/sha256" }

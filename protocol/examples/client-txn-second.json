@@ -6,11 +6,11 @@
   "logical_txn_id": "33333333-3333-4333-8333-333333333333",
   "attempt_id": "44444444-4444-4444-8444-444444444444",
   "txn_type": "ycsb_update",
-  "correlation_kind": "mariadb_gtid",
+  "correlation_kind": "session_txn",
   "correlation_id": {
     "run_id": "00112233-4455-6677-8899-aabbccddeeff",
-    "backend_source_id": "mariadb-main",
-    "source_transaction_id": "0-1-19"
+    "session_id": "ycsb/worker/1",
+    "txn_id": 3
   },
   "read_count": 0,
   "read_digest": "3f251669e36904bc1a3bc472991c9ff89f7f23f6b98bad9dd33f0e66884a06ce",

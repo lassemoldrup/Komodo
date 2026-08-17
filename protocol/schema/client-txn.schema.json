@@ -28,12 +28,13 @@
       "type": "string",
       "enum": [
         "ycsb_insert",
+        "ycsb_read",
         "ycsb_update",
         "ycsb_delete",
         "si_fractured_read_probe"
       ]
     },
-    "correlation_kind": { "const": "mariadb_gtid" },
+    "correlation_kind": { "const": "session_txn" },
     "correlation_id": { "$ref": "common.schema.json#/$defs/correlationId" },
     "read_count": { "$ref": "common.schema.json#/$defs/uint32" },
     "read_digest": { "$ref": "common.schema.json#/$defs/sha256" },

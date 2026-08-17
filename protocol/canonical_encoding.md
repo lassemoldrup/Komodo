@@ -235,38 +235,34 @@ canonical_state_digest =
 944dd6136dbad7047e31af3b6419eb6a632d4dea64bec8159e93307163810bc2
 ```
 
-## Rolling session correlation digest
+## Rolling session-marker digest
 
-Parse a canonical MariaDB GTID into `(domain_id, server_id, sequence)`. The JSON
-spelling is `domain-server-sequence`, with no leading zeroes except the number
-zero. Domain/server fit `U32`; sequence is a nonzero `U64`.
+The join key is `(run_id, session_id, txn_id)`. `txn_id` is a fresh positive
+monotonic physical-attempt counter owned by one session. It is stored in the
+session's marker row as a signed database `BIGINT` and is restricted to the
+JSON-safe positive range by the protocol schema.
 
 ```text
-MARIADB_GTID = 01
+MARKER_SEED_DOMAIN =
+    ASCII("db-monitoring/session-marker-seed") || 00
 
-CORRELATION_SEED_DOMAIN =
-    ASCII("db-monitoring/session-correlation-seed") || 00
-
-CORRELATION_STEP_DOMAIN =
-    ASCII("db-monitoring/session-correlation-step") || 00
+MARKER_STEP_DOMAIN =
+    ASCII("db-monitoring/session-marker-step") || 00
 
 D0 = SHA256(
-    CORRELATION_SEED_DOMAIN
+    MARKER_SEED_DOMAIN
  || UUID_BYTES(run_id)
+ || LP(UTF8(session_id))
 )
 
-CorrelationEntry =
+MarkerEntry =
     U64_BE(session_seq)
- || U8(MARIADB_GTID)
- || LP(UTF8(backend_source_id))
- || U32_BE(gtid.domain_id)
- || U32_BE(gtid.server_id)
- || U64_BE(gtid.sequence)
+ || U64_BE(txn_id)
 
 Di = SHA256(
-    CORRELATION_STEP_DOMAIN
+    MARKER_STEP_DOMAIN
  || D(i - 1)
- || CorrelationEntry_i
+ || MarkerEntry_i
 )
 
 rolling_correlation_digest = lowercase_hex(Dn)
@@ -274,29 +270,32 @@ rolling_correlation_digest = lowercase_hex(Dn)
 
 Update the client chain only after the corresponding `ClientTxn` `XADD` is
 acknowledged. The monitor recomputes it from accepted records in increasing
-`session_seq`. Gaps are legal. Chain steps equal
-`published_write_transactions`.
+`session_seq`. Gaps are legal only for terminally aborted logical transactions.
+Chain steps equal `published_transactions`.
 
 Golden chain:
 
 ```text
-run_id            = 00112233-4455-6677-8899-aabbccddeeff
-backend_source_id = mariadb-main
+run_id     = 00112233-4455-6677-8899-aabbccddeeff
+session_id = ycsb/worker/1
 
 records:
-  session_seq 1, GTID 0-1-17
-  session_seq 3, GTID 0-1-19
+  session_seq 1, txn_id 1
+  session_seq 3, txn_id 3
 
-D0 = 131c321cfe8be47e97969aeaf5e848ec807a081218905a49e26d736a885a6ea6
+seed preimage hex =
+64622d6d6f6e69746f72696e672f73657373696f6e2d6d61726b65722d736565640000112233445566778899aabbccddeeff0000000d796373622f776f726b65722f31
+
+D0 = 20c58f889d34c7f08ec308d2737b9bccb498868e19773cec3b2b696f43a12170
 
 entry 1 hex =
-0000000000000001010000000c6d6172696164622d6d61696e00000000000000010000000000000011
+00000000000000010000000000000001
 
-D1 = 037c67d980a8ff16adf29649df4ee427d8f6740d17d05e99cca6122b17d8984b
+D1 = c0e8ea544d438285925a25fcdf53dee3e673b00f8887526e09871d5fb69a4029
 
 entry 2 hex =
-0000000000000003010000000c6d6172696164622d6d61696e00000000000000010000000000000013
+00000000000000030000000000000003
 
 D2 / rolling_correlation_digest =
-f9c4629a6758d0ee002aa29c46a47d952eebab35a2dd9397a4f44d1cc1961522
+69d3511b963663dd9215557af81380e3b6c779cf97505da7204f2e510a5d5dea
 ```

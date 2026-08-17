@@ -10,40 +10,57 @@ their golden tests in the same branch.
 ## Scope and result
 
 - MariaDB is the first backend.
-- The checked population contains committed transactions with at least one
-  captured application CDC write.
-- Successful read-only and successful no-application-write transactions are
-  outside the checked population.
-- `PASS` therefore means write-projected SOWW, not full SI.
+- Every successful supported workload transaction writes one `session_txn`
+  marker and is therefore CDC-visible, including read-only and
+  no-application-write transactions.
+- The marker write is filtered from the normalized application write set.
+- `PASS` means the complete supported point-transaction history satisfies SOWW;
+  it is not a predicate/phantom or arbitrary-SQL SI claim.
 - V0 accepts non-locking point reads only. Scans, predicates, phantom claims,
   `SELECT ... FOR UPDATE`, and unclassified read-own-write behavior are rejected.
+- The result describes the execution with marker instrumentation enabled. The
+  marker adds one per-session physical write to every workload transaction.
 
-## D1: MariaDB correlation uses GTID change
+## D1: All backends use the session marker
 
-Use the GTID returned by `@@session.last_gtid` on the same exclusive physical
-connection after an acknowledged commit. Do not add a marker write to MariaDB.
+Use one backend-independent join identity:
 
-The client tracks a per-connection baseline:
+```text
+(run_id, session_id, txn_id)
+```
 
-- changed GTID: publish one `ClientTxn` keyed by
-  `(run_id, backend_source_id, GTID)`;
-- unchanged GTID: count an intentionally omitted successful no-write
-  transaction;
-- failed GTID lookup: stop and invalidate the run;
-- exception from `commit()`: unknown outcome, stop and invalidate the run.
+Each session owns one row in `session_txn`. Each physical attempt increments a
+session-local dense attempt counter starting at one; that counter is `txn_id`.
+The attempt writes it as the last statement before `commit()` and retains the
+same logical `session_seq` across retries. Consequently, the highest allocated
+`txn_id` equals `physical_attempts_started`, while committed marker IDs may have
+gaps caused by aborted attempts.
 
-Procedure type and write intent are never used as proof of CDC membership.
+The marker requirements are:
 
-Rationale: this preserves the measured MariaDB workload while still providing
-an authoritative join key for physical writes. The no-op/update behavior must be
-qualified by integration tests.
+- exactly one marker in every successful workload transaction;
+- no marker in a definitively aborted transaction;
+- marker is the final row event in the transaction;
+- first committed marker for a session has a null before-image;
+- every later marker's `before.txn_id` equals the previous committed marker's
+  `after.txn_id` for that session;
+- `txn_id` changes on every physical attempt, so a committed retry cannot become
+  a no-op marker update;
+- marker/fence writes never enter the application write set.
 
-## D2: Omitted transactions use aggregate session accounting
+MariaDB uses `INSERT ... ON DUPLICATE KEY UPDATE`; YugabyteDB uses
+`INSERT ... ON CONFLICT DO UPDATE`; Oracle uses `MERGE`. Connector/server
+transaction identifiers are ignored for correlation.
 
-Do not publish a per-transaction record for successful read-only/no-write
-transactions in V0. Allocate `session_seq` for every logical transaction, allow
-gaps among published write transactions, and reconcile aggregate omitted counts
-through `SessionDone`.
+Rationale: the same client/monitor contract works on every backend, every
+successful transaction is observable in CDC order, and the marker before-image
+provides an independent per-session loss check.
+
+## D2: Every successful transaction is published
+
+BenchBase publishes one `ClientTxn` after every acknowledged successful commit,
+including marker-only physical transactions whose normalized application write
+set is empty. There is no ignored-success counter.
 
 `SessionDone` uses unambiguous logical-transaction and physical-attempt counters:
 
@@ -55,8 +72,7 @@ terminal_aborted_transactions
 physical_attempts_started
 definitively_aborted_attempts
 retry_attempts
-published_write_transactions
-ignored_successful_no_write_transactions
+published_transactions
 ambiguous_attempts
 rolling_correlation_digest
 ```
@@ -70,8 +86,7 @@ logical_transactions_started
     == successful_transactions + terminal_aborted_transactions
 
 successful_transactions
-    == published_write_transactions
-     + ignored_successful_no_write_transactions
+    == published_transactions
 
 physical_attempts_started
     == successful_transactions
@@ -84,9 +99,10 @@ retry_attempts
 ambiguous_attempts == 0
 ```
 
-Rationale: exact omitted positions do not affect the explicitly declared
-write-transaction projection. This avoids one Redis publication for every
-read-only transaction while retaining run-level accounting.
+Published `session_seq` values may have gaps only for terminally aborted logical
+transactions. The rolling correlation digest covers accepted marker identities
+in increasing `session_seq`; its number of steps equals
+`published_transactions`.
 
 ## D3: The coordinator is external
 

@@ -12,6 +12,7 @@
     "benchmark",
     "expected_session_ids",
     "application_table_allowlist",
+    "transaction_marker_table",
     "control_table_allowlist",
     "result_scope"
   ],
@@ -37,12 +38,15 @@
       "uniqueItems": true,
       "items": { "$ref": "common.schema.json#/$defs/tableName" }
     },
+    "transaction_marker_table": {
+      "$ref": "common.schema.json#/$defs/tableName"
+    },
     "control_table_allowlist": {
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
       "items": { "$ref": "common.schema.json#/$defs/tableName" }
     },
-    "result_scope": { "const": "write_projected_soww" }
+    "result_scope": { "const": "point_transaction_soww" }
   }
 }

@@ -85,6 +85,13 @@ the transaction, so the marker travels inside that transaction's own change set
 and arrives after the workload writes. `session_txn` starts empty; sessions
 create their own row on first use.
 
+For the black-box framework, `txn_id` is the dense session-local physical-attempt
+counter starting at one. A logical retry keeps its logical/session sequence but
+receives a new attempt ID and `txn_id`. Aborted attempts may therefore create
+gaps between committed marker IDs. The run-scoped join identity is
+`(run_id, session_id, txn_id)`; `run_id` comes from the one-active-run fenced
+lifecycle and is not stored in the marker row.
+
 No isolation statement is issued: all three backends default to Snapshot
 Isolation server-side. Only the upsert dialect differs.
 
@@ -116,12 +123,21 @@ COMMIT;
 The marker write and the workload writes must be **atomic**: a transaction that
 commits its workload without a marker is uncorrelatable. On Oracle this needs
 `WHENEVER SQLERROR EXIT ROLLBACK` — sqlplus otherwise continues past a failed
-marker and still runs `COMMIT`. `scripts/txn.sh` is the reference
-implementation for all three.
+marker and still runs `COMMIT`. `scripts/txn.sh` demonstrates the upsert dialect
+for all three; its timestamp default is not a valid
+framework allocator. BenchBase must use the dense per-session attempt counter
+defined above (manual concurrent tests should set `TXN_ID` explicitly).
 
 Because the before-image carries the previous `txn_id`, a per-session chain
 check comes for free: if `prev` is not the last `txn_id` you saw for that
 session, a transaction went missing.
+
+The monitor waits for the enclosing Debezium `END`, requires exactly one marker
+as the final row event of every post-load workload transaction, validates this
+before-image chain, and removes the marker row from the normalized application
+write set. A marker-only physical transaction is still joined and checked with
+zero application writes, so successful read-only/no-application-write workload
+transactions remain in scope.
 
 Conflicts abort — `ER_CHECKREAD` (MariaDB), `could not serialize access`
 (YugabyteDB), `ORA-08177` (Oracle) — so the client needs a retry path. Aborted
@@ -146,7 +162,8 @@ while (true) {
 }
 ```
 
-Trim consumed history with `XTRIM cdc MINID <id>` to keep memory flat.
+Do not trim `cdc`, client, or status streams during an audited run. Restart
+recovery, coordinated checkpoints, and safe trimming are later features.
 
 ## Constraints
 
@@ -243,14 +260,18 @@ oracle/startdb.d/                         # ARCHIVELOG, suppl. logging, user, sc
 debezium/application*.properties          # one per backend
 debezium/Dockerfile.yugabyte              # YB connector on a Java 17 base
 scripts/lib.sh                            # backend detection, shared SQL helpers
+scripts/e2e.sh                            # sole MariaDB lifecycle coordinator
+scripts/blackbox_lifecycle.sh             # fences, Redis/status, scan helpers
+scripts/blackbox_record.py                # manifests and bootstrap digest
 scripts/txn.sh                            # client protocol reference, all backends
 scripts/stream.sh                         # read/follow, handles all envelopes
 scripts/bench.sh, sql.sh, status.sh
 ```
 
-`registers` is a placeholder workload table in all three backends — a bank of
-integer registers, the usual write-skew testbed. Replace it with your schema and
-update the connector's table include list.
+The audited MariaDB path uses an initially empty `benchbase.usertable`,
+`benchbase.checker_run_fence`, and `benchbase.session_txn`, all created before
+CDC starts. The `registers` table remains the exploratory workload table for the
+other backend profiles.
 
 ## Credentials
 

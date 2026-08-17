@@ -8,9 +8,8 @@
   "terminal_aborted_transactions": 0,
   "physical_attempts_started": 0,
   "definitively_aborted_attempts": 0,
-  "published_write_transactions": 0,
-  "ignored_successful_no_write_transactions": 0,
+  "published_transactions": 0,
   "retry_attempts": 0,
   "ambiguous_attempts": 0,
-  "rolling_correlation_digest": "131c321cfe8be47e97969aeaf5e848ec807a081218905a49e26d736a885a6ea6"
+  "rolling_correlation_digest": "7bff30ecd50b94ad4bbe9d5984d9e526bbb261716561d2ea9a72af52c4b506a8"
 }
