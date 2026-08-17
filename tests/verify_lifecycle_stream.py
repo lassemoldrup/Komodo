@@ -8,11 +8,48 @@ import json
 import re
 import sys
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 STREAM_ID = re.compile(r"(0|[1-9][0-9]*)-(0|[1-9][0-9]*)\Z")
+CANONICAL_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+SCHEMA_SOURCE_FIELDS = {
+    "version",
+    "connector",
+    "name",
+    "ts_ms",
+    "snapshot",
+    "db",
+    "sequence",
+    "ts_us",
+    "ts_ns",
+    "table",
+    "server_id",
+    "gtid",
+    "file",
+    "pos",
+    "row",
+    "thread",
+    "query",
+}
+CONFIGURED_TABLE_IDS = {
+    '"benchbase"."usertable"',
+    '"benchbase"."checker_run_fence"',
+    '"benchbase"."session_txn"',
+}
+
+
+@dataclass
+class StartupSchemaState:
+    stage: str = "server_settings"
+    dropped_table_ids: list[str] = field(default_factory=list)
+    create_index: int = 0
+
+    @property
+    def finished(self) -> bool:
+        return self.stage == "complete"
 
 
 class StreamError(ValueError):
@@ -41,13 +78,244 @@ def load_json_text(value: str, label: str) -> Any:
 
 
 def integer(value: Any, label: str) -> int:
-    require(not isinstance(value, bool), f"{label} is boolean")
-    try:
-        converted = int(value)
-    except (TypeError, ValueError) as error:
-        raise StreamError(f"{label} is not an integer: {value!r}") from error
-    require(str(converted) == str(value), f"{label} is not canonically spelled: {value!r}")
+    require(type(value) is int, f"{label} is not a JSON integer: {value!r}")
+    return value
+
+
+def uint64(value: Any, label: str) -> int:
+    converted = integer(value, label)
+    require(0 <= converted <= (1 << 64) - 1, f"{label} is outside uint64")
     return converted
+
+
+def nullable_string(value: Any, label: str) -> None:
+    require(value is None or isinstance(value, str), f"{label} is not null/string")
+
+
+def verify_schema_column(column: Any) -> None:
+    require(isinstance(column, dict), "startup schema column is not an object")
+    require(
+        set(column)
+        == {
+            "name",
+            "jdbcType",
+            "nativeType",
+            "typeName",
+            "typeExpression",
+            "charsetName",
+            "length",
+            "scale",
+            "position",
+            "optional",
+            "autoIncremented",
+            "generated",
+            "comment",
+            "defaultValueExpression",
+            "enumValues",
+        },
+        "startup schema column shape is invalid",
+    )
+    require(isinstance(column["name"], str) and column["name"], "schema column name is empty")
+    integer(column["jdbcType"], "schema column jdbcType")
+    nullable_string(column["nativeType"], "schema column nativeType")
+    require(isinstance(column["typeName"], str), "schema column typeName is not a string")
+    require(
+        isinstance(column["typeExpression"], str),
+        "schema column typeExpression is not a string",
+    )
+    nullable_string(column["charsetName"], "schema column charsetName")
+    for name in ("length", "scale"):
+        require(
+            column[name] is None or type(column[name]) is int,
+            f"schema column {name} is not null/integer",
+        )
+    require(
+        1 <= integer(column["position"], "schema column position") <= (1 << 32) - 1,
+        "schema column position is outside uint32",
+    )
+    for name in ("optional", "autoIncremented", "generated"):
+        require(type(column[name]) is bool, f"schema column {name} is not boolean")
+    nullable_string(column["comment"], "schema column comment")
+    nullable_string(
+        column["defaultValueExpression"], "schema column defaultValueExpression"
+    )
+    enum_values = column["enumValues"]
+    require(
+        enum_values is None
+        or (isinstance(enum_values, list) and all(isinstance(item, str) for item in enum_values)),
+        "schema column enumValues is malformed",
+    )
+
+
+def verify_schema_table(table: Any) -> None:
+    require(isinstance(table, dict), "startup CREATE lacks a table")
+    require(
+        set(table) == {"defaultCharsetName", "primaryKeyColumnNames", "columns", "comment"},
+        "startup schema table shape is invalid",
+    )
+    nullable_string(table["defaultCharsetName"], "schema table defaultCharsetName")
+    primary_keys = table["primaryKeyColumnNames"]
+    columns = table["columns"]
+    require(
+        isinstance(primary_keys, list) and all(isinstance(item, str) for item in primary_keys),
+        "schema table primaryKeyColumnNames is malformed",
+    )
+    require(isinstance(columns, list) and columns, "schema table columns is empty/malformed")
+    for column in columns:
+        verify_schema_column(column)
+    nullable_string(table["comment"], "schema table comment")
+
+
+def verify_startup_schema_snapshot(
+    key: Any,
+    envelope: dict[str, Any],
+    backend_source_id: str,
+    state: StartupSchemaState,
+) -> None:
+    require(not state.finished, "schema envelope follows the snapshot last record")
+    require(
+        isinstance(key, dict) and set(key) == {"databaseName"},
+        "startup schema key shape is invalid",
+    )
+    require(
+        set(envelope)
+        == {"source", "ts_ms", "databaseName", "schemaName", "ddl", "tableChanges"},
+        "startup schema envelope shape is invalid",
+    )
+    database = envelope["databaseName"]
+    require(
+        isinstance(database, str) and database in {"", "benchbase"},
+        "startup schema database is invalid",
+    )
+    require(key["databaseName"] == database, "startup schema key/database mismatch")
+    require(envelope["schemaName"] is None, "startup schema schemaName is non-null")
+    require(isinstance(envelope["ddl"], str) and envelope["ddl"], "startup DDL is empty")
+    uint64(envelope["ts_ms"], "startup schema ts_ms")
+    changes = envelope["tableChanges"]
+    require(isinstance(changes, list), "startup schema tableChanges is not an array")
+
+    source = envelope["source"]
+    require(isinstance(source, dict), "startup schema source is not an object")
+    require(set(source) == SCHEMA_SOURCE_FIELDS, "startup schema source shape is invalid")
+    require(source["version"] == "3.6.1.Final", "startup schema version mismatch")
+    require(source["connector"] == "mariadb", "startup schema connector mismatch")
+    require(source["name"] == backend_source_id, "startup schema source identity mismatch")
+    require(
+        isinstance(source["snapshot"], str)
+        and source["snapshot"] in {"true", "last"},
+        "non-snapshot DDL was observed",
+    )
+    require(source["db"] == database, "startup schema source database mismatch")
+    require(uint64(source["server_id"], "startup schema server_id") == 0, "server_id is not zero")
+    require(
+        all(source[field] is None for field in ("sequence", "gtid", "thread", "query")),
+        "startup schema nullable source metadata is non-null",
+    )
+    require(isinstance(source["file"], str) and source["file"], "startup schema file is empty")
+    for field in ("ts_ms", "ts_us", "ts_ns", "pos", "row"):
+        uint64(source[field], f"startup schema source {field}")
+    table = source["table"]
+    require(
+        table is None
+        or (isinstance(table, str) and CANONICAL_IDENTIFIER.fullmatch(table) is not None),
+        "startup schema source table is invalid",
+    )
+
+    ddl = envelope["ddl"]
+    snapshot = source["snapshot"]
+    if not changes:
+        require(table is None, "startup database schema record unexpectedly names a table")
+        if state.stage == "server_settings":
+            require(database == "" and ddl.startswith("SET "), "server-settings record malformed")
+            require(snapshot == "true", "server-settings snapshot marker is invalid")
+            state.stage = "drop_tables"
+            return
+        if state.stage == "drop_tables":
+            require(
+                database == "benchbase"
+                and ddl.startswith("DROP DATABASE ")
+                and state.dropped_table_ids,
+                "DROP DATABASE record is out of order",
+            )
+            require(snapshot == "true", "DROP DATABASE snapshot marker is invalid")
+            require(
+                CONFIGURED_TABLE_IDS <= set(state.dropped_table_ids),
+                "startup schema snapshot is missing a configured table",
+            )
+            state.stage = "create_database"
+            return
+        if state.stage == "create_database":
+            require(
+                database == "benchbase" and ddl.startswith("CREATE DATABASE "),
+                "CREATE DATABASE record is out of order",
+            )
+            require(snapshot == "true", "CREATE DATABASE snapshot marker is invalid")
+            state.stage = "use_database"
+            return
+        if state.stage == "use_database":
+            require(
+                database == "benchbase" and ddl.startswith("USE "),
+                "USE DATABASE record is out of order",
+            )
+            require(snapshot == "true", "USE DATABASE snapshot marker is invalid")
+            state.stage = "create_tables"
+            return
+        raise StreamError("empty startup schema record is out of order")
+
+    require(
+        len(changes) == 1 and database == "benchbase" and table is not None,
+        "startup table schema record is malformed",
+    )
+    change = changes[0]
+    require(
+        isinstance(change, dict) and set(change) == {"type", "id", "table"},
+        "startup schema table change shape is invalid",
+    )
+    identifier = change["id"]
+    require(isinstance(identifier, str) and identifier, "startup schema change id is empty")
+    require(
+        identifier == f'"benchbase"."{table}"',
+        "startup schema table-change/source identity mismatch",
+    )
+    if state.stage == "drop_tables":
+        require(
+            change["type"] == "DROP"
+            and change["table"] is None
+            and ddl.startswith("DROP TABLE "),
+            "startup DROP TABLE record is malformed",
+        )
+        require(snapshot == "true", "DROP TABLE snapshot marker is invalid")
+        require(
+            not state.dropped_table_ids or identifier > state.dropped_table_ids[-1],
+            "startup DROP TABLE identifiers are duplicated or reordered",
+        )
+        state.dropped_table_ids.append(identifier)
+        return
+
+    require(
+        state.stage == "create_tables"
+        and change["type"] == "CREATE"
+        and ddl.startswith("CREATE TABLE "),
+        "startup CREATE TABLE record is out of order",
+    )
+    verify_schema_table(change["table"])
+    require(
+        state.create_index < len(state.dropped_table_ids)
+        and identifier == state.dropped_table_ids[state.create_index],
+        "startup CREATE TABLE identifiers do not match ordered drops",
+    )
+    final_table = state.create_index + 1 == len(state.dropped_table_ids)
+    require(
+        snapshot == ("last" if final_table else "true"),
+        "startup CREATE TABLE snapshot marker is out of order",
+    )
+    state.create_index += 1
+    if final_table:
+        require(
+            CONFIGURED_TABLE_IDS <= set(state.dropped_table_ids),
+            "startup schema snapshot lost a configured table",
+        )
+        state.stage = "complete"
 
 
 def transaction_summary(
@@ -116,6 +384,7 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
     completed: list[dict[str, Any]] = []
     marker_state: dict[str, int] = {}
     previous_stream_id: tuple[int, int] | None = None
+    startup_schema = StartupSchemaState()
 
     for entry_index, entry in enumerate(entries):
         require(isinstance(entry, list) and len(entry) == 2, f"entry {entry_index} shape is invalid")
@@ -132,11 +401,20 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
             isinstance(fields, list) and len(fields) == 2,
             f"entry {stream_id} must contain exactly one Debezium key/envelope pair",
         )
-        load_json_text(fields[0], f"entry {stream_id} Debezium key")
+        key = load_json_text(fields[0], f"entry {stream_id} Debezium key")
         envelope = load_json_text(fields[1], f"entry {stream_id} envelope")
         require(isinstance(envelope, dict), f"entry {stream_id} envelope is not an object")
 
+        if "ddl" in envelope:
+            require(active is None and not completed, "DDL appears after transactional evidence")
+            verify_startup_schema_snapshot(key, envelope, backend_source_id, startup_schema)
+            continue
+
         if "status" in envelope:
+            require(
+                startup_schema.finished,
+                "transactional evidence begins without a complete startup schema snapshot",
+            )
             status = envelope["status"]
             transaction_id = envelope.get("id")
             require(isinstance(transaction_id, str) and transaction_id, "metadata lacks transaction id")
@@ -188,6 +466,10 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
         )
 
     require(active is None, "stream ends with an incomplete transaction")
+    require(
+        startup_schema.finished,
+        "stream ends without a complete startup schema snapshot",
+    )
     shape = [
         (item["classification"], item.get("phase"))
         for item in completed

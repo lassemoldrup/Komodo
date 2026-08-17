@@ -52,16 +52,25 @@ One Redis stream, `cdc`. Each entry has a single field: the field **name** is
 the Debezium message key, the field **value** is the envelope. Stream order is
 commit order; Redis stream IDs are monotonic and usable as a resume cursor.
 
-Three record kinds:
+MariaDB produces four record shapes:
 
 | Kind | Recognised by | Carries |
 |---|---|---|
 | BEGIN | `status == "BEGIN"` | transaction id |
 | row change | has `op` | `before`, `after`, `source`, `transaction.total_order` |
 | END | `status == "END"` | transaction id, `event_count`, per-table counts |
+| schema change | has `ddl` | connector startup schema proof or unsupported live DDL |
 
 `op` is `c` insert, `u` update, `d` delete. The END marker's `event_count` tells
 the monitor a write set is complete without waiting for the next transaction.
+
+Connector-side table filtering is deliberately disabled for MariaDB: every
+table in the fenced `benchbase` database and all schema changes reach `cdc`.
+The monitor, not Debezium, enforces the manifest allowlists. A fresh `no_data`
+connector emits an ordered schema-snapshot prefix, which the assembler requires
+and validates before transactional evidence. Only that strictly marked startup
+prefix is metadata; later DDL or a row from an unallowlisted table invalidates
+the run.
 
 Per-backend envelope differences:
 

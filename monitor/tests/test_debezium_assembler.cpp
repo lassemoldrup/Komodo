@@ -16,6 +16,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -48,13 +49,34 @@ constexpr std::string_view kFixtureRunId =
   };
 }
 
-[[nodiscard]] Json loadFixture() {
-  std::ifstream input(std::string(BLACKBOX_CDC_FIXTURE_DIR) +
-                      "/mariadb_debezium_3_6_1_lifecycle.json");
+[[nodiscard]] Json loadFixtureNamed(const std::string_view name) {
+  std::ifstream input(std::string(BLACKBOX_CDC_FIXTURE_DIR) + "/" +
+                      std::string(name));
   if (!input) {
     throw std::runtime_error("failed to open captured MariaDB CDC fixture");
   }
   return Json::parse(input);
+}
+
+[[nodiscard]] Json loadFixture() {
+  return loadFixtureNamed("mariadb_debezium_3_6_1_lifecycle.json");
+}
+
+[[nodiscard]] Json loadSnapshotSchemaFixture() {
+  const auto full =
+      loadFixtureNamed("mariadb_debezium_3_6_1_full_lifecycle.json");
+  return Json(full.begin(), full.begin() + 10);
+}
+
+[[nodiscard]] Json prependStartupSchemaSnapshot(const Json &transactions) {
+  auto combined = loadSnapshotSchemaFixture();
+  for (const auto &entry : transactions) {
+    combined.push_back(entry);
+  }
+  for (std::size_t index = 0; index < 10U; ++index) {
+    combined[index][0] = std::to_string(index + 1U) + "-0";
+  }
+  return combined;
 }
 
 [[nodiscard]] std::vector<CdcStreamRecord>
@@ -130,7 +152,11 @@ void rewriteStructuralId(Json &entry, const std::string &identifier) {
 }
 
 void expectError(Json root, const CdcErrorCode expected,
-                 DebeziumAssemblerConfig config = assemblerConfig()) {
+                 DebeziumAssemblerConfig config = assemblerConfig(),
+                 const bool prepend_startup = true) {
+  if (prepend_startup) {
+    root = prependStartupSchemaSnapshot(root);
+  }
   DebeziumTxnAssembler assembler(std::move(config));
   bool observed = false;
   try {
@@ -157,7 +183,11 @@ void expectError(Json root, const CdcErrorCode expected,
 }
 
 [[nodiscard]] std::vector<CdcTransaction>
-replay(const Json &root, DebeziumAssemblerConfig config = assemblerConfig()) {
+replay(Json root, DebeziumAssemblerConfig config = assemblerConfig(),
+       const bool prepend_startup = true) {
+  if (prepend_startup) {
+    root = prependStartupSchemaSnapshot(root);
+  }
   DebeziumTxnAssembler assembler(std::move(config));
   std::vector<CdcTransaction> transactions;
   for (const auto &record : recordsFromFixture(root)) {
@@ -189,6 +219,117 @@ fields(std::optional<std::string> field1 = std::nullopt,
           std::move(field4), std::move(field5), std::move(field6),
           std::move(field7), std::move(field8), std::move(field9),
           std::move(field10)};
+}
+
+void checkCapturedStartupSchemaSnapshot() {
+  const auto captured = loadSnapshotSchemaFixture();
+  BLACKBOX_REQUIRE(captured.size() == 10U);
+
+  DebeziumTxnAssembler snapshot_only(assemblerConfig());
+  for (const auto &record : recordsFromFixture(captured)) {
+    BLACKBOX_CHECK(!snapshot_only.accept(record).has_value());
+  }
+  snapshot_only.finish();
+  BLACKBOX_CHECK(snapshot_only.completedCount() == 0U);
+  BLACKBOX_CHECK(snapshot_only.activeTransactionCount() == 0U);
+  BLACKBOX_CHECK(snapshot_only.activeBytes() == 0U);
+  BLACKBOX_CHECK(snapshot_only.retainedIdentityBytes() == 0U);
+
+  auto followed_by_run = captured;
+  const auto lifecycle = loadFixture();
+  for (const auto &entry : lifecycle) {
+    followed_by_run.push_back(entry);
+  }
+  renumberStreamIds(followed_by_run);
+  BLACKBOX_CHECK(replay(followed_by_run, assemblerConfig(), false).size() ==
+                 11U);
+
+  auto non_snapshot = captured;
+  auto envelope = envelopeAt(non_snapshot, 0U);
+  envelope["source"]["snapshot"] = "false";
+  setEnvelope(non_snapshot, 0U, envelope);
+  expectError(std::move(non_snapshot), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto wrong_source = captured;
+  envelope = envelopeAt(wrong_source, 0U);
+  envelope["source"]["name"] = "other-source";
+  setEnvelope(wrong_source, 0U, envelope);
+  expectError(std::move(wrong_source), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto malformed = captured;
+  envelope = envelopeAt(malformed, 0U);
+  envelope["tableChanges"] = Json::object();
+  setEnvelope(malformed, 0U, envelope);
+  expectError(std::move(malformed), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto incomplete = captured;
+  incomplete.erase(incomplete.end() - 1);
+  incomplete.push_back(lifecycle.at(0U));
+  renumberStreamIds(incomplete);
+  expectError(std::move(incomplete), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto missing_known_table = captured;
+  missing_known_table.erase(missing_known_table.begin() + 8);
+  renumberStreamIds(missing_known_table);
+  expectError(std::move(missing_known_table), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto after_begin = captured;
+  after_begin.push_back(lifecycle.at(0U));
+  after_begin.push_back(captured.at(0U));
+  renumberStreamIds(after_begin);
+  expectError(std::move(after_begin), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto after_run_start = captured;
+  for (const auto index : {0U, 1U, 2U}) {
+    after_run_start.push_back(lifecycle.at(index));
+  }
+  after_run_start.push_back(captured.at(0U));
+  renumberStreamIds(after_run_start);
+  expectError(std::move(after_run_start), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto after_last = captured;
+  after_last.push_back(captured.at(0U));
+  renumberStreamIds(after_last);
+  expectError(std::move(after_last), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto duplicate_drop = captured;
+  duplicate_drop.insert(duplicate_drop.begin() + 2, duplicate_drop.at(1U));
+  renumberStreamIds(duplicate_drop);
+  expectError(std::move(duplicate_drop), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto reordered_drops = captured;
+  std::swap(reordered_drops[1][1], reordered_drops[2][1]);
+  expectError(std::move(reordered_drops), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto reordered_database_records = captured;
+  std::swap(reordered_database_records[4][1], reordered_database_records[5][1]);
+  expectError(std::move(reordered_database_records), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto reordered_creates = captured;
+  std::swap(reordered_creates[7][1], reordered_creates[8][1]);
+  expectError(std::move(reordered_creates), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto duplicate_create = captured;
+  duplicate_create.insert(duplicate_create.begin() + 8,
+                          duplicate_create.at(7U));
+  renumberStreamIds(duplicate_create);
+  expectError(std::move(duplicate_create), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  expectError(lifecycle, CdcErrorCode::CdcRecordMalformed, assemblerConfig(),
+              false);
 }
 
 void checkCapturedLifecycleAndNormalization() {
@@ -402,7 +543,18 @@ void checkStructuralFailuresAreClosed() {
   expectError(captured, CdcErrorCode::ResourceExhausted,
               std::move(identity_limited));
 
+  DebeziumTxnAssembler missing_snapshot(assemblerConfig());
+  try {
+    missing_snapshot.finish();
+    BLACKBOX_CHECK(false);
+  } catch (const CdcAssemblerError &error) {
+    BLACKBOX_CHECK(error.code() == CdcErrorCode::CdcRecordMalformed);
+  }
+
   DebeziumTxnAssembler sealed(assemblerConfig());
+  for (const auto &record : recordsFromFixture(loadSnapshotSchemaFixture())) {
+    (void)sealed.accept(record);
+  }
   sealed.finish();
   try {
     (void)sealed.accept(recordsFromFixture(captured).front());
@@ -554,6 +706,47 @@ void checkNormalizationFailuresAndPrimaryKeyUpdateRule() {
   setEnvelope(invalid_field_type, 11U, envelope);
   expectError(std::move(invalid_field_type), CdcErrorCode::CdcRecordMalformed);
 
+  auto mismatched_before_image = captured;
+  envelope = envelopeAt(mismatched_before_image, 20U);
+  envelope["before"]["field1"] = "does-not-match-prior-after";
+  setEnvelope(mismatched_before_image, 20U, envelope);
+  expectError(std::move(mismatched_before_image),
+              CdcErrorCode::CdcRecordMalformed);
+
+  auto mismatched_before_key = captured;
+  envelope = envelopeAt(mismatched_before_key, 20U);
+  envelope["before"]["ycsb_key"] = 101;
+  setEnvelope(mismatched_before_key, 20U, envelope);
+  expectError(std::move(mismatched_before_key),
+              CdcErrorCode::CdcRecordMalformed);
+
+  auto repeated_insert = captured;
+  envelope = envelopeAt(repeated_insert, 19U);
+  envelope["op"] = "c";
+  envelope["before"] = nullptr;
+  setEnvelope(repeated_insert, 19U, envelope);
+  expectError(std::move(repeated_insert), CdcErrorCode::CdcRecordMalformed);
+
+  auto repeated_delete = captured;
+  envelope = envelopeAt(repeated_delete, 20U);
+  envelope["op"] = "d";
+  envelope["after"] = nullptr;
+  setEnvelope(repeated_delete, 20U, envelope);
+  expectError(std::move(repeated_delete), CdcErrorCode::CdcRecordMalformed);
+
+  auto update_after_delete = captured;
+  auto delete_envelope = envelopeAt(update_after_delete, 20U);
+  delete_envelope["op"] = "d";
+  delete_envelope["after"] = nullptr;
+  setEnvelope(update_after_delete, 20U, delete_envelope);
+  envelope = envelopeAt(update_after_delete, 21U);
+  envelope["op"] = "u";
+  envelope["before"] = delete_envelope["before"];
+  envelope["after"] = delete_envelope["before"];
+  envelope["after"]["field1"] = "after-delete";
+  setEnvelope(update_after_delete, 21U, envelope);
+  expectError(std::move(update_after_delete), CdcErrorCode::CdcRecordMalformed);
+
   auto oversized_unsigned_key = captured;
   const auto maximum_unsigned = std::numeric_limits<std::uint64_t>::max();
   key = keyAt(oversized_unsigned_key, 11U);
@@ -597,7 +790,7 @@ void checkNormalizationFailuresAndPrimaryKeyUpdateRule() {
                  NormalizedValueState::Absent);
 }
 
-void checkAttemptGapsAndEndCompletionOrder() {
+void checkAttemptGapsAndContiguousFrames() {
   const auto captured = loadFixture();
 
   // Aborted physical attempts may leave a committed marker-ID gap.
@@ -612,9 +805,9 @@ void checkAttemptGapsAndEndCompletionOrder() {
   BLACKBOX_REQUIRE(gap_transactions[4].correlation_id.has_value());
   BLACKBOX_CHECK(gap_transactions[4].correlation_id->txn_id == 3U);
 
-  // Derive two interleaved bootstrap assemblies from the two captured loader
-  // rows. The transaction whose END arrives first owns the earlier cdc_seq;
-  // BEGIN order and the structural IDs have no correlation meaning.
+  // MariaDB transaction metadata and rows form one contiguous frame. A second
+  // BEGIN before the active transaction's END is invalid even when it names a
+  // distinct connector transaction ID.
   Json interleaved = Json::array();
   interleaved.push_back(captured[0]);
   interleaved.push_back(captured[1]);
@@ -625,52 +818,18 @@ void checkAttemptGapsAndEndCompletionOrder() {
   Json begin_b = captured[3];
   rewriteStructuralId(begin_b, "0-1-200");
   interleaved.push_back(std::move(begin_b));
-  Json row_b = captured[5];
-  rewriteStructuralId(row_b, "0-1-200");
-  envelope = Json::parse(row_b[1][1].get<std::string>());
-  envelope["transaction"]["total_order"] = 1;
-  envelope["transaction"]["data_collection_order"] = 1;
-  row_b[1][1] = envelope.dump();
-  interleaved.push_back(std::move(row_b));
-  Json end_b = captured[6];
-  rewriteStructuralId(end_b, "0-1-200");
-  envelope = Json::parse(end_b[1][1].get<std::string>());
-  envelope["event_count"] = 1;
-  envelope["data_collections"][0]["event_count"] = 1;
-  end_b[1][1] = envelope.dump();
-  interleaved.push_back(std::move(end_b));
-  Json end_a = captured[6];
-  envelope = Json::parse(end_a[1][1].get<std::string>());
-  envelope["event_count"] = 1;
-  envelope["data_collections"][0]["event_count"] = 1;
-  end_a[1][1] = envelope.dump();
-  interleaved.push_back(std::move(end_a));
   renumberStreamIds(interleaved);
-
-  const auto completed = replay(interleaved);
-  BLACKBOX_REQUIRE(completed.size() == 3U);
-  BLACKBOX_REQUIRE(completed[1].writes.size() == 1U);
-  BLACKBOX_REQUIRE(completed[2].writes.size() == 1U);
-  BLACKBOX_CHECK(completed[1].cdc_seq == 1U);
-  BLACKBOX_CHECK(completed[1].writes[0].key ==
-                 CanonicalYcsbCodec::encodeKey("benchbase", "usertable", -1));
-  BLACKBOX_CHECK(completed[2].cdc_seq == 2U);
-  BLACKBOX_CHECK(completed[2].writes[0].key ==
-                 CanonicalYcsbCodec::encodeKey("benchbase", "usertable", 42));
-
-  auto one_active = assemblerConfig();
-  one_active.max_active_transactions = 1U;
-  expectError(std::move(interleaved), CdcErrorCode::ResourceExhausted,
-              std::move(one_active));
+  expectError(std::move(interleaved), CdcErrorCode::CdcOrderInvalid);
 }
 
 } // namespace
 
 int runDebeziumAssemblerTests() {
+  checkCapturedStartupSchemaSnapshot();
   checkCapturedLifecycleAndNormalization();
   checkStructuralFailuresAreClosed();
   checkMarkerAndFenceFailuresAreClosed();
   checkNormalizationFailuresAndPrimaryKeyUpdateRule();
-  checkAttemptGapsAndEndCompletionOrder();
+  checkAttemptGapsAndContiguousFrames();
   return 0;
 }

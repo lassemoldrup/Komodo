@@ -97,14 +97,53 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   )
   add_test(NAME blackbox_monitor_tests COMMAND blackbox_monitor_tests)
   add_test(
+    NAME blackbox_cdc_transaction_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_lifecycle.json
+  )
+  set_tests_properties(blackbox_cdc_transaction_fixture_checksum PROPERTIES
+    PASS_REGULAR_EXPRESSION "dc202702ce0c1d39aa945d38c4f772b5202335e36378ff59f8d8186505b81eeb"
+  )
+  add_test(
+    NAME blackbox_cdc_full_lifecycle_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_full_lifecycle.json
+  )
+  set_tests_properties(blackbox_cdc_full_lifecycle_fixture_checksum PROPERTIES
+    FIXTURES_SETUP captured_mariadb_full_lifecycle_fixture
+    PASS_REGULAR_EXPRESSION "6148236e8806c8fc6f3693a3390771a8e905ffbc603d403a3b1a858387b48185"
+  )
+  add_test(
+    NAME blackbox_cdc_snapshot_schema_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_snapshot_schema.json
+  )
+  set_tests_properties(blackbox_cdc_snapshot_schema_fixture_checksum PROPERTIES
+    FIXTURES_SETUP captured_mariadb_snapshot_schema_fixture
+    PASS_REGULAR_EXPRESSION "4be5e5dbb70beffd2acb558708e52482d348a0b0e19983dc34c4e775f38f1301"
+  )
+  add_test(
+    NAME blackbox_cdc_replay_snapshot_schema_fixture
+    COMMAND blackbox_cdc_replay
+            --input
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_snapshot_schema.json
+            --run-id
+            084cc5a1-3cbe-4fef-bb5c-43559a1c13a0
+  )
+  set_tests_properties(blackbox_cdc_replay_snapshot_schema_fixture PROPERTIES
+    FIXTURES_REQUIRED captured_mariadb_snapshot_schema_fixture
+    PASS_REGULAR_EXPRESSION "\"completed_transactions\": 0"
+  )
+  add_test(
     NAME blackbox_cdc_replay_fixture
     COMMAND blackbox_cdc_replay
             --input
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_lifecycle.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_full_lifecycle.json
             --run-id
             084cc5a1-3cbe-4fef-bb5c-43559a1c13a0
   )
   set_tests_properties(blackbox_cdc_replay_fixture PROPERTIES
+    FIXTURES_REQUIRED captured_mariadb_full_lifecycle_fixture
     PASS_REGULAR_EXPRESSION "\"completed_transactions\": 11"
   )
 endif()
