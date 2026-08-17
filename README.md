@@ -165,6 +165,29 @@ while (true) {
 Do not trim `cdc`, client, or status streams during an audited run. Restart
 recovery, coordinated checkpoints, and safe trimming are later features.
 
+The Milestone 3 implementation lives in `monitor/`. `BlockingRedisReader`
+issues binary-safe blocking `XREAD` calls with one explicit cursor per stream;
+`DebeziumTxnAssembler` validates MariaDB transaction structure and emits a
+normalized `CdcTransaction` only after a valid `END`. Connector transaction
+IDs are kept only inside the assembler for `BEGIN`/row/`END` consistency. The
+only exposed workload correlation is the unified
+`(run_id, session_id, txn_id)` marker identity.
+
+Build and run the C++ codec, reader, captured-fixture, and assembler tests from
+the canonical development container with:
+
+```bash
+cd /home/yifan/code/db-monitoring/si-monitoring
+make test-monitor
+```
+
+`blackbox_cdc_replay` validates an `XRANGE --json` capture, while
+`blackbox_cdc_ingest` exercises the live multi-stream reader against `cdc` and
+the run's client stream without parsing client records. `make
+test-lifecycle-live` runs both paths against fresh MariaDB/Debezium evidence.
+Joining client evidence, checker consumption, and final reconciliation remain
+intentionally absent.
+
 ## Constraints
 
 **All backends** — durability is deliberately disabled (tmpfs datadirs,
@@ -266,6 +289,7 @@ scripts/blackbox_record.py                # manifests and bootstrap digest
 scripts/txn.sh                            # client protocol reference, all backends
 scripts/stream.sh                         # read/follow, handles all envelopes
 scripts/bench.sh, sql.sh, status.sh
+monitor/                                  # C++ CDC reader, assembler, fixtures, tests
 ```
 
 The audited MariaDB path uses an initially empty `benchbase.usertable`,

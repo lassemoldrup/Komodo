@@ -1,8 +1,9 @@
 # Backend selection: DB=mariadb (default) | yugabyte | oracle
 DB ?= mariadb
 COMPOSE = docker compose --profile $(DB)
+MONITOR_BUILD_DIR ?= /tmp/db-monitoring-blackbox-monitor-build
 
-.PHONY: up down reset status stream follow txn bench sql logs e2e test-lifecycle test-lifecycle-live
+.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build test-monitor test-lifecycle test-lifecycle-live
 
 ## Start the stack for $(DB)
 up:
@@ -54,7 +55,14 @@ e2e:
 	./scripts/e2e.sh
 
 ## Fast protocol/lifecycle tests with controlled monitor acknowledgements
-test-lifecycle:
+monitor-build:
+	cmake -S monitor -B $(MONITOR_BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Debug
+	cmake --build $(MONITOR_BUILD_DIR)
+
+test-monitor: monitor-build
+	ctest --test-dir $(MONITOR_BUILD_DIR) --output-on-failure
+
+test-lifecycle: test-monitor
 	python3 protocol/tools/verify_protocol.py
 	shellcheck scripts/*.sh tests/*.sh
 	bash -n scripts/*.sh tests/*.sh
@@ -62,5 +70,7 @@ test-lifecycle:
 	./tests/test_e2e_lifecycle.sh
 
 ## Destructive integration against the pinned MariaDB/Debezium/Redis stack
-test-lifecycle-live:
-	./tests/test_mariadb_lifecycle.sh
+test-lifecycle-live: test-monitor
+	BLACKBOX_CDC_REPLAY_BIN=$(MONITOR_BUILD_DIR)/blackbox_cdc_replay \
+	BLACKBOX_CDC_INGEST_BIN=$(MONITOR_BUILD_DIR)/blackbox_cdc_ingest \
+		./tests/test_mariadb_lifecycle.sh

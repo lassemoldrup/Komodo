@@ -50,7 +50,9 @@ def integer(value: Any, label: str) -> int:
     return converted
 
 
-def transaction_summary(transaction: dict[str, Any], run_id: str) -> dict[str, Any]:
+def transaction_summary(
+    transaction: dict[str, Any], run_id: str, marker_state: dict[str, int]
+) -> dict[str, Any]:
     rows = transaction["rows"]
     tables = {row["table"] for row in rows}
     if tables == {"checker_run_fence"}:
@@ -72,7 +74,7 @@ def transaction_summary(transaction: dict[str, Any], run_id: str) -> dict[str, A
             "event_count": len(rows),
         }
     require(
-        tables == {"session_txn", "usertable"},
+        tables in ({"session_txn"}, {"session_txn", "usertable"}),
         f"unexpected or mixed tables: {sorted(tables)}",
     )
     marker_indexes = [
@@ -80,15 +82,29 @@ def transaction_summary(transaction: dict[str, Any], run_id: str) -> dict[str, A
     ]
     require(marker_indexes == [len(rows) - 1], "workload marker is not exactly one final row event")
     marker = rows[-1]
-    require(marker["op"] == "c", "first workload marker is not an insert")
-    require(marker["before"] is None, "first workload marker has a before image")
     after = marker["after"]
     require(isinstance(after, dict), "workload marker lacks an after image")
     require(after.get("session_id") == "ycsb/worker/1", "workload marker session mismatch")
-    require(integer(after.get("txn_id"), "marker txn_id") == 1, "workload marker txn_id mismatch")
+    session_id = after["session_id"]
+    txn_id = integer(after.get("txn_id"), "marker txn_id")
+    previous = marker_state.get(session_id)
+    if previous is None:
+        require(marker["op"] == "c", "first workload marker is not an insert")
+        require(marker["before"] is None, "first workload marker has a before image")
+    else:
+        require(marker["op"] == "u", "later workload marker is not an update")
+        before = marker["before"]
+        require(isinstance(before, dict), "marker update lacks a before image")
+        require(before.get("session_id") == session_id, "marker before session mismatch")
+        require(
+            integer(before.get("txn_id"), "marker before txn_id") == previous,
+            "marker before-image chain mismatch",
+        )
+        require(txn_id > previous, "marker txn_id did not advance")
+    marker_state[session_id] = txn_id
     return {
         "classification": "workload_marked",
-        "correlation_id": {"session_id": after["session_id"], "txn_id": 1},
+        "correlation_id": {"session_id": session_id, "txn_id": txn_id},
         "operations": [row["op"] for row in rows if row["table"] == "usertable"],
         "event_count": len(rows),
     }
@@ -98,6 +114,7 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
     require(isinstance(entries, list), "XRANGE JSON root is not an array")
     active: dict[str, Any] | None = None
     completed: list[dict[str, Any]] = []
+    marker_state: dict[str, int] = {}
     previous_stream_id: tuple[int, int] | None = None
 
     for entry_index, entry in enumerate(entries):
@@ -142,7 +159,7 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
                     collection.get("event_count"), "END data_collection event_count"
                 )
             require(collection_counts == declared_counts, "END per-table counts mismatch")
-            completed.append(transaction_summary(active, run_id))
+            completed.append(transaction_summary(active, run_id, marker_state))
             active = None
             continue
 
@@ -182,13 +199,33 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
             ("application", None),
             ("fence", "LOAD_FINISHED"),
             ("workload_marked", None),
+            ("workload_marked", None),
+            ("workload_marked", None),
+            ("workload_marked", None),
+            ("workload_marked", None),
+            ("workload_marked", None),
+            ("workload_marked", None),
             ("fence", "END_FENCE"),
         ],
         f"unexpected completed transaction order: {shape}",
     )
     require(completed[1]["operations"] == ["c", "c"], "loader transaction is not two inserts")
-    require(completed[3]["operations"] == ["u"], "workload transaction is not one application update")
-    require(completed[3]["event_count"] == 2, "workload transaction lacks its final marker")
+    expected_operations = [
+        ["u"],
+        [],
+        ["c", "u", "u", "d"],
+        ["c"],
+        ["u", "u"],
+        ["d"],
+        ["d", "c"],
+    ]
+    actual_operations = [item["operations"] for item in completed[3:10]]
+    require(actual_operations == expected_operations, "unexpected workload row operations")
+    require(
+        [item["correlation_id"]["txn_id"] for item in completed[3:10]]
+        == list(range(1, 8)),
+        "workload marker chain is not 1..7",
+    )
     return completed
 
 

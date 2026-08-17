@@ -15,6 +15,8 @@ else
   OWN_CAPTURE=1
 fi
 SCAN_PATH=$(mktemp /tmp/mariadb-bootstrap-scan.XXXXXX)
+REPLAY_PATH=$(mktemp /tmp/mariadb-cdc-replay.XXXXXX.json)
+INGEST_PATH=$(mktemp /tmp/mariadb-cdc-ingest.XXXXXX.json)
 
 
 compose() {
@@ -25,6 +27,8 @@ compose() {
 cleanup() {
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -f -- "$SCAN_PATH"
+  rm -f -- "$REPLAY_PATH"
+  rm -f -- "$INGEST_PATH"
   if (( OWN_CAPTURE == 1 )); then
     rm -f -- "$CAPTURE_PATH"
   fi
@@ -76,7 +80,15 @@ main() {
   blackbox_require_command docker
   blackbox_require_command "$BLACKBOX_REDIS_CLI"
   blackbox_require_command "$BLACKBOX_MARIADB_CLI"
-  BLACKBOX_ACTIVE_RUN_ID=$(blackbox_new_uuid)
+  if [[ -z ${BLACKBOX_CDC_REPLAY_BIN:-} || ! -x $BLACKBOX_CDC_REPLAY_BIN ]]; then
+    echo "BLACKBOX_CDC_REPLAY_BIN must name the built C++ CDC replay tool" >&2
+    return 1
+  fi
+  if [[ -z ${BLACKBOX_CDC_INGEST_BIN:-} || ! -x $BLACKBOX_CDC_INGEST_BIN ]]; then
+    echo "BLACKBOX_CDC_INGEST_BIN must name the built C++ CDC ingestion tool" >&2
+    return 1
+  fi
+  BLACKBOX_ACTIVE_RUN_ID=${BLACKBOX_ACTIVE_RUN_ID:-$(blackbox_new_uuid)}
   BLACKBOX_SESSION_IDS=(ycsb/worker/1)
   export BLACKBOX_ACTIVE_RUN_ID
 
@@ -138,12 +150,102 @@ main() {
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
+
+  # Marker-only commit: successful no-application-write transactions must
+  # still occupy a CDC slot after marker filtering.
+  blackbox_database_query "
+    START TRANSACTION;
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 2)
+      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    COMMIT;
+  " >/dev/null
+
+  # Preserve touched keys even when repeated writes collapse to Absent.
+  blackbox_database_query "
+    START TRANSACTION;
+    INSERT INTO usertable
+      (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10)
+    VALUES (100, 'first', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    UPDATE usertable SET field1 = 'second' WHERE ycsb_key = 100;
+    UPDATE usertable SET field1 = 'first' WHERE ycsb_key = 100;
+    DELETE FROM usertable WHERE ycsb_key = 100;
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 3)
+      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    COMMIT;
+  " >/dev/null
+
+  blackbox_database_query "
+    START TRANSACTION;
+    INSERT INTO usertable
+      (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10)
+    VALUES (7, 'original', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'tail');
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 4)
+      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    COMMIT;
+  " >/dev/null
+
+  # Same-key updates that return to the original value remain a touched write.
+  blackbox_database_query "
+    START TRANSACTION;
+    UPDATE usertable SET field1 = 'temporary' WHERE ycsb_key = 7;
+    UPDATE usertable SET field1 = 'original' WHERE ycsb_key = 7;
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 5)
+      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    COMMIT;
+  " >/dev/null
+
+  blackbox_database_query "
+    START TRANSACTION;
+    DELETE FROM usertable WHERE ycsb_key = 7;
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 6)
+      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    COMMIT;
+  " >/dev/null
+
+  # Exercise the explicit primary-key-change normalization rule.
+  blackbox_database_query "
+    START TRANSACTION;
+    UPDATE usertable SET ycsb_key = -2 WHERE ycsb_key = -1;
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 7)
+      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    COMMIT;
+  " >/dev/null
   blackbox_commit_fence END_FENCE
 
   wait_end_fence
+  "$BLACKBOX_CDC_INGEST_BIN" \
+    --redis-host "$BLACKBOX_REDIS_HOST" \
+    --redis-port "$BLACKBOX_REDIS_PORT" \
+    --run-id "$BLACKBOX_ACTIVE_RUN_ID" >"$INGEST_PATH"
+  jq -e '
+    .completed_transactions == 11 and
+    .client_records_seen == 2 and
+    [.transactions[].cdc_seq] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] and
+    [.transactions[] | select(.kind == "RUN_CONTROL") | .fence_phase] ==
+      ["RUN_START", "LOAD_FINISHED", "END_FENCE"] and
+    [.transactions[3:10][].correlation_id.txn_id] == [1, 2, 3, 4, 5, 6, 7] and
+    [.transactions[3:10][].write_count] == [1, 0, 1, 1, 1, 1, 2]
+  ' "$INGEST_PATH" >/dev/null
   blackbox_redis --json XRANGE cdc - + >"$CAPTURE_PATH"
   python3 "$ROOT/tests/verify_lifecycle_stream.py" \
     --input "$CAPTURE_PATH" --run-id "$BLACKBOX_ACTIVE_RUN_ID" >/dev/null
+  "$BLACKBOX_CDC_REPLAY_BIN" \
+    --input "$CAPTURE_PATH" --run-id "$BLACKBOX_ACTIVE_RUN_ID" >"$REPLAY_PATH"
+  jq -e '
+    .completed_transactions == 11 and
+    [.transactions[].kind] == [
+      "RUN_CONTROL", "BOOTSTRAP_APP", "RUN_CONTROL",
+      "WORKLOAD_MARKED", "WORKLOAD_MARKED", "WORKLOAD_MARKED",
+      "WORKLOAD_MARKED", "WORKLOAD_MARKED", "WORKLOAD_MARKED",
+      "WORKLOAD_MARKED", "RUN_CONTROL"
+    ] and
+    [.transactions[3:10][].correlation_id.txn_id] == [1, 2, 3, 4, 5, 6, 7] and
+    [.transactions[3:10][].writes | length] == [1, 0, 1, 1, 1, 1, 2] and
+    .transactions[4].writes == [] and
+    .transactions[5].writes[0].value_state == "absent" and
+    .transactions[7].writes[0].value_hex == .transactions[6].writes[0].value_hex and
+    [.transactions[9].writes[].value_state] == ["present", "absent"]
+  ' "$REPLAY_PATH" >/dev/null
 
   printf 'live MariaDB lifecycle test passed (run_id=%s, capture=%s)\n' \
     "$BLACKBOX_ACTIVE_RUN_ID" "$CAPTURE_PATH"
