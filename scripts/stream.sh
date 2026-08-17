@@ -45,26 +45,6 @@ def row(d):
         return d
     return {k: unwrap(v) for k, v in d.items()}
 
-def oracle_xid(h):
-    # Debezium reports Oracle XIDs as little-endian hex of usn.slot.sqn.
-    try:
-        b = bytes.fromhex(h)
-        return "%d.%d.%d" % (int.from_bytes(b[0:2], "little"),
-                             int.from_bytes(b[2:4], "little"),
-                             int.from_bytes(b[4:8], "little"))
-    except Exception:
-        return h
-
-def txn_key(src):
-    # MariaDB: the GTID is the identity. YugabyteDB: the commit hybrid time
-    # (source.lsn under yb_lsn_type=HYBRID_TIME) is. source.txId is only a
-    # per-slot counter and resets, so it is not used as identity.
-    if src.get("gtid"):
-        return src["gtid"]
-    if src.get("commit_scn") is not None:          # Oracle
-        return "%s scn=%s" % (oracle_xid(src.get("txId","")), src.get("commit_scn"))
-    return src.get("lsn")
-
 for line in sys.stdin:
     line = line.strip()
     if not line.startswith("{"):
@@ -106,17 +86,9 @@ for line in sys.stdin:
                 if k.lower() == name:
                     return v
             return None
-        print("  MARKER  session=%s txn_id=%s (prev=%s)  txn=%s" % (
+        print("  MARKER  session=%s txn_id=%s (prev=%s)" % (
             fld(after, "session_id"), fld(after, "txn_id"),
-            fld(before, "txn_id"), txn_key(src)))
-        continue
-
-    if src.get("commit_scn") is not None:
-        print("  %-6s %-14s before=%s after=%s  [%s]" % (
-            OPS.get(e.get("op"), e.get("op")), table,
-            json.dumps(before, separators=(",", ":")),
-            json.dumps(after, separators=(",", ":")),
-            txn_key(src)))
+            fld(before, "txn_id")))
         continue
 
     print("  %-6s %-14s before=%s after=%s" % (

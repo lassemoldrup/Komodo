@@ -10,19 +10,19 @@ Three interchangeable backends, one shared downstream half. Exactly one backend
 runs at a time and all write to the same stream, so the monitor reads one place.
 
 ```
-   MariaDB     --binlog (GTID)--------\
-   YugabyteDB  --logical repl (HT)-----+-- Debezium Server --> Redis "cdc" --> C++ monitor
-   Oracle      --LogMiner (commit SCN)/
+   MariaDB     --binlog---------\
+   YugabyteDB  --logical repl----+-- Debezium Server --> Redis "cdc" --> C++ monitor
+   Oracle      --LogMiner-------/
 ```
 
-All three use the **same** client-supplied join key, so the monitor never
+All three use the **same** client-supplied transaction id, so the monitor never
 branches on backend.
 
-| Backend | Version | Capture latency | Server txn id (cross-check) |
-|---|---|---|---|
-| MariaDB | 12.3 | ~10 ms | `source.gtid` |
-| YugabyteDB | latest | ~40 ms | `source.lsn` (commit hybrid time) |
-| Oracle | 23.26 (26ai) | ~2 s | `source.txId` (XID) |
+| Backend | Version | Capture latency |
+|---|---|---|
+| MariaDB | 12.3 | ~10 ms |
+| YugabyteDB | latest | ~40 ms |
+| Oracle | 23.26 (26ai) | ~2 s |
 
 ## Quick start
 
@@ -67,15 +67,15 @@ Per-backend envelope differences:
 
 | | MariaDB | YugabyteDB | Oracle |
 |---|---|---|---|
-| transaction identity | `source.gtid` | `source.lsn` (commit hybrid time) | `source.txId` |
+| identifier case | lower | lower | UPPER (table and columns) |
 | column values | plain | wrapped `{"value":…,"set":…}` | plain, numbers as strings |
 | timestamps | ms + µs + ns | ms | ms |
 
-The join key is the `session_txn` marker, not these fields. The server ids are
-still emitted and useful as a cross-check: on YugabyteDB use `source.lsn`
-(`transaction.id` is a composite `txId:lsn`, and `source.txId` is a per-slot
-counter that resets); on Oracle `source.txId` is the XID as little-endian hex
-of `usn.slot.sqn`.
+Transaction identity is the `session_txn` marker and nothing else. Boundaries
+come from the BEGIN/END markers, commit order from stream order. Debezium also
+emits its own server-side transaction id in `source` (GTID, commit hybrid time,
+XID) — that is default connector behaviour, and this harness neither uses nor
+relies on it.
 
 ## Client protocol
 
@@ -187,7 +187,6 @@ VARIABLES` against an unconfigured `mariadb:12.3`.
 | `log_bin` | OFF | `mariadb-bin` | CDC source |
 | `binlog_row_metadata` | `NO_LOG` | `FULL` | column names in the table-map event |
 | `binlog_annotate_row_events` | ON | OFF | SQL text is dead weight |
-| `gtid_strict_mode` | OFF | ON | GTID is the join key |
 | `innodb_flush_log_at_trx_commit` | 1 | 0 | durability only, not isolation |
 | `innodb_buffer_pool_size` | 128M | 1G | throughput |
 | `innodb_log_file_size` | 96M | 256M | throughput |
@@ -237,7 +236,7 @@ system of record.
 
 ```
 docker-compose.yml                        # profiles: mariadb | yugabyte | oracle
-mariadb/conf.d/cdc.cnf                    # binlog, GTID, isolation, durability
+mariadb/conf.d/cdc.cnf                    # binlog, isolation, durability, throughput
 mariadb/initdb/*.sql                      # accounts + schema
 yugabyte/init.sql, init.sh                # schema first, HYBRID_TIME slot last
 oracle/startdb.d/                         # ARCHIVELOG, suppl. logging, user, schema

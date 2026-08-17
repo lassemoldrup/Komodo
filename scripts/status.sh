@@ -45,8 +45,6 @@ elif [ "$DB" = "yugabyte" ]; then
   db_query "SELECT session_id || ' -> ' || txn_id FROM session_txn WHERE txn_id <> 0 ORDER BY session_id LIMIT 10"
   DBZ=cdc-debezium-yb
 else
-  echo "=== Binlog position ==="
-  db_query "SELECT @@gtid_binlog_pos"
   echo "=== Isolation ==="
   db_query "SELECT CONCAT(@@innodb_snapshot_isolation, ' / ', @@transaction_isolation)"
   echo "=== Session markers ==="

@@ -33,10 +33,6 @@ log_slave_updates                = OFF          # [pin] no replicas here
 max_binlog_size                  = 256M
 expire_logs_days                 = 1
 
-# --- GTID ------------------------------------------------------------------
-# The GTID is the join key between the client's read log and the CDC stream.
-gtid_strict_mode                 = 1
-
 # --- Durability ------------------------------------------------------------
 # Crash durability is irrelevant for a throwaway harness. Affects durability
 # only, never isolation semantics.

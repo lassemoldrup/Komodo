@@ -3,7 +3,7 @@ name: si-monitoring
 # CDC pipeline for Snapshot Isolation anomaly monitoring. Three interchangeable
 # backends, one shared downstream half:
 #
-#   MariaDB    --binlog (GTID)--------\
+#   MariaDB    --binlog--------------\
 #   YugabyteDB --logical repl (HT)-----+-- Debezium Server --> Redis "cdc" --> C++ monitor
 #   Oracle     --LogMiner (commit SCN)/
 #
