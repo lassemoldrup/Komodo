@@ -87,6 +87,7 @@ main() {
 
   [[ $(blackbox_database_query "SELECT COUNT(*) FROM usertable" | tr -d '[:space:]') == 0 ]]
   [[ $(blackbox_database_query "SELECT COUNT(*) FROM checker_run_fence" | tr -d '[:space:]') == 0 ]]
+  [[ $(blackbox_database_query "SELECT COUNT(*) FROM session_txn" | tr -d '[:space:]') == 0 ]]
   [[ $(blackbox_redis --raw DBSIZE | tr -d '[:space:]') == 0 ]]
   if blackbox_database_query "CREATE TABLE forbidden_after_init (id INT)" >/dev/null 2>&1; then
     echo "app user unexpectedly retained DDL privilege" >&2
@@ -127,9 +128,14 @@ main() {
   blackbox_publish_record "$(blackbox_client_stream)" "$bootstrap_manifest" >/dev/null
   blackbox_commit_fence LOAD_FINISHED
 
+  # Loader/bootstrap activity must not create workload marker state.
+  [[ $(blackbox_database_query "SELECT COUNT(*) FROM session_txn" | tr -d '[:space:]') == 0 ]]
+
   blackbox_database_query "
     START TRANSACTION;
     UPDATE usertable SET field1 = 'changed' WHERE ycsb_key = 42;
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 1)
+      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
   blackbox_commit_fence END_FENCE

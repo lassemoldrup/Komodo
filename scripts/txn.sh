@@ -6,9 +6,9 @@
 #   DB=yugabyte ./scripts/txn.sh "UPDATE registers SET val=9 WHERE id=2"
 #   SESSION=sess7 TXN_ID=42 ./scripts/txn.sh
 #
-# MariaDB correlation is the connection-local GTID change and never adds a
-# marker write. The YugabyteDB/Oracle exploratory adapters still use their
-# pre-existing session marker; they are outside the frozen MariaDB scope.
+# One protocol for every backend: the client mints (session_id, txn_id) and
+# upserts it into session_txn as the transaction's final statement. Connector
+# and server transaction identifiers are never correlation identities.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . scripts/lib.sh
@@ -52,16 +52,15 @@ SQL
     cat > "$TMP" <<SQL
 START TRANSACTION;
 ${BODY}
+INSERT INTO session_txn (session_id, txn_id) VALUES ('${SESSION}', ${TXN_ID})
+  ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
 COMMIT;
-SELECT @@session.last_gtid;
 SQL
     OUT=$(db_run_file "$TMP" 2>&1)
     if echo "$OUT" | grep -qi 'ERROR'; then
       echo "transaction: ABORTED - $(echo "$OUT" | grep -i 'ERROR' | head -1)"
       exit 1
     fi
-    echo "gtid: $(printf '%s' "$OUT" | tail -1)"
-    exit 0
     ;;
 
   oracle)

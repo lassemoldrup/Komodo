@@ -78,8 +78,7 @@ for line in sys.stdin:
     before, after = row(e.get("before")), row(e.get("after"))
     table = src.get("table")
 
-    # Surface the exploratory YugabyteDB/Oracle session marker. The frozen
-    # MariaDB path joins directly on GTID and never emits this table.
+    # Surface the backend-independent client correlation marker.
     if (table or "").lower() == "session_txn":
         def fld(d, name):
             d = d or {}

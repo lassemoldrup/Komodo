@@ -131,19 +131,21 @@ verify_fresh_schema() {
   local tables
   tables=$(blackbox_database_query \
     "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'benchbase' ORDER BY TABLE_NAME")
-  if [[ $tables != $'checker_run_fence\nusertable' ]]; then
+  if [[ $tables != $'checker_run_fence\nsession_txn\nusertable' ]]; then
     blackbox_die "benchbase schema is not the exact application/control schema"
     return 1
   fi
 
-  local application_rows fence_rows snapshot_isolation
+  local application_rows fence_rows marker_rows snapshot_isolation
   application_rows=$(blackbox_database_query "SELECT COUNT(*) FROM usertable")
   fence_rows=$(blackbox_database_query "SELECT COUNT(*) FROM checker_run_fence")
+  marker_rows=$(blackbox_database_query "SELECT COUNT(*) FROM session_txn")
   snapshot_isolation=$(blackbox_database_query "SELECT @@innodb_snapshot_isolation")
   application_rows=${application_rows//[[:space:]]/}
   fence_rows=${fence_rows//[[:space:]]/}
+  marker_rows=${marker_rows//[[:space:]]/}
   snapshot_isolation=${snapshot_isolation//[[:space:]]/}
-  if [[ $application_rows != 0 || $fence_rows != 0 ]]; then
+  if [[ $application_rows != 0 || $fence_rows != 0 || $marker_rows != 0 ]]; then
     blackbox_die "fresh-stack enforcement found pre-CDC rows"
     return 1
   fi
@@ -322,6 +324,18 @@ run_loader_and_close_bootstrap() {
   fi
   if (( PHASE_COMMAND_STATUS != 0 )); then
     close_failed_run INTERNAL_ERROR "loader command exited $PHASE_COMMAND_STATUS" 1
+    return 1
+  fi
+
+  local marker_rows
+  marker_rows=$(blackbox_database_query "SELECT COUNT(*) FROM session_txn") || {
+    close_failed_run INTERNAL_ERROR "could not verify marker state after loader quiescence" 1
+    return 1
+  }
+  marker_rows=${marker_rows//[[:space:]]/}
+  if [[ $marker_rows != 0 ]]; then
+    close_failed_run MARKER_MALFORMED \
+      "loader/bootstrap phase contaminated session_txn with $marker_rows row(s)" 1
     return 1
   fi
 

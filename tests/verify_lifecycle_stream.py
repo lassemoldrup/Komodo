@@ -63,14 +63,33 @@ def transaction_summary(transaction: dict[str, Any], run_id: str) -> dict[str, A
         return {
             "classification": "fence",
             "phase": phase,
-            "gtid": transaction["id"],
             "event_count": len(rows),
         }
-    require(tables == {"usertable"}, f"unexpected or mixed tables: {sorted(tables)}")
+    if tables == {"usertable"}:
+        return {
+            "classification": "application",
+            "operations": [row["op"] for row in rows],
+            "event_count": len(rows),
+        }
+    require(
+        tables == {"session_txn", "usertable"},
+        f"unexpected or mixed tables: {sorted(tables)}",
+    )
+    marker_indexes = [
+        index for index, row in enumerate(rows) if row["table"] == "session_txn"
+    ]
+    require(marker_indexes == [len(rows) - 1], "workload marker is not exactly one final row event")
+    marker = rows[-1]
+    require(marker["op"] == "c", "first workload marker is not an insert")
+    require(marker["before"] is None, "first workload marker has a before image")
+    after = marker["after"]
+    require(isinstance(after, dict), "workload marker lacks an after image")
+    require(after.get("session_id") == "ycsb/worker/1", "workload marker session mismatch")
+    require(integer(after.get("txn_id"), "marker txn_id") == 1, "workload marker txn_id mismatch")
     return {
-        "classification": "application",
-        "operations": [row["op"] for row in rows],
-        "gtid": transaction["id"],
+        "classification": "workload_marked",
+        "correlation_id": {"session_id": after["session_id"], "txn_id": 1},
+        "operations": [row["op"] for row in rows if row["table"] == "usertable"],
         "event_count": len(rows),
     }
 
@@ -162,13 +181,14 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
             ("fence", "RUN_START"),
             ("application", None),
             ("fence", "LOAD_FINISHED"),
-            ("application", None),
+            ("workload_marked", None),
             ("fence", "END_FENCE"),
         ],
         f"unexpected completed transaction order: {shape}",
     )
     require(completed[1]["operations"] == ["c", "c"], "loader transaction is not two inserts")
-    require(completed[3]["operations"] == ["u"], "workload transaction is not one update")
+    require(completed[3]["operations"] == ["u"], "workload transaction is not one application update")
+    require(completed[3]["event_count"] == 2, "workload transaction lacks its final marker")
     return completed
 
 

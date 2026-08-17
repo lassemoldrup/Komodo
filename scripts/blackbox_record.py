@@ -185,8 +185,9 @@ def build_run_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark": "ycsb",
         "expected_session_ids": sessions,
         "application_table_allowlist": ["benchbase.usertable"],
+        "transaction_marker_table": "benchbase.session_txn",
         "control_table_allowlist": ["benchbase.checker_run_fence"],
-        "result_scope": "write_projected_soww",
+        "result_scope": "point_transaction_soww",
     }
 
 
@@ -370,7 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
             "ATTEMPT_BODY",
             "ROLLBACK",
             "COMMIT",
-            "GTID_LOOKUP",
+            "MARKER_WRITE",
             "REDIS_PUBLICATION",
             "SESSION_SHUTDOWN",
             "COORDINATOR",

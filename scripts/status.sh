@@ -50,6 +50,7 @@ else
   echo "=== Black-box state ==="
   db_query "SELECT CONCAT('usertable rows=', COUNT(*)) FROM usertable"
   db_query "SELECT CONCAT(run_id, ' -> ', phase) FROM checker_run_fence ORDER BY run_id, phase"
+  db_query "SELECT CONCAT(session_id, ' -> ', txn_id) FROM session_txn ORDER BY session_id"
   DBZ=cdc-debezium
 fi
 

@@ -55,7 +55,10 @@ while (( $# > 0 )); do
 done
 case "$query" in
   *"information_schema.TABLES"*)
-    printf 'checker_run_fence\nusertable\n'
+    printf 'checker_run_fence\nsession_txn\nusertable\n'
+    ;;
+  *"COUNT(*) FROM session_txn"*)
+    cat "$MARKER_ROWS_FILE"
     ;;
   *"COUNT(*) FROM usertable"*|*"COUNT(*) FROM checker_run_fence"*)
     echo 0
@@ -104,7 +107,14 @@ case "$command" in
     field=$3
     payload=$4
     [[ $field == payload ]]
-    kind=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["kind"])' "$payload")
+    kind=$(python3 -c '
+import json, sys
+record = json.loads(sys.argv[1])
+if record["kind"] == "run_manifest":
+    assert record["transaction_marker_table"] == "benchbase.session_txn"
+    assert record["result_scope"] == "point_transaction_soww"
+print(record["kind"])
+' "$payload")
     echo "publish:$kind" >>"$EVENT_LOG"
     counter=1
     if [[ -f $REDIS_COUNTER_FILE ]]; then
@@ -207,6 +217,9 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 echo 'phase:loader' >>"$EVENT_LOG"
+if [[ ${CONTAMINATE_MARKER:-0} == 1 ]]; then
+  echo 1 >"$MARKER_ROWS_FILE"
+fi
 if [[ ${HANG_LOADER:-0} == 1 ]]; then
   sleep 30
 fi
@@ -240,20 +253,24 @@ run_case() {
   local loader_exit_status=${4:-0}
   local emit_lifecycle_regression=${5:-0}
   local hang_loader=${6:-0}
+  local contaminate_marker=${7:-0}
   local case_root="$TEST_ROOT/$name"
   mkdir -p "$case_root"
   write_test_programs "$case_root"
   : >"$case_root/events"
   echo 0 >"$case_root/active-connections"
+  echo 0 >"$case_root/marker-rows"
 
   export EVENT_LOG="$case_root/events"
   export ACTIVE_CONNECTIONS_FILE="$case_root/active-connections"
   export REDIS_COUNTER_FILE="$case_root/redis-counter"
+  export MARKER_ROWS_FILE="$case_root/marker-rows"
   export LEAVE_ACTIVE_CONNECTION=$leave_active
   export SUPPRESS_START_ACK=$suppress_start_ack
   export LOADER_EXIT_STATUS=$loader_exit_status
   export EMIT_LIFECYCLE_REGRESSION=$emit_lifecycle_regression
   export HANG_LOADER=$hang_loader
+  export CONTAMINATE_MARKER=$contaminate_marker
 
   local status
   if BLACKBOX_DOCKER="$case_root/bin/docker" \
@@ -342,5 +359,13 @@ run_case hung_loader 0 0 0 0 1
 grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'hung loader did not publish a diagnostic'
 grep -q '^fence:END_FENCE$' "$CASE_LOG" || fail 'terminated/quiescent loader did not close with END_FENCE'
 grep -q '^status:FINAL$' "$CASE_LOG" || fail 'hung loader did not await final INVALID'
+
+run_case loader_marker_contamination 0 0 0 0 0 1
+[[ $CASE_STATUS == 1 ]] || fail 'loader marker contamination unexpectedly succeeded'
+grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'loader marker contamination lacked a diagnostic'
+grep -q '^fence:END_FENCE$' "$CASE_LOG" || fail 'quiescent marker contamination did not close with END_FENCE'
+if grep -q '^fence:LOAD_FINISHED$\|^phase:workload$' "$CASE_LOG"; then
+  fail 'loader marker contamination advanced into LOAD_FINISHED/workload'
+fi
 
 echo 'lifecycle tests passed'
