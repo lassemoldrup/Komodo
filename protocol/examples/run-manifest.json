@@ -1,0 +1,12 @@
+{
+  "kind": "run_manifest",
+  "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "backend": "mariadb",
+  "backend_source_id": "mariadb-main",
+  "declared_isolation": "REPEATABLE_READ",
+  "benchmark": "ycsb",
+  "expected_session_ids": ["ycsb/worker/1", "ycsb/worker/2"],
+  "application_table_allowlist": ["benchbase.usertable"],
+  "control_table_allowlist": ["benchbase.checker_run_fence"],
+  "result_scope": "write_projected_soww"
+}

@@ -1,0 +1,28 @@
+{
+  "vectors": [
+    {
+      "name": "two_published_transactions_with_gap",
+      "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+      "backend_source_id": "mariadb-main",
+      "entries": [
+        { "session_seq": 1, "gtid": "0-1-17" },
+        { "session_seq": 3, "gtid": "0-1-19" }
+      ],
+      "seed_preimage_hex": "64622d6d6f6e69746f72696e672f73657373696f6e2d636f7272656c6174696f6e2d736565640000112233445566778899aabbccddeeff",
+      "seed_digest": "131c321cfe8be47e97969aeaf5e848ec807a081218905a49e26d736a885a6ea6",
+      "steps": [
+        {
+          "entry_hex": "0000000000000001010000000c6d6172696164622d6d61696e00000000000000010000000000000011",
+          "entry_base64": "AAAAAAAAAAEBAAAADG1hcmlhZGItbWFpbgAAAAAAAAABAAAAAAAAABE=",
+          "digest": "037c67d980a8ff16adf29649df4ee427d8f6740d17d05e99cca6122b17d8984b"
+        },
+        {
+          "entry_hex": "0000000000000003010000000c6d6172696164622d6d61696e00000000000000010000000000000013",
+          "entry_base64": "AAAAAAAAAAMBAAAADG1hcmlhZGItbWFpbgAAAAAAAAABAAAAAAAAABM=",
+          "digest": "f9c4629a6758d0ee002aa29c46a47d952eebab35a2dd9397a4f44d1cc1961522"
+        }
+      ],
+      "final_digest": "f9c4629a6758d0ee002aa29c46a47d952eebab35a2dd9397a4f44d1cc1961522"
+    }
+  ]
+}

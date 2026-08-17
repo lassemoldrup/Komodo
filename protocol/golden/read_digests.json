@@ -1,0 +1,32 @@
+{
+  "vectors": [
+    {
+      "name": "empty_reads",
+      "reads": [],
+      "preimage_hex": "64622d6d6f6e69746f72696e672f726561642d6469676573740000000000",
+      "digest": "3f251669e36904bc1a3bc472991c9ff89f7f23f6b98bad9dd33f0e66884a06ce"
+    },
+    {
+      "name": "present_snapshot_then_absent_local",
+      "reads": [
+        {
+          "event_seq": 0,
+          "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGUAAAAq",
+          "value_state": "present",
+          "value_bytes_base64": "AAEAAAAAAQAAAAFBAQAAAALDqQEAAAAD5LitAQAAAAEwAQAAAAVoZWxsbwEAAAAE8J+ZggEAAAADYQBiAQAAAARsYXN0",
+          "source": "snapshot"
+        },
+        {
+          "event_seq": 1,
+          "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGX/////",
+          "value_state": "absent",
+          "source": "local"
+        }
+      ],
+      "preimage_length": 183,
+      "preimage_hex": "64622d6d6f6e69746f72696e672f726561642d6469676573740000000002000000000000001e0000000962656e63686261736500000009757365727461626c650000002a01000000450001000000000100000001410100000002c3a90100000003e4b8ad010000000130010000000568656c6c6f0100000004f09f9982010000000361006201000000046c61737401000000010000001e0000000962656e63686261736500000009757365727461626c65ffffffff0202",
+      "preimage_base64": "ZGItbW9uaXRvcmluZy9yZWFkLWRpZ2VzdAAAAAACAAAAAAAAAB4AAAAJYmVuY2hiYXNlAAAACXVzZXJ0YWJsZQAAACoBAAAARQABAAAAAAEAAAABQQEAAAACw6kBAAAAA+S4rQEAAAABMAEAAAAFaGVsbG8BAAAABPCfmYIBAAAAA2EAYgEAAAAEbGFzdAEAAAABAAAAHgAAAAliZW5jaGJhc2UAAAAJdXNlcnRhYmxl/////wIC",
+      "digest": "813a7ce7676b4952e778f4abf96fceae0364f63b5385d31f872aa711d991c501"
+    }
+  ]
+}

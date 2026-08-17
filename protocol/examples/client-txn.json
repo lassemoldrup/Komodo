@@ -1,0 +1,32 @@
+{
+  "kind": "client_txn",
+  "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "session_id": "ycsb/worker/1",
+  "session_seq": 1,
+  "logical_txn_id": "11111111-1111-4111-8111-111111111111",
+  "attempt_id": "22222222-2222-4222-8222-222222222222",
+  "txn_type": "si_fractured_read_probe",
+  "correlation_kind": "mariadb_gtid",
+  "correlation_id": {
+    "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+    "backend_source_id": "mariadb-main",
+    "source_transaction_id": "0-1-17"
+  },
+  "read_count": 2,
+  "read_digest": "813a7ce7676b4952e778f4abf96fceae0364f63b5385d31f872aa711d991c501",
+  "reads": [
+    {
+      "event_seq": 0,
+      "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGUAAAAq",
+      "value_state": "present",
+      "value_bytes_base64": "AAEAAAAAAQAAAAFBAQAAAALDqQEAAAAD5LitAQAAAAEwAQAAAAVoZWxsbwEAAAAE8J+ZggEAAAADYQBiAQAAAARsYXN0",
+      "source": "snapshot"
+    },
+    {
+      "event_seq": 1,
+      "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGX/////",
+      "value_state": "absent",
+      "source": "local"
+    }
+  ]
+}

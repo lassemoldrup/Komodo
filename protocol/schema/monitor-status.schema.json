@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://db-monitoring.local/schema/monitor-status.schema.json",
+  "$defs": {
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "code", "message"],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": ["CHECKER", "PROTOCOL", "OPERATIONAL"]
+        },
+        "code": { "$ref": "common.schema.json#/$defs/errorCode" },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_reconciled",
+        "bootstrap_manifest_validated",
+        "end_fence_seen",
+        "expected_sessions",
+        "completed_sessions",
+        "accepted_client_transactions",
+        "joined_workload_transactions",
+        "bootstrap_cdc_transactions",
+        "bootstrap_checker_transactions",
+        "phase_anchor_transactions",
+        "checker_consumed_transactions",
+        "unmatched_client_records",
+        "unmatched_workload_cdc_slots",
+        "ambiguous_attempts"
+      ],
+      "properties": {
+        "evidence_reconciled": { "type": "boolean" },
+        "bootstrap_manifest_validated": { "type": "boolean" },
+        "end_fence_seen": { "type": "boolean" },
+        "expected_sessions": { "$ref": "common.schema.json#/$defs/uint64" },
+        "completed_sessions": { "$ref": "common.schema.json#/$defs/uint64" },
+        "accepted_client_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+        "joined_workload_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+        "bootstrap_cdc_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+        "bootstrap_checker_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+        "phase_anchor_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+        "checker_consumed_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+        "unmatched_client_records": { "$ref": "common.schema.json#/$defs/uint64" },
+        "unmatched_workload_cdc_slots": { "$ref": "common.schema.json#/$defs/uint64" },
+        "ambiguous_attempts": { "$ref": "common.schema.json#/$defs/uint64" }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "run_id",
+    "lifecycle_state",
+    "outcome",
+    "checker_observation",
+    "last_cdc_stream_id",
+    "last_client_stream_id",
+    "assembled_cdc_transactions",
+    "joined_transactions",
+    "checked_transactions",
+    "pending_cdc_slots",
+    "unmatched_client_records",
+    "diagnostics"
+  ],
+  "properties": {
+    "kind": { "const": "status" },
+    "run_id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "lifecycle_state": {
+      "type": "string",
+      "enum": [
+        "STARTING",
+        "START_FENCE_SEEN",
+        "BOOTSTRAP",
+        "LOAD_FINISHED_SEEN",
+        "RUNNING",
+        "DRAINING",
+        "RECONCILED",
+        "FINAL"
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["RUNNING", "PASS", "VIOLATION", "INVALID"]
+    },
+    "checker_observation": {
+      "type": "string",
+      "enum": ["NOT_STARTED", "PASS_SO_FAR", "VIOLATION_OBSERVED"]
+    },
+    "last_cdc_stream_id": { "$ref": "common.schema.json#/$defs/redisStreamId" },
+    "last_client_stream_id": { "$ref": "common.schema.json#/$defs/redisStreamId" },
+    "assembled_cdc_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+    "joined_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+    "checked_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
+    "pending_cdc_slots": { "$ref": "common.schema.json#/$defs/uint64" },
+    "unmatched_client_records": { "$ref": "common.schema.json#/$defs/uint64" },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "reconciliation": { "$ref": "#/$defs/reconciliation" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "lifecycle_state": { "const": "FINAL" } } },
+      "then": {
+        "required": ["reconciliation"],
+        "properties": {
+          "outcome": { "enum": ["PASS", "VIOLATION", "INVALID"] }
+        }
+      },
+      "else": {
+        "properties": { "outcome": { "const": "RUNNING" } },
+        "not": { "required": ["reconciliation"] }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "PASS" } } },
+      "then": {
+        "properties": { "checker_observation": { "const": "PASS_SO_FAR" } }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "VIOLATION" } } },
+      "then": {
+        "properties": { "checker_observation": { "const": "VIOLATION_OBSERVED" } }
+      }
+    }
+  ]
+}

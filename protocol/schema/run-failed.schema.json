@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://db-monitoring.local/schema/run-failed.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "run_id", "phase", "reason_code", "diagnostic"],
+  "properties": {
+    "kind": { "const": "run_failed" },
+    "run_id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "session_id": { "$ref": "common.schema.json#/$defs/sessionId" },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "CONFIGURATION",
+        "CONNECTION_SETUP",
+        "ATTEMPT_BODY",
+        "ROLLBACK",
+        "COMMIT",
+        "GTID_LOOKUP",
+        "REDIS_PUBLICATION",
+        "SESSION_SHUTDOWN",
+        "COORDINATOR"
+      ]
+    },
+    "reason_code": { "$ref": "common.schema.json#/$defs/errorCode" },
+    "diagnostic": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    }
+  }
+}

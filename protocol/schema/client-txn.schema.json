@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://db-monitoring.local/schema/client-txn.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "run_id",
+    "session_id",
+    "session_seq",
+    "logical_txn_id",
+    "attempt_id",
+    "txn_type",
+    "correlation_kind",
+    "correlation_id",
+    "read_count",
+    "read_digest",
+    "reads"
+  ],
+  "properties": {
+    "kind": { "const": "client_txn" },
+    "run_id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "session_id": { "$ref": "common.schema.json#/$defs/sessionId" },
+    "session_seq": { "$ref": "common.schema.json#/$defs/positiveUint64" },
+    "logical_txn_id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "attempt_id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "txn_type": {
+      "type": "string",
+      "enum": [
+        "ycsb_insert",
+        "ycsb_update",
+        "ycsb_delete",
+        "si_fractured_read_probe"
+      ]
+    },
+    "correlation_kind": { "const": "mariadb_gtid" },
+    "correlation_id": { "$ref": "common.schema.json#/$defs/correlationId" },
+    "read_count": { "$ref": "common.schema.json#/$defs/uint32" },
+    "read_digest": { "$ref": "common.schema.json#/$defs/sha256" },
+    "reads": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "common.schema.json#/$defs/read" }
+    }
+  }
+}

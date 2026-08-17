@@ -1,0 +1,20 @@
+{
+  "vectors": [
+    {
+      "name": "all_null",
+      "fields": [null, null, null, null, null, null, null, null, null, null],
+      "length": 10,
+      "hex": "00000000000000000000",
+      "base64": "AAAAAAAAAAAAAA==",
+      "sha256": "01d448afd928065458cf670b60f5a594d735af0172c8d67f22a81680132681ca"
+    },
+    {
+      "name": "mixed_utf8",
+      "fields": [null, "", "A", "é", "中", "0", "hello", "🙂", "a\u0000b", "last"],
+      "length": 69,
+      "hex": "0001000000000100000001410100000002c3a90100000003e4b8ad010000000130010000000568656c6c6f0100000004f09f9982010000000361006201000000046c617374",
+      "base64": "AAEAAAAAAQAAAAFBAQAAAALDqQEAAAAD5LitAQAAAAEwAQAAAAVoZWxsbwEAAAAE8J+ZggEAAAADYQBiAQAAAARsYXN0",
+      "sha256": "4d953fbb87c4ac6d920410774a9c8669dac28678b9a940738e82fa2dcb43c1c0"
+    }
+  ]
+}

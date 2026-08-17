@@ -1,0 +1,31 @@
+{
+  "kind": "status",
+  "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "lifecycle_state": "FINAL",
+  "outcome": "PASS",
+  "checker_observation": "PASS_SO_FAR",
+  "last_cdc_stream_id": "1710000000000-0",
+  "last_client_stream_id": "1710000000001-0",
+  "assembled_cdc_transactions": 6,
+  "joined_transactions": 2,
+  "checked_transactions": 5,
+  "pending_cdc_slots": 0,
+  "unmatched_client_records": 0,
+  "diagnostics": [],
+  "reconciliation": {
+    "evidence_reconciled": true,
+    "bootstrap_manifest_validated": true,
+    "end_fence_seen": true,
+    "expected_sessions": 2,
+    "completed_sessions": 2,
+    "accepted_client_transactions": 2,
+    "joined_workload_transactions": 2,
+    "bootstrap_cdc_transactions": 1,
+    "bootstrap_checker_transactions": 1,
+    "phase_anchor_transactions": 2,
+    "checker_consumed_transactions": 5,
+    "unmatched_client_records": 0,
+    "unmatched_workload_cdc_slots": 0,
+    "ambiguous_attempts": 0
+  }
+}

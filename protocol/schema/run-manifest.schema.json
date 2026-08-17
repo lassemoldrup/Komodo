@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://db-monitoring.local/schema/run-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "run_id",
+    "backend",
+    "backend_source_id",
+    "declared_isolation",
+    "benchmark",
+    "expected_session_ids",
+    "application_table_allowlist",
+    "control_table_allowlist",
+    "result_scope"
+  ],
+  "properties": {
+    "kind": { "const": "run_manifest" },
+    "run_id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "backend": { "const": "mariadb" },
+    "backend_source_id": { "$ref": "common.schema.json#/$defs/nonEmptyString" },
+    "declared_isolation": {
+      "type": "string",
+      "enum": ["READ_COMMITTED", "REPEATABLE_READ"]
+    },
+    "benchmark": { "const": "ycsb" },
+    "expected_session_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "common.schema.json#/$defs/sessionId" }
+    },
+    "application_table_allowlist": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "common.schema.json#/$defs/tableName" }
+    },
+    "control_table_allowlist": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "common.schema.json#/$defs/tableName" }
+    },
+    "result_scope": { "const": "write_projected_soww" }
+  }
+}

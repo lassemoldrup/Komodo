@@ -1,0 +1,16 @@
+{
+  "kind": "session_done",
+  "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "session_id": "ycsb/worker/2",
+  "final_session_seq": 0,
+  "logical_transactions_started": 0,
+  "successful_transactions": 0,
+  "terminal_aborted_transactions": 0,
+  "physical_attempts_started": 0,
+  "definitively_aborted_attempts": 0,
+  "published_write_transactions": 0,
+  "ignored_successful_no_write_transactions": 0,
+  "retry_attempts": 0,
+  "ambiguous_attempts": 0,
+  "rolling_correlation_digest": "131c321cfe8be47e97969aeaf5e848ec807a081218905a49e26d736a885a6ea6"
+}

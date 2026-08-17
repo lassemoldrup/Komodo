@@ -1,0 +1,8 @@
+{
+  "kind": "run_failed",
+  "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "session_id": "ycsb/worker/1",
+  "phase": "COMMIT",
+  "reason_code": "COMMIT_OUTCOME_AMBIGUOUS",
+  "diagnostic": "commit() raised SQLState 08006; outcome cannot be proven"
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://db-monitoring.local/schema/records.schema.json",
+  "oneOf": [
+    { "$ref": "run-manifest.schema.json" },
+    { "$ref": "bootstrap-manifest.schema.json" },
+    { "$ref": "client-txn.schema.json" },
+    { "$ref": "session-done.schema.json" },
+    { "$ref": "run-failed.schema.json" },
+    { "$ref": "monitor-status.schema.json" }
+  ]
+}

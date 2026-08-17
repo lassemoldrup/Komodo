@@ -1,0 +1,30 @@
+{
+  "canonical_schema": "benchbase",
+  "canonical_table": "usertable",
+  "vectors": [
+    {
+      "key": -2147483648,
+      "hex": "0000000962656e63686261736500000009757365727461626c6580000000",
+      "base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGWAAAAA",
+      "sha256": "5f5dc3f005a569e4c88e073fb663dea82c8bef67e12ac875bb1efcd2ad947049"
+    },
+    {
+      "key": -1,
+      "hex": "0000000962656e63686261736500000009757365727461626c65ffffffff",
+      "base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGX/////",
+      "sha256": "2b6461927129ed264bdce703c9a48d363aa01dc7bd5858e7af115da2e4440853"
+    },
+    {
+      "key": 42,
+      "hex": "0000000962656e63686261736500000009757365727461626c650000002a",
+      "base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGUAAAAq",
+      "sha256": "57e4bd034b2329163f26a3241480f65b1d65dd4fdd08d79caacafb94e48f0453"
+    },
+    {
+      "key": 2147483647,
+      "hex": "0000000962656e63686261736500000009757365727461626c657fffffff",
+      "base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGV/////",
+      "sha256": "621deb60b507dccd917145eb6a78ebb7c8d12a4acd88eb7aa602c944f4dab6af"
+    }
+  ]
+}
