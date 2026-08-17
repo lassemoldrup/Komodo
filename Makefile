@@ -1,4 +1,4 @@
-# Backend selection: DB=mariadb (default) or DB=yugabyte
+# Backend selection: DB=mariadb (default) | yugabyte | oracle
 DB ?= mariadb
 COMPOSE = docker compose --profile $(DB)
 
@@ -8,7 +8,9 @@ COMPOSE = docker compose --profile $(DB)
 up:
 	$(COMPOSE) up -d --build
 	@echo "waiting for Debezium to reach streaming ..."
-	@if [ "$(DB)" = "yugabyte" ]; then C=cdc-debezium-yb; else C=cdc-debezium; fi; \
+	@if [ "$(DB)" = "yugabyte" ]; then C=cdc-debezium-yb; \
+	 elif [ "$(DB)" = "oracle" ]; then C=cdc-debezium-oracle; \
+	 else C=cdc-debezium; fi; \
 	  until docker logs $$C 2>&1 | grep -q 'Starting streaming'; do sleep 2; done
 	@echo "ready ($(DB)). stream: redis://localhost:6379 key 'cdc'"
 

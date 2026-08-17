@@ -12,8 +12,10 @@
 #      Debezium Server base. The result runs natively on arm64.
 #
 #   3. The connector is built against Debezium 2.5.2, so the Server
-#      distribution must be 2.5.2 — it is NOT compatible with the 3.2 server
-#      the MariaDB side uses.
+#      distribution must be 2.5.2 — it is NOT compatible with the 3.6.1 server
+#      the MariaDB and Oracle sides use. This pin is forced by Yugabyte, who
+#      publish only dz.2.5.2.yb.* builds; watch quay.io/yugabyte/ybdb-debezium
+#      for a dz.3.x.yb.* tag, which would collapse the stack to one version.
 #
 #   4. The connector is compiled for Java 17, but debezium/server:2.5.2.Final
 #      ships a Java 11 JRE. Running it there dies with

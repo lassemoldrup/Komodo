@@ -31,14 +31,35 @@ BODY="${*:-$BODY_DEFAULT}"
 TMP=$(mktemp /tmp/_txn.XXXXXX)
 trap 'rm -f "$TMP"' EXIT
 
-if [ "$DB" = "yugabyte" ]; then
+if [ "$DB" = "oracle" ]; then
+  # Oracle hands out the key, like MariaDB. DBMS_TRANSACTION.LOCAL_TRANSACTION_ID
+  # returns usn.slot.sqn; Debezium reports the same value in source.txId as
+  # little-endian hex, so the two are the same id in different encodings.
+  cat > "$TMP" <<SQL
+set heading off feedback off pagesize 0
+-- No isolation statement: a logon trigger sets SERIALIZABLE (= SI) for this
+-- schema, so the session default is already correct.
+${BODY}
+SELECT 'XID=' || DBMS_TRANSACTION.LOCAL_TRANSACTION_ID FROM DUAL;
+COMMIT;
+exit
+SQL
+  OUT=$(db_run_file "$TMP" 2>&1)
+  if echo "$OUT" | grep -q '^ORA-'; then
+    echo "marker: ABORTED - $(echo "$OUT" | grep '^ORA-' | head -1)"
+    exit 1
+  fi
+  echo "marker: xid=$(echo "$OUT" | grep -o 'XID=.*' | head -1 | cut -d= -f2)"
+elif [ "$DB" = "yugabyte" ]; then
   SESSION="${SESSION:-sess1}"
   TXN_ID="${TXN_ID:-$(date +%s)}"
   # The marker is the LAST statement before COMMIT: the workload runs first,
   # so nothing about the transaction's own behaviour is perturbed by the
   # bookkeeping write. Upsert, so a session needs no pre-provisioned row.
   cat > "$TMP" <<SQL
-BEGIN ISOLATION LEVEL REPEATABLE READ;
+-- Plain BEGIN: default_transaction_isolation is set to repeatable read
+-- (= SI) at the database level.
+BEGIN;
 ${BODY}
 INSERT INTO session_txn (session_id, txn_id) VALUES ('${SESSION}', ${TXN_ID})
   ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;

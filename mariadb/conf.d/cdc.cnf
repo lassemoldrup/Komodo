@@ -1,40 +1,35 @@
+# Settings marked [pin] already match the MariaDB 12.3 default; they are stated
+# explicitly so the experiment does not silently change when a default moves.
+# Everything else differs from stock. See "Database parameters" in the README.
+
 [mariadb]
 server_id                        = 1
 log_basename                     = mariadb
 
 # --- Isolation -------------------------------------------------------------
-# Textbook Snapshot Isolation. ON by default in this MariaDB version, but
-# pinned explicitly so the experiment does not depend on a server default
-# that differs across versions or images.
-#
-# Effect: a transaction that writes a row changed since its snapshot is
-# ABORTED with ER_CHECKREAD (1020) rather than blocking on a lock, i.e.
-# first-committer-wins. Write skew across disjoint rows remains permitted,
-# which is the SI-defining anomaly this harness exists to observe.
-#
+# [pin] Textbook Snapshot Isolation: a transaction writing a row changed since
+# its snapshot is ABORTED with ER_CHECKREAD (1020) rather than blocking, i.e.
+# first-committer-wins. Write skew across disjoint rows remains permitted.
 # Only applies at REPEATABLE READ, so that is pinned too.
 innodb_snapshot_isolation        = ON
 transaction_isolation            = REPEATABLE-READ
 
 # --- Binary log ------------------------------------------------------------
 log_bin                          = mariadb-bin
-binlog_format                    = ROW
+binlog_format                    = ROW          # [pin]
 
-# FULL row image: the monitor needs the value each write produced, and the
-# version it overwrote. This is the one setting that must not be reduced.
+# [pin] The monitor needs the value each write produced and the version it
+# overwrote. This is the one setting that must not be reduced.
 binlog_row_image                 = FULL
 
 # Column names/types in the table-map event. Emitted once per table per
 # transaction, not per row, so the cost is negligible.
 binlog_row_metadata              = FULL
 
-# The client logs its own operations, so the SQL text in the binlog is dead
-# weight. Off = smaller binlog, less work per commit.
+# The client logs its own operations, so SQL text in the binlog is dead weight.
 binlog_annotate_row_events       = OFF
 
-# No replicas and no binlog relay in this topology.
-log_slave_updates                = OFF
-
+log_slave_updates                = OFF          # [pin] no replicas here
 max_binlog_size                  = 256M
 expire_logs_days                 = 1
 
@@ -43,18 +38,14 @@ expire_logs_days                 = 1
 gtid_strict_mode                 = 1
 
 # --- Durability ------------------------------------------------------------
-# Crash durability is irrelevant for a throwaway experiment harness, and
-# fsync-per-commit would otherwise dominate the measured commit rate.
-# NOTE: this changes only durability, never isolation semantics.
-sync_binlog                      = 0
+# Crash durability is irrelevant for a throwaway harness. Affects durability
+# only, never isolation semantics.
 innodb_flush_log_at_trx_commit   = 0
+sync_binlog                      = 0            # [pin]
 
 # --- Throughput ------------------------------------------------------------
 innodb_buffer_pool_size          = 1G
 innodb_log_file_size             = 256M
 max_connections                  = 512
-performance_schema               = OFF
-skip_name_resolve                = ON
-
-character_set_server             = utf8mb4
-collation_server                 = utf8mb4_unicode_ci
+performance_schema               = OFF          # [pin]
+skip_name_resolve                = ON           # [pin]

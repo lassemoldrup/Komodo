@@ -1,17 +1,18 @@
 name: si-monitoring
 
-# CDC pipeline for Snapshot Isolation anomaly monitoring. Two interchangeable
+# CDC pipeline for Snapshot Isolation anomaly monitoring. Three interchangeable
 # backends, one shared downstream half:
 #
-#   MariaDB    --binlog--------\
-#                               >-- Debezium Server --> Redis stream "cdc" --> C++ monitor
-#   YugabyteDB --logical repl--/
+#   MariaDB    --binlog (GTID)--------\
+#   YugabyteDB --logical repl (HT)-----+-- Debezium Server --> Redis "cdc" --> C++ monitor
+#   Oracle     --LogMiner (commit SCN)/
 #
-# Exactly one backend runs at a time; both write to the same Redis stream, so
+# Exactly one backend runs at a time; all write to the same Redis stream, so
 # the monitor reads one place regardless of backend.
 #
 #   make up              # MariaDB   (default)
 #   make up DB=yugabyte  # YugabyteDB
+#   make up DB=oracle    # Oracle
 
 services:
   # ---------------------------------------------------------------- shared --
@@ -65,7 +66,7 @@ services:
 
   debezium:
     profiles: [mariadb]
-    image: quay.io/debezium/server:3.2
+    image: quay.io/debezium/server:3.6.1.Final
     container_name: cdc-debezium
     depends_on:
       mariadb:
@@ -74,7 +75,14 @@ services:
         condition: service_healthy
     volumes:
       - ./debezium/application.properties:/debezium/config/application.properties:ro
-      - debezium-data:/debezium/data
+    # tmpfs, NOT a named volume: the databases here are all ephemeral (tmpfs
+    # datadir / container layer), so persisted offsets would outlive the
+    # binlog they point into. `down` + `up` then resumes at a position from a
+    # previous database lifetime and silently emits transaction boundaries
+    # with zero row events. Tying offset lifetime to container lifetime makes
+    # that unrepresentable.
+    tmpfs:
+      - /debezium/data:rw,size=64m
     networks: [cdc]
 
   # ------------------------------------------------------------ YugabyteDB --
@@ -134,12 +142,51 @@ services:
     volumes:
       # 2.5.2 reads /debezium/conf; the 3.x MariaDB server reads /debezium/config
       - ./debezium/application-yugabyte.properties:/debezium/conf/application.properties:ro
-      - debezium-yb-data:/debezium/data
+    tmpfs:
+      - /debezium/data:rw,size=64m
     networks: [cdc]
 
-volumes:
-  debezium-data:
-  debezium-yb-data:
+  # ---------------------------------------------------------------- Oracle --
+  oracle:
+    profiles: [oracle]
+    # 23.26 renamed the banner to "Oracle AI Database 26ai ...", which broke
+    # Debezium <=3.2 (it resolved the version with
+    # `WHERE BANNER_FULL LIKE 'Oracle Database%'`). 3.6.1 reads the version
+    # from JDBC metadata instead, so current Oracle works. See README.
+    image: ${ORACLE_IMAGE:-gvenzl/oracle-free:23.26.2-slim}
+    container_name: cdc-oracle
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-oraclepw}
+    ports:
+      - "1521:1521"
+    volumes:
+      # Runs on every start: ARCHIVELOG, supplemental logging, CDC user, schema.
+      - ./oracle/startdb.d:/container-entrypoint-startdb.d:ro
+    healthcheck:
+      # Gate on the setup hook finishing, not just the listener being up.
+      # A file test rather than a sqlplus call: sqlplus startup can exceed a
+      # short healthcheck timeout and leave the container stuck in "starting".
+      test: ["CMD-SHELL", "test -f /tmp/cdc-setup.done"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    networks: [cdc]
+
+  debezium-oracle:
+    profiles: [oracle]
+    image: quay.io/debezium/server:3.6.1.Final
+    container_name: cdc-debezium-oracle
+    depends_on:
+      oracle:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./debezium/application-oracle.properties:/debezium/config/application.properties:ro
+    tmpfs:
+      - /debezium/data:rw,size=64m
+    networks: [cdc]
 
 networks:
   cdc:

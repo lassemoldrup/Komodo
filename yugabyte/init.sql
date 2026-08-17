@@ -7,6 +7,13 @@
 -- connector then retries forever instead of failing.
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- Default isolation: YugabyteDB's REPEATABLE READ *is* Snapshot Isolation.
+-- The server default is READ COMMITTED, so it is raised here at the database
+-- level: every new session gets SI without the client setting anything.
+-- ---------------------------------------------------------------------------
+ALTER DATABASE yugabyte SET default_transaction_isolation = 'repeatable read';
+
 -- Placeholder workload schema: a bank of integer registers, the usual
 -- write-skew testbed. Replace with your own workload schema.
 CREATE TABLE IF NOT EXISTS registers (
