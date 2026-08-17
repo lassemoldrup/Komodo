@@ -99,11 +99,16 @@ for line in sys.stdin:
     table = src.get("table")
 
     # Surface the session marker: this is the client-supplied join key.
-    if table == "session_txn":
-        a = after or {}
-        b = before or {}
+    if (table or "").lower() == "session_txn":
+        def fld(d, name):
+            d = d or {}
+            for k, v in d.items():
+                if k.lower() == name:
+                    return v
+            return None
         print("  MARKER  session=%s txn_id=%s (prev=%s)  txn=%s" % (
-            a.get("session_id"), a.get("txn_id"), b.get("txn_id"), txn_key(src)))
+            fld(after, "session_id"), fld(after, "txn_id"),
+            fld(before, "txn_id"), txn_key(src)))
         continue
 
     if src.get("commit_scn") is not None:

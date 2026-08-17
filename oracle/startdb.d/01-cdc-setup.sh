@@ -46,6 +46,27 @@ grep -iE 'ORA-[0-9]+' /tmp/cdc-setup.log \
   | grep -viE 'ORA-01920|ORA-00955|ORA-00001|ORA-03301|ORA-12920|ORA-32588' \
   && log "WARNING: unexpected errors above (see /tmp/cdc-setup.log)"
 
+# The first SERIALIZABLE transaction against a freshly created table fails with
+# ORA-08176 (consistent read failure; rollback data not available) because the
+# DDL is too recent. Only the first one -- it settles immediately after. Absorb
+# it here as sitest (the logon trigger gives SERIALIZABLE) so the first real
+# workload transaction is clean. Runs before Debezium starts, so none of this
+# reaches the CDC stream.
+log "warming up SERIALIZABLE reads ..."
+for _ in 1 2 3; do
+  sqlplus -s sitest/sitestpw@localhost:1521/freepdb1 >/dev/null 2>&1 <<'EOF' && break
+UPDATE sitest.registers SET val = val WHERE id = 1;
+MERGE INTO sitest.session_txn t
+  USING (SELECT '__warmup__' AS session_id, 0 AS txn_id FROM DUAL) s
+  ON (t.session_id = s.session_id)
+  WHEN MATCHED THEN UPDATE SET t.txn_id = s.txn_id
+  WHEN NOT MATCHED THEN INSERT (session_id, txn_id) VALUES (s.session_id, s.txn_id);
+DELETE FROM sitest.session_txn WHERE session_id = '__warmup__';
+COMMIT;
+exit
+EOF
+done
+
 # Sentinel for the container healthcheck: cheaper and far more reliable than
 # spawning sqlplus, which can exceed a short healthcheck timeout.
 touch /tmp/cdc-setup.done

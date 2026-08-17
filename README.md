@@ -15,11 +15,14 @@ runs at a time and all write to the same stream, so the monitor reads one place.
    Oracle      --LogMiner (commit SCN)/
 ```
 
-| Backend | Version | Join key | Capture latency |
+All three use the **same** client-supplied join key, so the monitor never
+branches on backend.
+
+| Backend | Version | Capture latency | Server txn id (cross-check) |
 |---|---|---|---|
-| MariaDB | 12.3 | GTID (`@@session.last_gtid`) | ~10 ms |
-| YugabyteDB | latest | client marker table | ~40 ms |
-| Oracle | 23.26 (26ai) | XID (`DBMS_TRANSACTION.LOCAL_TRANSACTION_ID`) | ~2 s |
+| MariaDB | 12.3 | ~10 ms | `source.gtid` |
+| YugabyteDB | latest | ~40 ms | `source.lsn` (commit hybrid time) |
+| Oracle | 23.26 (26ai) | ~2 s | `source.txId` (XID) |
 
 ## Quick start
 
@@ -68,50 +71,61 @@ Per-backend envelope differences:
 | column values | plain | wrapped `{"value":…,"set":…}` | plain, numbers as strings |
 | timestamps | ms + µs + ns | ms | ms |
 
-On YugabyteDB, `transaction.id` is a composite `txId:lsn` and `source.txId` is a
-per-slot counter that resets — use `source.lsn` as the identity. On Oracle,
-`source.txId` is the XID as little-endian hex of `usn.slot.sqn`.
+The join key is the `session_txn` marker, not these fields. The server ids are
+still emitted and useful as a cross-check: on YugabyteDB use `source.lsn`
+(`transaction.id` is a composite `txId:lsn`, and `source.txId` is a per-slot
+counter that resets); on Oracle `source.txId` is the XID as little-endian hex
+of `usn.slot.sqn`.
 
 ## Client protocol
 
-All three backends default to Snapshot Isolation server-side, so the client
-does not set an isolation level. It only has to tag its read log with the same
-key the stream carries.
+One protocol everywhere. The client mints its own `(session_id, txn_id)` and
+upserts it into its session's row in `session_txn` as the **last statement** of
+the transaction, so the marker travels inside that transaction's own change set
+and arrives after the workload writes. `session_txn` starts empty; sessions
+create their own row on first use.
 
-**MariaDB** — read the GTID after a successful `COMMIT`, on the same session.
-After a read-only, rolled-back, or aborted transaction it still holds the
-previous value, so only read it after a commit that succeeded.
-
-```sql
-START TRANSACTION;
-  -- reads and writes; client logs each read
-COMMIT;
-SELECT @@session.last_gtid;
-```
-
-**Oracle** — read the XID inside the transaction. Conflicts surface as
-`ORA-08177`; the client needs a retry path.
+No isolation statement is issued: all three backends default to Snapshot
+Isolation server-side. Only the upsert dialect differs.
 
 ```sql
-  -- reads and writes; client logs each read
-SELECT DBMS_TRANSACTION.LOCAL_TRANSACTION_ID FROM DUAL;
-COMMIT;
-```
-
-**YugabyteDB** — no server-side key exists, so the client supplies one.
-`session_txn` holds one row per session, upserted as the **last** statement of
-the transaction, so the marker travels inside that transaction's change set.
-The table starts empty; sessions need no provisioning. `REPLICA IDENTITY FULL`
-means the before-image carries the previous `txn_id`, giving a per-session chain
-check for free.
-
-```sql
+-- YugabyteDB
 BEGIN;
   -- reads and writes; client logs each read
 INSERT INTO session_txn (session_id, txn_id) VALUES ('<sid>', <counter>)
   ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
 COMMIT;
+
+-- MariaDB
+START TRANSACTION;
+  -- reads and writes; client logs each read
+INSERT INTO session_txn (session_id, txn_id) VALUES ('<sid>', <counter>)
+  ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+COMMIT;
+
+-- Oracle (no ON CONFLICT; MERGE is the upsert)
+  -- reads and writes; client logs each read
+MERGE INTO session_txn t
+  USING (SELECT '<sid>' AS session_id, <counter> AS txn_id FROM DUAL) s
+  ON (t.session_id = s.session_id)
+  WHEN MATCHED THEN UPDATE SET t.txn_id = s.txn_id
+  WHEN NOT MATCHED THEN INSERT (session_id, txn_id) VALUES (s.session_id, s.txn_id);
+COMMIT;
 ```
+
+The marker write and the workload writes must be **atomic**: a transaction that
+commits its workload without a marker is uncorrelatable. On Oracle this needs
+`WHENEVER SQLERROR EXIT ROLLBACK` — sqlplus otherwise continues past a failed
+marker and still runs `COMMIT`. `scripts/txn.sh` is the reference
+implementation for all three.
+
+Because the before-image carries the previous `txn_id`, a per-session chain
+check comes for free: if `prev` is not the last `txn_id` you saw for that
+session, a transaction went missing.
+
+Conflicts abort — `ER_CHECKREAD` (MariaDB), `could not serialize access`
+(YugabyteDB), `ORA-08177` (Oracle) — so the client needs a retry path. Aborted
+transactions produce no stream events at all.
 
 ## Reading the stream from C++
 
@@ -212,7 +226,7 @@ and the slot is created with `yb_lsn_type=HYBRID_TIME` (default `SEQUENCE`).
 | archive log mode | `NOARCHIVELOG` | `ARCHIVELOG` |
 | force logging | NO | YES |
 | minimal supplemental logging | NO | YES |
-| per-table supplemental logging | none | `ALL COLUMNS` |
+| per-table supplemental logging | none | `ALL COLUMNS` on both tables |
 | default isolation | READ COMMITTED | SERIALIZABLE (= SI), via an `AFTER LOGON` trigger on the `SITEST` schema |
 
 **Redis** — `--save ""` (default has RDB save points), `--appendonly no`

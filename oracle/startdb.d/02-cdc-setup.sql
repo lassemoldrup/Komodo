@@ -36,10 +36,6 @@ GRANT SELECT ON V_$TRANSACTION         TO c##dbzuser CONTAINER=ALL;
 
 -- ---------------------------------------------------------------------------
 -- Workload schema, in the PDB.
---
--- No session_txn marker table here: unlike YugabyteDB, Oracle hands out a
--- usable join key. DBMS_TRANSACTION.LOCAL_TRANSACTION_ID returns usn.slot.sqn,
--- which is exactly what Debezium reports in source.txId, little-endian hex.
 -- ---------------------------------------------------------------------------
 ALTER SESSION SET CONTAINER = FREEPDB1;
 
@@ -52,6 +48,15 @@ CREATE TABLE sitest.registers (
   val NUMBER(19) DEFAULT 0 NOT NULL
 );
 
+-- Transaction marker. Identical role on every backend: one row per client
+-- session, upserted as the LAST statement of each transaction, so the marker
+-- travels inside that transaction's own change set and identifies it in the
+-- CDC stream. Starts empty; sessions create their own row on first use.
+CREATE TABLE sitest.session_txn (
+  session_id VARCHAR2(64) PRIMARY KEY,
+  txn_id     NUMBER(19) DEFAULT 0 NOT NULL
+);
+
 INSERT INTO sitest.registers (id, val) VALUES (1, 0);
 INSERT INTO sitest.registers (id, val) VALUES (2, 0);
 INSERT INTO sitest.registers (id, val) VALUES (3, 0);
@@ -60,7 +65,8 @@ COMMIT;
 
 -- (ALL) COLUMNS is the Oracle equivalent of REPLICA IDENTITY FULL: without it
 -- the monitor gets only changed columns plus the key, not a full before-image.
-ALTER TABLE sitest.registers ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
+ALTER TABLE sitest.registers   ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
+ALTER TABLE sitest.session_txn ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
 
 -- ---------------------------------------------------------------------------
 -- Default isolation: Oracle's SERIALIZABLE *is* Snapshot Isolation, and the

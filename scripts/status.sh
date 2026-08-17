@@ -27,6 +27,9 @@ ORASQL
   echo
   echo "=== Registers ==="
   db_query "select 'id=' || id || ' val=' || val from sitest.registers order by id;"
+  echo
+  echo "=== Session markers ==="
+  db_query "select session_id || ' -> ' || txn_id from sitest.session_txn order by session_id;"
   DBZ=cdc-debezium-oracle
 elif [ "$DB" = "yugabyte" ]; then
   echo "=== Replication slot (must be HYBRID_TIME) ==="
@@ -46,6 +49,8 @@ else
   db_query "SELECT @@gtid_binlog_pos"
   echo "=== Isolation ==="
   db_query "SELECT CONCAT(@@innodb_snapshot_isolation, ' / ', @@transaction_isolation)"
+  echo "=== Session markers ==="
+  db_query "SELECT CONCAT(session_id, ' -> ', txn_id) FROM session_txn ORDER BY session_id"
   DBZ=cdc-debezium
 fi
 
