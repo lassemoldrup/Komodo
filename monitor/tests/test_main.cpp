@@ -3,10 +3,12 @@
 #include <iostream>
 
 int runCanonicalYcsbCodecTests();
+int runDebeziumAssemblerTests();
 int runRedisReaderTests();
 
 int main() {
   runCanonicalYcsbCodecTests();
+  runDebeziumAssemblerTests();
   runRedisReaderTests();
   if (blackbox::test::failures != 0) {
     std::cerr << blackbox::test::failures

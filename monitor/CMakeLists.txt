@@ -14,7 +14,11 @@ find_package(nlohmann_json 3.11.3 EXACT CONFIG REQUIRED)
 
 add_library(blackbox_monitor
   src/canonical_ycsb_codec.cpp
+  src/cdc_error.cpp
+  src/cdc_types.cpp
+  src/debezium_assembler.cpp
   src/redis_reader.cpp
+  src/strict_json.cpp
 )
 target_include_directories(blackbox_monitor
   PUBLIC
@@ -31,6 +35,33 @@ target_compile_options(blackbox_monitor
 target_link_libraries(blackbox_monitor
   PUBLIC
     PkgConfig::HIREDIS
+    nlohmann_json::nlohmann_json
+)
+
+add_executable(blackbox_cdc_replay
+  tools/cdc_replay.cpp
+)
+
+add_executable(blackbox_cdc_ingest
+  tools/cdc_ingest.cpp
+)
+target_link_libraries(blackbox_cdc_ingest PRIVATE blackbox_monitor)
+target_compile_options(blackbox_cdc_ingest
+  PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wsign-conversion
+)
+target_link_libraries(blackbox_cdc_replay PRIVATE blackbox_monitor)
+target_compile_options(blackbox_cdc_replay
+  PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wsign-conversion
 )
 
 if(BLACKBOX_MONITOR_BUILD_TESTING)
@@ -38,6 +69,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
 
   add_executable(blackbox_monitor_tests
     tests/test_canonical_ycsb_codec.cpp
+    tests/test_debezium_assembler.cpp
     tests/test_main.cpp
     tests/test_redis_reader.cpp
   )
@@ -53,6 +85,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   target_compile_definitions(blackbox_monitor_tests
     PRIVATE
       BLACKBOX_PROTOCOL_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/golden"
+      BLACKBOX_CDC_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
   )
   target_compile_options(blackbox_monitor_tests
     PRIVATE
@@ -63,4 +96,15 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
       -Wsign-conversion
   )
   add_test(NAME blackbox_monitor_tests COMMAND blackbox_monitor_tests)
+  add_test(
+    NAME blackbox_cdc_replay_fixture
+    COMMAND blackbox_cdc_replay
+            --input
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_lifecycle.json
+            --run-id
+            084cc5a1-3cbe-4fef-bb5c-43559a1c13a0
+  )
+  set_tests_properties(blackbox_cdc_replay_fixture PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"completed_transactions\": 11"
+  )
 endif()
