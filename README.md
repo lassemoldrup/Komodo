@@ -31,7 +31,7 @@ make up                  # MariaDB (default); blocks until Debezium is streaming
 make up DB=yugabyte
 make up DB=oracle
 
-make txn                 # one manual write transaction (raw CDC exploration)
+make txn                 # one write transaction, prints its correlation marker
 make stream              # dump the CDC stream
 make follow              # tail it live
 make status              # health of the active backend
@@ -42,41 +42,9 @@ make reset               # wipe everything for the active backend
 Every target takes `DB=`, defaulting to `mariadb`. Scripts infer the backend
 from the running containers, so `./scripts/*.sh` need no flag.
 
-These commands are useful for raw CDC exploration; `make up` is not an audited
-black-box run. **Use `make reset`, not `make down`, between exploratory runs.**
-All three databases are
+**Use `make reset`, not `make down`, between runs.** All three databases are
 ephemeral, and a stale connector offset against a fresh database silently
 yields transactions with zero row events.
-
-## Audited MariaDB lifecycle
-
-`scripts/e2e.sh` is the sole coordinator for a black-box run. It deliberately
-starts the stack in separate database/schema, CDC, monitor, loader, and workload
-phases. Supply one-run commands for the components that live outside this
-repository:
-
-```bash
-BLACKBOX_MONITOR_COMMAND='<monitor command>' \
-BLACKBOX_LOADER_COMMAND='<BenchBase --load command, without --create>' \
-BLACKBOX_WORKLOAD_COMMAND='<BenchBase --execute command>' \
-BLACKBOX_EXPECTED_SESSION_IDS='ycsb/worker/1,ycsb/worker/2' \
-  make e2e
-```
-
-The coordinator recreates the MariaDB/Redis stack, verifies that
-`benchbase.usertable`, the fence table, and all streams are empty, starts CDC,
-publishes `RunManifest`, and commits `RUN_START`. The loader cannot start before
-`START_FENCE_SEEN`; the workload cannot start before the independently scanned
-`BootstrapManifest` and `LOAD_FINISHED_SEEN`. `END_FENCE` is committed only
-after both the owned workload process session and application database
-connections are observed quiescent. A failed quiescence proof publishes a
-best-effort diagnostic and exits without an end fence.
-
-The monitor executable and its real acknowledgements land with CDC ingestion.
-Until then, `make test-lifecycle` exercises the same gates with controlled,
-schema-valid status records. `make test-lifecycle-live` destructively recreates
-the pinned MariaDB/Debezium/Redis stack and verifies the raw database order:
-`RUN_START`, loader, `LOAD_FINISHED`, workload, `END_FENCE`.
 
 ## Stream contract
 
@@ -109,20 +77,16 @@ emits its own server-side transaction id in `source` (GTID, commit hybrid time,
 XID) — that is default connector behaviour, and this harness neither uses nor
 relies on it.
 
-## MariaDB client protocol
+## Client protocol
 
-Each exclusive physical connection establishes a baseline from
-`@@session.last_gtid` before an application attempt. After an acknowledged
-commit, BenchBase reads it again on the same connection. A changed canonical
-GTID identifies a physical write transaction and keys one `ClientTxn`; an
-unchanged value is a successful no-write transaction outside the checked
-population. A commit exception or failed post-commit lookup invalidates the run
-and is never retried.
+One protocol everywhere. The client mints its own `(session_id, txn_id)` and
+upserts it into its session's row in `session_txn` as the **last statement** of
+the transaction, so the marker travels inside that transaction's own change set
+and arrives after the workload writes. `session_txn` starts empty; sessions
+create their own row on first use.
 
-There is no MariaDB marker table or marker statement. Procedure type and
-affected-row intent are diagnostic only; CDC remains authoritative for modeled
-writes. YugabyteDB and Oracle retain the following exploratory marker pattern
-until their later adapters are brought onto the frozen contract:
+No isolation statement is issued: all three backends default to Snapshot
+Isolation server-side. Only the upsert dialect differs.
 
 ```sql
 -- YugabyteDB
@@ -130,6 +94,13 @@ BEGIN;
   -- reads and writes; client logs each read
 INSERT INTO session_txn (session_id, txn_id) VALUES ('<sid>', <counter>)
   ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+-- MariaDB
+START TRANSACTION;
+  -- reads and writes; client logs each read
+INSERT INTO session_txn (session_id, txn_id) VALUES ('<sid>', <counter>)
+  ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
 COMMIT;
 
 -- Oracle (no ON CONFLICT; MERGE is the upsert)
@@ -142,10 +113,11 @@ MERGE INTO session_txn t
 COMMIT;
 ```
 
-For those exploratory adapters, the marker write and workload writes must be
-atomic. On Oracle this needs
+The marker write and the workload writes must be **atomic**: a transaction that
+commits its workload without a marker is uncorrelatable. On Oracle this needs
 `WHENEVER SQLERROR EXIT ROLLBACK` — sqlplus otherwise continues past a failed
-marker and still runs `COMMIT`.
+marker and still runs `COMMIT`. `scripts/txn.sh` is the reference
+implementation for all three.
 
 Because the before-image carries the previous `txn_id`, a per-session chain
 check comes for free: if `prev` is not the last `txn_id` you saw for that
@@ -174,8 +146,7 @@ while (true) {
 }
 ```
 
-Do not trim `cdc`, client, or status streams during a frozen-contract run.
-Restart recovery and coordinated safe trimming are later features.
+Trim consumed history with `XTRIM cdc MINID <id>` to keep memory flat.
 
 ## Constraints
 
@@ -272,18 +243,14 @@ oracle/startdb.d/                         # ARCHIVELOG, suppl. logging, user, sc
 debezium/application*.properties          # one per backend
 debezium/Dockerfile.yugabyte              # YB connector on a Java 17 base
 scripts/lib.sh                            # backend detection, shared SQL helpers
-scripts/e2e.sh                            # sole MariaDB lifecycle coordinator
-scripts/blackbox_lifecycle.sh             # fences, Redis/status, scan helpers
-scripts/blackbox_record.py                # exact manifests/bootstrap digest
-scripts/txn.sh                            # manual raw-CDC transaction helper
+scripts/txn.sh                            # client protocol reference, all backends
 scripts/stream.sh                         # read/follow, handles all envelopes
 scripts/bench.sh, sql.sh, status.sh
 ```
 
-MariaDB creates an empty `benchbase.usertable` and
-`benchbase.checker_run_fence` before CDC starts. It never seeds application
-rows. The older `registers` table remains only in the exploratory YugabyteDB and
-Oracle services.
+`registers` is a placeholder workload table in all three backends — a bank of
+integer registers, the usual write-skew testbed. Replace it with your schema and
+update the connector's table include list.
 
 ## Credentials
 
