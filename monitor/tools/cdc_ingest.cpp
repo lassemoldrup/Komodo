@@ -152,26 +152,33 @@ int run(const Options &options) {
 
   Json transactions = Json::array();
   std::size_t client_records = 0;
+  std::size_t xread_calls = 0;
+  std::size_t nonempty_xread_calls = 0;
   bool end_fence_seen = false;
   const auto deadline =
       std::chrono::steady_clock::now() + options.overall_timeout;
   while (!end_fence_seen && std::chrono::steady_clock::now() < deadline) {
-    (void)reader.read_once([&](const RedisStreamRecord &record) {
-      if (record.stream_name == client_stream) {
-        ++client_records;
-        return true;
-      }
-      auto completed = assembler.accept(CdcStreamRecord{
-          .stream_id = record.stream_id,
-          .key_json = record.field_name,
-          .envelope_json = record.value,
-      });
-      if (completed.has_value()) {
-        transactions.push_back(transactionSummary(*completed));
-        end_fence_seen = completed->fence_phase == RunFencePhase::EndFence;
-      }
-      return true;
-    });
+    const auto records_read =
+        reader.read_once([&](const RedisStreamRecord &record) {
+          if (record.stream_name == client_stream) {
+            ++client_records;
+            return true;
+          }
+          auto completed = assembler.accept(CdcStreamRecord{
+              .stream_id = record.stream_id,
+              .key_json = record.field_name,
+              .envelope_json = record.value,
+          });
+          if (completed.has_value()) {
+            transactions.push_back(transactionSummary(*completed));
+            end_fence_seen = completed->fence_phase == RunFencePhase::EndFence;
+          }
+          return true;
+        });
+    ++xread_calls;
+    if (records_read != 0U) {
+      ++nonempty_xread_calls;
+    }
   }
   if (!end_fence_seen) {
     throw std::runtime_error("timed out before the CDC END_FENCE transaction");
@@ -179,6 +186,8 @@ int run(const Options &options) {
   assembler.finish();
   std::cout << Json{{"completed_transactions", assembler.completedCount()},
                     {"client_records_seen", client_records},
+                    {"xread_calls", xread_calls},
+                    {"nonempty_xread_calls", nonempty_xread_calls},
                     {"cdc_cursor", std::string(reader.cursor("cdc"))},
                     {"client_cursor",
                      std::string(reader.cursor(client_stream))},
