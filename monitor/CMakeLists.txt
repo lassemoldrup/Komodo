@@ -38,6 +38,7 @@ add_library(blackbox_monitor
   src/monitor_error.cpp
   src/redis_reader.cpp
   src/strict_json.cpp
+  src/transaction_joiner.cpp
 )
 target_include_directories(blackbox_monitor
   PUBLIC
@@ -95,6 +96,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     tests/test_debezium_assembler.cpp
     tests/test_main.cpp
     tests/test_redis_reader.cpp
+    tests/test_transaction_joiner.cpp
   )
   target_link_libraries(blackbox_monitor_tests
     PRIVATE

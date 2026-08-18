@@ -7,6 +7,7 @@ int runCheckerAdapterTests();
 int runClientTxnTests();
 int runDebeziumAssemblerTests();
 int runRedisReaderTests();
+int runTransactionJoinerTests();
 
 int main() {
   runCanonicalYcsbCodecTests();
@@ -14,6 +15,7 @@ int main() {
   runClientTxnTests();
   runDebeziumAssemblerTests();
   runRedisReaderTests();
+  runTransactionJoinerTests();
   if (blackbox::test::failures != 0) {
     std::cerr << blackbox::test::failures
               << " black-box monitor test(s) failed\n";
