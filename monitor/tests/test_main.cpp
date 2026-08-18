@@ -8,6 +8,7 @@ int runClientTxnTests();
 int runDebeziumAssemblerTests();
 int runProtocolRecordTests();
 int runRedisReaderTests();
+int runRunControllerTests();
 int runTransactionJoinerTests();
 
 int main() {
@@ -17,6 +18,7 @@ int main() {
   runDebeziumAssemblerTests();
   runProtocolRecordTests();
   runRedisReaderTests();
+  runRunControllerTests();
   runTransactionJoinerTests();
   if (blackbox::test::failures != 0) {
     std::cerr << blackbox::test::failures

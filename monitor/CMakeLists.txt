@@ -38,6 +38,7 @@ add_library(blackbox_monitor
   src/monitor_error.cpp
   src/protocol_records.cpp
   src/redis_reader.cpp
+  src/run_controller.cpp
   src/strict_json.cpp
   src/transaction_joiner.cpp
 )
@@ -110,6 +111,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     tests/test_main.cpp
     tests/test_protocol_records.cpp
     tests/test_redis_reader.cpp
+    tests/test_run_controller.cpp
     tests/test_transaction_joiner.cpp
   )
   target_link_libraries(blackbox_monitor_tests

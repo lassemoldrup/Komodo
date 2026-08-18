@@ -360,6 +360,10 @@ public:
     guarded([&] { acceptClient(parser_.parse(payload)); });
   }
 
+  void acceptClientTransaction(ClientTxn transaction) {
+    guarded([&] { acceptClient(std::move(transaction)); });
+  }
+
   void acceptCdcTransaction(CdcTransaction transaction) {
     guarded([&] { acceptCdc(std::move(transaction)); });
   }
@@ -377,7 +381,30 @@ public:
       }
       validateBootstrapProof(proof);
       approved_bootstrap_prefix_ = proof.prefix;
+      bootstrap_state_validated_ = true;
       drainReadyPrefix();
+    });
+  }
+
+  void processEndFence() {
+    guarded([&] {
+      drainReadyPrefix();
+      if (cdc_slots_.empty() ||
+          cdc_slots_.front().transaction.kind !=
+              CdcTransactionKind::RunControl ||
+          cdc_slots_.front().transaction.fence_phase !=
+              RunFencePhase::EndFence) {
+        fail(MonitorErrorCode::FenceOrderInvalid,
+             "END_FENCE cannot pass an undrained CDC slot");
+      }
+      if (lifecycle_ != JoinLifecycle::Workload || end_fence_processed_) {
+        fail(MonitorErrorCode::FenceOrderInvalid,
+             "END_FENCE is not the next legal closure transition");
+      }
+      popCdcHead();
+      lifecycle_ = JoinLifecycle::Closed;
+      end_fence_processed_ = true;
+      head_block_reason_ = HeadBlockReason::None;
     });
   }
 
@@ -420,6 +447,11 @@ public:
         .next_cdc_seq = next_cdc_seq_,
         .accepted_client_transactions = accepted_client_transactions_,
         .accepted_cdc_transactions = accepted_cdc_transactions_,
+        .accepted_control_cdc_transactions = accepted_control_cdc_transactions_,
+        .accepted_bootstrap_cdc_transactions =
+            accepted_bootstrap_cdc_transactions_,
+        .accepted_workload_cdc_transactions =
+            accepted_workload_cdc_transactions_,
         .joined_workload_transactions = joined_workload_transactions_,
         .client_first_matches = client_first_matches_,
         .cdc_first_matches = cdc_first_matches_,
@@ -429,12 +461,31 @@ public:
         .pending_cdc_slots = cdc_slots_.size(),
         .pending_cdc_bytes = pending_cdc_bytes_,
         .pending_cdc_high_water_bytes = pending_cdc_high_water_bytes_,
+        .unmatched_client_records = unmatched_client_records_,
+        .unmatched_workload_cdc_slots = unmatched_workload_cdc_slots_,
         .retained_identity_records = retained_identity_records_,
         .retained_identity_bytes = retained_identity_bytes_,
         .bootstrap_state_rows = bootstrap_state_.size(),
         .bootstrap_state_bytes = bootstrap_state_bytes_,
         .end_fence_observed = end_fence_observed_,
+        .end_fence_processed = end_fence_processed_,
+        .bootstrap_state_validated = bootstrap_state_validated_,
         .checker = checker_.metrics(),
+    };
+  }
+
+  [[nodiscard]] TransactionJoinerReconciliationAudit
+  auditReconciliationState() const {
+    const auto audited_clients = unmatchedClientRecords();
+    const auto audited_cdc = unmatchedWorkloadCdcSlots();
+    return TransactionJoinerReconciliationAudit{
+        .pending_client_records = client_by_correlation_.size(),
+        .pending_cdc_slots = cdc_slots_.size(),
+        .unmatched_client_records = audited_clients,
+        .unmatched_workload_cdc_slots = audited_cdc,
+        .incremental_counters_match =
+            audited_clients == unmatched_client_records_ &&
+            audited_cdc == unmatched_workload_cdc_slots_,
     };
   }
 
@@ -473,6 +524,23 @@ private:
     MonitorErrorCode code;
     std::string message;
   };
+
+  [[nodiscard]] std::size_t unmatchedClientRecords() const {
+    return static_cast<std::size_t>(
+        std::count_if(client_by_correlation_.begin(),
+                      client_by_correlation_.end(), [this](const auto &entry) {
+                        return !pending_cdc_correlations_.contains(entry.first);
+                      }));
+  }
+
+  [[nodiscard]] std::size_t unmatchedWorkloadCdcSlots() const {
+    return static_cast<std::size_t>(std::count_if(
+        cdc_slots_.begin(), cdc_slots_.end(), [this](const BufferedCdc &slot) {
+          return slot.transaction.kind == CdcTransactionKind::WorkloadMarked &&
+                 !client_by_correlation_.contains(
+                     *slot.transaction.correlation_id);
+        }));
+  }
 
   [[noreturn]] void fail(const MonitorErrorCode code,
                          const std::string &message) const {
@@ -643,7 +711,9 @@ private:
     }
     reserveRetainedIdentities(retained_records, retained_bytes);
 
-    if (pending_cdc_correlations_.contains(client.correlation_id)) {
+    const bool cdc_is_pending =
+        pending_cdc_correlations_.contains(client.correlation_id);
+    if (cdc_is_pending) {
       ++cdc_first_matches_;
     }
     const auto correlation = client.correlation_id;
@@ -654,6 +724,15 @@ private:
     client_by_correlation_.emplace(
         correlation,
         BufferedClient{.transaction = std::move(client), .charge = charge});
+    if (cdc_is_pending) {
+      if (unmatched_workload_cdc_slots_ == 0U) {
+        fail(MonitorErrorCode::InternalError,
+             "unmatched CDC counter underflow while accepting client evidence");
+      }
+      --unmatched_workload_cdc_slots_;
+    } else {
+      ++unmatched_client_records_;
+    }
     seen_client_correlations_.insert(correlation);
     seen_attempt_ids_.insert(attempt_id);
     logical_transactions_.emplace(logical_id,
@@ -778,29 +857,57 @@ private:
         pending_cdc_bytes_, charge, config_.limits.max_pending_cdc_bytes,
         "pending CDC evidence");
 
+    std::optional<RunScopedCorrelationId> workload_correlation;
+    bool client_is_pending = false;
     if (transaction.kind == CdcTransactionKind::WorkloadMarked) {
-      const auto &correlation = *transaction.correlation_id;
+      workload_correlation = *transaction.correlation_id;
+      const auto &correlation = *workload_correlation;
       std::size_t identity_bytes = node_charge + sizeof(RunScopedCorrelationId);
       checkedAdd(identity_bytes, stringAllocationCharge(correlation.run_id));
       checkedAdd(identity_bytes,
                  stringAllocationCharge(correlation.session_id));
       reserveRetainedIdentities(1U, identity_bytes);
-      if (client_by_correlation_.contains(correlation)) {
-        ++client_first_matches_;
-      }
-      seen_cdc_correlations_.insert(correlation);
-      pending_cdc_correlations_.insert(correlation);
+      client_is_pending = client_by_correlation_.contains(correlation);
     }
-    if (transaction.fence_phase == RunFencePhase::EndFence) {
-      end_fence_observed_ = true;
-    }
+    const auto kind = transaction.kind;
+    const bool is_end_fence =
+        transaction.fence_phase == RunFencePhase::EndFence;
     cdc_slots_.push_back(
         BufferedCdc{.transaction = std::move(transaction), .charge = charge});
+    if (workload_correlation.has_value()) {
+      if (client_is_pending) {
+        if (unmatched_client_records_ == 0U) {
+          fail(MonitorErrorCode::InternalError,
+               "unmatched client counter underflow while accepting CDC "
+               "evidence");
+        }
+        --unmatched_client_records_;
+        ++client_first_matches_;
+      } else {
+        ++unmatched_workload_cdc_slots_;
+      }
+      seen_cdc_correlations_.insert(*workload_correlation);
+      pending_cdc_correlations_.insert(*workload_correlation);
+    }
+    if (is_end_fence) {
+      end_fence_observed_ = true;
+    }
     pending_cdc_bytes_ += charge;
     pending_cdc_high_water_bytes_ =
         std::max(pending_cdc_high_water_bytes_, pending_cdc_bytes_);
     ++next_cdc_seq_;
     ++accepted_cdc_transactions_;
+    switch (kind) {
+    case CdcTransactionKind::RunControl:
+      ++accepted_control_cdc_transactions_;
+      break;
+    case CdcTransactionKind::BootstrapApp:
+      ++accepted_bootstrap_cdc_transactions_;
+      break;
+    case CdcTransactionKind::WorkloadMarked:
+      ++accepted_workload_cdc_transactions_;
+      break;
+    }
     drainReadyPrefix();
   }
 
@@ -1074,6 +1181,9 @@ private:
   std::uint64_t next_checker_commit_seq_ = 0;
   std::uint64_t accepted_client_transactions_ = 0;
   std::uint64_t accepted_cdc_transactions_ = 0;
+  std::uint64_t accepted_control_cdc_transactions_ = 0;
+  std::uint64_t accepted_bootstrap_cdc_transactions_ = 0;
+  std::uint64_t accepted_workload_cdc_transactions_ = 0;
   std::uint64_t joined_workload_transactions_ = 0;
   std::uint64_t bootstrap_transactions_ = 0;
   std::uint64_t phase_anchor_transactions_ = 0;
@@ -1083,10 +1193,14 @@ private:
   std::size_t pending_client_high_water_bytes_ = 0;
   std::size_t pending_cdc_bytes_ = 0;
   std::size_t pending_cdc_high_water_bytes_ = 0;
+  std::size_t unmatched_client_records_ = 0;
+  std::size_t unmatched_workload_cdc_slots_ = 0;
   std::size_t retained_identity_records_ = 0;
   std::size_t retained_identity_bytes_ = 0;
   std::size_t bootstrap_state_bytes_ = 0;
   bool end_fence_observed_ = false;
+  bool end_fence_processed_ = false;
+  bool bootstrap_state_validated_ = false;
 };
 
 TransactionJoiner::TransactionJoiner(TransactionJoinerConfig config)
@@ -1101,6 +1215,10 @@ void TransactionJoiner::acceptClientPayload(const std::string_view payload) {
   impl_->acceptClientPayload(payload);
 }
 
+void TransactionJoiner::acceptClientTransaction(ClientTxn transaction) {
+  impl_->acceptClientTransaction(std::move(transaction));
+}
+
 void TransactionJoiner::acceptCdcTransaction(CdcTransaction transaction) {
   impl_->acceptCdcTransaction(std::move(transaction));
 }
@@ -1109,6 +1227,8 @@ void TransactionJoiner::validateBootstrapState(
     const BootstrapStateProof &proof) {
   impl_->validateBootstrapState(proof);
 }
+
+void TransactionJoiner::processEndFence() { impl_->processEndFence(); }
 
 void TransactionJoiner::drain() { impl_->drain(); }
 
@@ -1138,6 +1258,11 @@ TransactionJoinerMetrics TransactionJoiner::metrics() const {
   return impl_->metrics();
 }
 
+TransactionJoinerReconciliationAudit
+TransactionJoiner::auditReconciliationState() const {
+  return impl_->auditReconciliationState();
+}
+
 bool TransactionJoiner::failed() const noexcept { return impl_->failed(); }
 
 std::optional<MonitorErrorCode> TransactionJoiner::errorCode() const noexcept {
@@ -1152,6 +1277,8 @@ std::string_view toString(const JoinLifecycle lifecycle) noexcept {
     return "BOOTSTRAP";
   case JoinLifecycle::Workload:
     return "WORKLOAD";
+  case JoinLifecycle::Closed:
+    return "CLOSED";
   }
   std::abort();
 }

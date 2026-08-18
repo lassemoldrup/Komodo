@@ -20,6 +20,7 @@ enum class JoinLifecycle {
   AwaitRunStart,
   Bootstrap,
   Workload,
+  Closed,
 };
 
 enum class HeadBlockReason {
@@ -77,6 +78,9 @@ struct TransactionJoinerMetrics {
   std::uint64_t next_cdc_seq = 0;
   std::uint64_t accepted_client_transactions = 0;
   std::uint64_t accepted_cdc_transactions = 0;
+  std::uint64_t accepted_control_cdc_transactions = 0;
+  std::uint64_t accepted_bootstrap_cdc_transactions = 0;
+  std::uint64_t accepted_workload_cdc_transactions = 0;
   std::uint64_t joined_workload_transactions = 0;
   std::uint64_t client_first_matches = 0;
   std::uint64_t cdc_first_matches = 0;
@@ -86,12 +90,29 @@ struct TransactionJoinerMetrics {
   std::size_t pending_cdc_slots = 0;
   std::size_t pending_cdc_bytes = 0;
   std::size_t pending_cdc_high_water_bytes = 0;
+  std::size_t unmatched_client_records = 0;
+  std::size_t unmatched_workload_cdc_slots = 0;
   std::size_t retained_identity_records = 0;
   std::size_t retained_identity_bytes = 0;
   std::size_t bootstrap_state_rows = 0;
   std::size_t bootstrap_state_bytes = 0;
   bool end_fence_observed = false;
+  bool end_fence_processed = false;
+  bool bootstrap_state_validated = false;
   CheckerAdapterMetrics checker;
+};
+
+// A full walk of the pending evidence retained for terminal reconciliation.
+// Ordinary metrics remain constant-time; callers should request this audit only
+// once admission has closed.
+struct TransactionJoinerReconciliationAudit {
+  std::size_t pending_client_records = 0;
+  std::size_t pending_cdc_slots = 0;
+  std::size_t unmatched_client_records = 0;
+  std::size_t unmatched_workload_cdc_slots = 0;
+  bool incremental_counters_match = false;
+
+  bool operator==(const TransactionJoinerReconciliationAudit &) const = default;
 };
 
 class TransactionJoiner final {
@@ -105,8 +126,10 @@ public:
   TransactionJoiner &operator=(TransactionJoiner &&) noexcept;
 
   void acceptClientPayload(std::string_view payload);
+  void acceptClientTransaction(ClientTxn transaction);
   void acceptCdcTransaction(CdcTransaction transaction);
   void validateBootstrapState(const BootstrapStateProof &proof);
+  void processEndFence();
   void drain();
 
   [[nodiscard]] std::optional<BootstrapPrefix> pendingBootstrapPrefix() const;
@@ -116,6 +139,8 @@ public:
   [[nodiscard]] const std::optional<AttributedViolation> &
   firstViolation() const noexcept;
   [[nodiscard]] TransactionJoinerMetrics metrics() const;
+  [[nodiscard]] TransactionJoinerReconciliationAudit
+  auditReconciliationState() const;
   [[nodiscard]] bool failed() const noexcept;
   [[nodiscard]] std::optional<MonitorErrorCode> errorCode() const noexcept;
 

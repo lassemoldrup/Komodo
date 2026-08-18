@@ -281,6 +281,8 @@ void testStrictReadyPrefixAndEndDeferral() {
   BLACKBOX_CHECK(metrics.joined_workload_transactions == 0U);
   BLACKBOX_CHECK(metrics.pending_cdc_slots == 2U);
   BLACKBOX_CHECK(metrics.pending_client_records == 1U);
+  BLACKBOX_CHECK(metrics.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(metrics.unmatched_workload_cdc_slots == 1U);
   BLACKBOX_CHECK(metrics.client_first_matches == 1U);
   BLACKBOX_CHECK(joiner.headBlockReason() == HeadBlockReason::MissingClient);
   joiner.acceptCdcTransaction(control(4U, RunFencePhase::EndFence));
@@ -304,6 +306,40 @@ void testStrictReadyPrefixAndEndDeferral() {
   BLACKBOX_CHECK(joiner.headBlockReason() == HeadBlockReason::EndFenceDeferred);
   joiner.drain();
   BLACKBOX_CHECK(joiner.metrics().pending_cdc_slots == 1U);
+  joiner.processEndFence();
+  metrics = joiner.metrics();
+  BLACKBOX_CHECK(joiner.lifecycle() == JoinLifecycle::Closed);
+  BLACKBOX_CHECK(metrics.pending_cdc_slots == 0U);
+  BLACKBOX_CHECK(metrics.end_fence_processed);
+  BLACKBOX_CHECK(metrics.bootstrap_state_validated);
+  BLACKBOX_CHECK(metrics.accepted_control_cdc_transactions == 3U);
+  BLACKBOX_CHECK(metrics.accepted_bootstrap_cdc_transactions == 0U);
+  BLACKBOX_CHECK(metrics.accepted_workload_cdc_transactions == 2U);
+  BLACKBOX_CHECK(metrics.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(metrics.unmatched_workload_cdc_slots == 0U);
+  const auto audit = joiner.auditReconciliationState();
+  BLACKBOX_CHECK(audit.incremental_counters_match);
+  BLACKBOX_CHECK(audit.pending_client_records == 0U);
+  BLACKBOX_CHECK(audit.pending_cdc_slots == 0U);
+  BLACKBOX_CHECK(audit.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(audit.unmatched_workload_cdc_slots == 0U);
+}
+
+void testEndFenceCannotPassMissingClient() {
+  TransactionJoiner joiner(config());
+  openWorkload(joiner);
+  joiner.acceptCdcTransaction(workload(2U, session_one, 1U));
+  joiner.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+  auto metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.end_fence_observed);
+  BLACKBOX_CHECK(!metrics.end_fence_processed);
+  BLACKBOX_CHECK(metrics.unmatched_workload_cdc_slots == 1U);
+  expectError(
+      joiner, [&] { joiner.processEndFence(); },
+      MonitorErrorCode::FenceOrderInvalid);
+  metrics = joiner.metrics();
+  BLACKBOX_CHECK(!metrics.end_fence_processed);
+  BLACKBOX_CHECK(metrics.pending_cdc_slots == 2U);
 }
 
 void testBootstrapGateAndAnchorLowerBound() {
@@ -737,10 +773,41 @@ void testCheckerLimitAndAnchorCollision() {
   }
 }
 
+void testIncrementalUnmatchedMetricsUnderLongPendingPrefix() {
+  constexpr std::uint64_t transaction_count = 4096U;
+  TransactionJoiner joiner(config());
+  openWorkload(joiner);
+
+  for (std::uint64_t sequence = 1U; sequence <= transaction_count; ++sequence) {
+    joiner.acceptClientPayload(
+        clientPayload(session_one, sequence, sequence, sequence));
+    const auto metrics = joiner.metrics();
+    BLACKBOX_CHECK(metrics.pending_client_records == sequence);
+    BLACKBOX_CHECK(metrics.unmatched_client_records == sequence);
+    BLACKBOX_CHECK(metrics.unmatched_workload_cdc_slots == 0U);
+  }
+
+  auto audit = joiner.auditReconciliationState();
+  BLACKBOX_CHECK(audit.incremental_counters_match);
+  BLACKBOX_CHECK(audit.unmatched_client_records == transaction_count);
+  for (std::uint64_t sequence = 1U; sequence <= transaction_count; ++sequence) {
+    joiner.acceptCdcTransaction(workload(sequence + 1U, session_one, sequence));
+    const auto metrics = joiner.metrics();
+    BLACKBOX_CHECK(metrics.unmatched_client_records ==
+                   transaction_count - sequence);
+    BLACKBOX_CHECK(metrics.unmatched_workload_cdc_slots == 0U);
+  }
+  audit = joiner.auditReconciliationState();
+  BLACKBOX_CHECK(audit.incremental_counters_match);
+  BLACKBOX_CHECK(audit.pending_client_records == 0U);
+  BLACKBOX_CHECK(audit.pending_cdc_slots == 0U);
+}
+
 } // namespace
 
 int runTransactionJoinerTests() {
   testStrictReadyPrefixAndEndDeferral();
+  testEndFenceCannotPassMissingClient();
   testBootstrapGateAndAnchorLowerBound();
   testBootstrapApprovalMustMatchExactPrefix();
   testDuplicateAndSessionInvariants();
@@ -748,5 +815,6 @@ int runTransactionJoinerTests() {
   testCdcAndClientEvidenceFailures();
   testBoundsAreCountedWithoutDroppingEvidence();
   testCheckerLimitAndAnchorCollision();
+  testIncrementalUnmatchedMetricsUnderLongPendingPrefix();
   return 0;
 }
