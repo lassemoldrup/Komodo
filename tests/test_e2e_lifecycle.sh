@@ -281,6 +281,7 @@ run_case() {
 
   local status
   if BLACKBOX_DOCKER="$case_root/bin/docker" \
+      BLACKBOX_LIVE_LOCK_TARGET="$case_root" \
       BLACKBOX_REDIS_CLI="$case_root/bin/redis-cli" \
       BLACKBOX_MARIADB_CLI="$case_root/bin/mariadb" \
       BLACKBOX_REDIS_HOST=fake \

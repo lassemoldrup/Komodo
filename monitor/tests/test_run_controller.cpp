@@ -418,6 +418,59 @@ void testTimeoutAndDuplicateControlRecordsAreInvalid() {
   }
 }
 
+void testIncorrectInitialBootstrapManifestPreventsRelease() {
+  RunController controller(manifest());
+  discardStatuses(controller);
+  controller.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
+  controller.acceptCdcTransaction(control(1U, RunFencePhase::LoadFinished));
+
+  // Both halves are ready behind LOAD_FINISHED. An incorrect first manifest
+  // must invalidate the run without releasing its anchors or this workload.
+  controller.acceptClientPayload(clientPayload(1U));
+  controller.acceptCdcTransaction(workload(2U, 1U));
+  auto incorrect_bootstrap = Json::parse(bootstrapPayload());
+  incorrect_bootstrap["canonical_state_digest"] = std::string(64U, '0');
+  controller.acceptClientPayload(incorrect_bootstrap.dump());
+
+  BLACKBOX_CHECK(hasDiagnostic(controller, "BOOTSTRAP_STATE_MISMATCH"));
+  const auto metrics = controller.joinerMetrics();
+  BLACKBOX_CHECK(!metrics.bootstrap_state_validated);
+  BLACKBOX_CHECK(metrics.accepted_client_transactions == 1U);
+  BLACKBOX_CHECK(metrics.accepted_workload_cdc_transactions == 1U);
+  BLACKBOX_CHECK(metrics.pending_cdc_slots == 2U);
+  BLACKBOX_CHECK(metrics.joined_workload_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.bootstrap_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.phase_anchor_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.workload_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.consumed_transactions == 0U);
+
+  controller.acceptClientPayload(donePayload(1U));
+  controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+  controller.onInputIdle();
+
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
+  BLACKBOX_CHECK(controller.endFenceObserved());
+  BLACKBOX_CHECK(!controller.endFenceProcessed());
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  const auto &reconciliation = *controller.finalReconciliation();
+  BLACKBOX_CHECK(!reconciliation.bootstrap_manifest_validated);
+  BLACKBOX_CHECK(reconciliation.joined_workload_transactions == 0U);
+  BLACKBOX_CHECK(reconciliation.bootstrap_checker_transactions == 0U);
+  BLACKBOX_CHECK(reconciliation.phase_anchor_transactions == 0U);
+  BLACKBOX_CHECK(reconciliation.checker_consumed_transactions == 0U);
+
+  const auto statuses = controller.takePendingStatuses();
+  BLACKBOX_CHECK(finalStatusCount(statuses) == 1U);
+  for (const auto &status : statuses) {
+    const auto state =
+        Json::parse(status).at("lifecycle_state").get<std::string>();
+    BLACKBOX_CHECK(state != "LOAD_FINISHED_SEEN");
+    BLACKBOX_CHECK(state != "RUNNING");
+    BLACKBOX_CHECK(state != "RECONCILED");
+  }
+}
+
 void testMissingClientDoesNotProcessEndFence() {
   RunController controller(manifest());
   openWorkload(controller);
@@ -700,6 +753,7 @@ int runRunControllerTests() {
   testEndWithoutDoneIsInvalid();
   testOtherwiseCleanRunWithoutEndFenceIsInvalid();
   testTimeoutAndDuplicateControlRecordsAreInvalid();
+  testIncorrectInitialBootstrapManifestPreventsRelease();
   testMissingClientDoesNotProcessEndFence();
   testMissingCdcIsInvalidAfterOrderedEnd();
   testSessionDoneMismatchAndPostDoneClientAreInvalid();

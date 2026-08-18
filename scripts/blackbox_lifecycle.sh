@@ -42,6 +42,41 @@ blackbox_require_command() {
 }
 
 
+blackbox_acquire_live_stack_lock() {
+  local requested_target=${BLACKBOX_LIVE_LOCK_TARGET:-$BLACKBOX_ROOT}
+  if [[ ! -d $requested_target ]]; then
+    blackbox_die \
+      "live stack lock target is not an existing directory: $requested_target"
+    return 1
+  fi
+  local lock_target
+  lock_target=$(cd "$requested_target" && pwd -P)
+  BLACKBOX_LIVE_LOCK_TARGET=$lock_target
+  export BLACKBOX_LIVE_LOCK_TARGET
+  blackbox_require_command flock || return 1
+
+  if [[ -n ${BLACKBOX_LIVE_LOCK_FD:-} ]]; then
+    local descriptor_path=/proc/$BASHPID/fd/$BLACKBOX_LIVE_LOCK_FD
+    if [[ ! $BLACKBOX_LIVE_LOCK_FD =~ ^[0-9]+$ ]] ||
+        [[ ! -e $descriptor_path ]] ||
+        [[ ! $descriptor_path -ef $lock_target ]]; then
+      blackbox_die \
+        "inherited live stack lock descriptor is invalid for: $lock_target"
+      return 1
+    fi
+  else
+    exec {BLACKBOX_LIVE_LOCK_FD}<"$lock_target"
+    export BLACKBOX_LIVE_LOCK_FD
+  fi
+
+  if ! flock --nonblock "$BLACKBOX_LIVE_LOCK_FD"; then
+    blackbox_die \
+      "another destructive live suite owns the repository stack lock: $lock_target"
+    return 1
+  fi
+}
+
+
 blackbox_new_uuid() {
   python3 -c 'import uuid; print(uuid.uuid4())'
 }

@@ -246,9 +246,14 @@ prefix; the one-run monitor performs the audited terminal reconciliation.
 and runs four fresh audited stacks: a clean repeatable-read pass, a coordinated
 read-committed fractured-read violation, the same coordinated probe passing
 under repeatable read, and an intentionally omitted client record producing an
-invalid result. The harness validates the canonical client values as well as
-the terminal reconciliation. These runs generate fresh run IDs and disposable
-logs; they do not replace or modify the checked-in captured CDC fixtures.
+invalid result. The configured `BENCHBASE_ROOT`, `PROBE_BUILD_DIR`, and `MAVEN`
+are used for both compilation and execution. The harness validates both worker
+roles, the canonical client values, the final two-row database state, strict
+head-of-line blocking in the omitted-record case, and terminal reconciliation.
+Every case and evidence-capture command has a hard wall-clock bound. A failed
+run retains its raw CDC, client, and status streams plus Compose state and
+container logs before teardown. These runs generate fresh run IDs and do not
+replace or modify the checked-in captured CDC fixtures.
 
 ## Constraints
 

@@ -66,10 +66,10 @@ monitor-build:
 	cmake --build $(MONITOR_BUILD_DIR)
 
 probe-client-build:
-	mkdir -p $(PROBE_BUILD_DIR)
-	cd $(BENCHBASE_ROOT) && $(MAVEN) --batch-mode --activate-profiles mariadb \
+	mkdir -p "$(abspath $(PROBE_BUILD_DIR))"
+	cd "$(abspath $(BENCHBASE_ROOT))" && "$(MAVEN)" --batch-mode --activate-profiles mariadb \
 		-Dmaven.gitcommitid.skip=true \
-		-DbuildDirectory=$(PROBE_BUILD_DIR) \
+		-DbuildDirectory="$(abspath $(PROBE_BUILD_DIR))" \
 		-DskipTests compile
 
 test-monitor: monitor-build
@@ -80,6 +80,7 @@ test-lifecycle: test-monitor
 	shellcheck scripts/*.sh tests/*.sh
 	bash -n scripts/*.sh tests/*.sh
 	python3 -m unittest discover -s tests -p 'test_*.py' -v
+	./tests/test_live_lock.sh
 	./tests/test_e2e_lifecycle.sh
 
 ## Destructive integration against the pinned MariaDB/Debezium/Redis stack
@@ -93,5 +94,7 @@ test-lifecycle-live: test-monitor
 ## Destructive semantic acceptance runs against fresh MariaDB/CDC stacks
 test-correctness-live: test-monitor probe-client-build
 	BLACKBOX_MONITOR_BIN=$(MONITOR_BUILD_DIR)/blackbox_run_monitor \
-	BLACKBOX_BENCHBASE_BUILD_DIR=$(PROBE_BUILD_DIR) \
+	BLACKBOX_BENCHBASE_BUILD_DIR="$(abspath $(PROBE_BUILD_DIR))" \
+	BLACKBOX_BENCHBASE_ROOT="$(abspath $(BENCHBASE_ROOT))" \
+	BLACKBOX_MAVEN="$(MAVEN)" \
 		./tests/test_semantic_correctness.sh

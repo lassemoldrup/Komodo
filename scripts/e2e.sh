@@ -10,6 +10,7 @@ set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=scripts/blackbox_lifecycle.sh
 . "$ROOT/scripts/blackbox_lifecycle.sh"
+blackbox_acquire_live_stack_lock
 
 BLACKBOX_DOCKER=${BLACKBOX_DOCKER:-docker}
 BLACKBOX_STACK_TIMEOUT_SECONDS=${BLACKBOX_STACK_TIMEOUT_SECONDS:-120}
