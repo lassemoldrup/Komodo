@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -34,6 +35,21 @@ constexpr std::uint64_t bootstrap_transaction_tag = 0x626f6f7473747270ULL;
 constexpr std::uint64_t bootstrap_attempt_tag = 0x626f6f746174746dULL;
 constexpr std::uint64_t phase_anchor_transaction_tag = 0x7068617365616e63ULL;
 constexpr std::uint64_t phase_anchor_attempt_tag = 0x7068617365617474ULL;
+
+[[nodiscard]] std::uint64_t steadyClockNanoseconds() noexcept {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+[[nodiscard]] std::uint64_t
+saturatingAdd(const std::uint64_t current,
+              const std::uint64_t additional) noexcept {
+  return additional > std::numeric_limits<std::uint64_t>::max() - current
+             ? std::numeric_limits<std::uint64_t>::max()
+             : current + additional;
+}
 
 struct CorrelationHash {
   [[nodiscard]] std::size_t
@@ -338,18 +354,24 @@ public:
   explicit Impl(TransactionJoinerConfig config)
       : config_(std::move(config)),
         parser_(config_.run_id, config_.expected_session_ids,
-                config_.application_tables, config_.client_parser_limits),
-        checker_(CheckerAdapterConfig{
-            .run_id = config_.run_id,
-            .expected_session_ids = config_.expected_session_ids,
-            .max_retained_state_bytes = config_.limits.max_checker_state_bytes,
-            .max_events_per_transaction =
-                config_.limits.max_events_per_transaction,
-            .max_mapped_identity_records =
-                config_.limits.max_retained_identity_records,
-            .max_mapped_identity_bytes =
-                config_.limits.max_retained_identity_bytes}) {
+                config_.application_tables, config_.client_parser_limits) {
     validateConfig();
+    monotonic_clock_nanoseconds_ = config_.monotonic_clock_nanoseconds;
+    if (!monotonic_clock_nanoseconds_) {
+      monotonic_clock_nanoseconds_ = steadyClockNanoseconds;
+    }
+    if (config_.execute_consistency_check) {
+      checker_.emplace(CheckerAdapterConfig{
+          .run_id = config_.run_id,
+          .expected_session_ids = config_.expected_session_ids,
+          .max_retained_state_bytes = config_.limits.max_checker_state_bytes,
+          .max_events_per_transaction =
+              config_.limits.max_events_per_transaction,
+          .max_mapped_identity_records =
+              config_.limits.max_retained_identity_records,
+          .max_mapped_identity_bytes =
+              config_.limits.max_retained_identity_bytes});
+    }
     expected_sessions_.insert(config_.expected_session_ids.begin(),
                               config_.expected_session_ids.end());
     application_tables_.insert(config_.application_tables.begin(),
@@ -434,15 +456,30 @@ public:
   }
 
   [[nodiscard]] CheckerObservation checkerObservation() const noexcept {
-    return checker_.observation();
+    return checker_.has_value() ? checker_->observation()
+                                : CheckerObservation::NotStarted;
   }
 
   [[nodiscard]] const std::optional<AttributedViolation> &
   firstViolation() const noexcept {
-    return checker_.firstViolation();
+    return checker_.has_value() ? checker_->firstViolation()
+                                : no_checker_violation_;
   }
 
   [[nodiscard]] TransactionJoinerMetrics metrics() const {
+    std::uint64_t current_wait = 0;
+    if (missing_client_wait_started_nanoseconds_.has_value()) {
+      const auto now = monotonic_clock_nanoseconds_();
+      current_wait = now >= *missing_client_wait_started_nanoseconds_
+                         ? now - *missing_client_wait_started_nanoseconds_
+                         : 0U;
+    }
+    const auto total_wait = saturatingAdd(
+        missing_client_head_wait_completed_nanoseconds_, current_wait);
+    const auto max_wait =
+        std::max(missing_client_head_wait_max_nanoseconds_, current_wait);
+    const auto checker_metrics =
+        checker_.has_value() ? checker_->metrics() : CheckerAdapterMetrics{};
     return TransactionJoinerMetrics{
         .next_cdc_seq = next_cdc_seq_,
         .accepted_client_transactions = accepted_client_transactions_,
@@ -452,7 +489,16 @@ public:
             accepted_bootstrap_cdc_transactions_,
         .accepted_workload_cdc_transactions =
             accepted_workload_cdc_transactions_,
+        .released_bootstrap_transactions = bootstrap_transactions_,
+        .released_phase_anchor_transactions = phase_anchor_transactions_,
+        .released_workload_transactions = joined_workload_transactions_,
+        .released_bootstrap_write_events = released_bootstrap_write_events_,
+        .released_ordered_events = released_ordered_events_,
         .joined_workload_transactions = joined_workload_transactions_,
+        .marker_only_workload_transactions = marker_only_workload_transactions_,
+        .joined_read_events = joined_read_events_,
+        .joined_write_events = joined_write_events_,
+        .joined_ordered_events = joined_ordered_events_,
         .client_first_matches = client_first_matches_,
         .cdc_first_matches = cdc_first_matches_,
         .pending_client_records = client_by_correlation_.size(),
@@ -461,8 +507,13 @@ public:
         .pending_cdc_slots = cdc_slots_.size(),
         .pending_cdc_bytes = pending_cdc_bytes_,
         .pending_cdc_high_water_bytes = pending_cdc_high_water_bytes_,
+        .join_buffer_high_water_bytes = join_buffer_high_water_bytes_,
         .unmatched_client_records = unmatched_client_records_,
         .unmatched_workload_cdc_slots = unmatched_workload_cdc_slots_,
+        .missing_client_head_wait_count = missing_client_head_wait_count_,
+        .missing_client_head_wait_current_nanoseconds = current_wait,
+        .missing_client_head_wait_total_nanoseconds = total_wait,
+        .missing_client_head_wait_max_nanoseconds = max_wait,
         .retained_identity_records = retained_identity_records_,
         .retained_identity_bytes = retained_identity_bytes_,
         .bootstrap_state_rows = bootstrap_state_.size(),
@@ -470,7 +521,7 @@ public:
         .end_fence_observed = end_fence_observed_,
         .end_fence_processed = end_fence_processed_,
         .bootstrap_state_validated = bootstrap_state_validated_,
-        .checker = checker_.metrics(),
+        .checker = checker_metrics,
     };
   }
 
@@ -585,6 +636,8 @@ private:
   void validateConfig() const {
     const auto &limits = config_.limits;
     if (config_.expected_session_ids.empty() ||
+        config_.expected_session_ids.size() >
+            std::numeric_limits<std::uint32_t>::max() ||
         config_.application_tables.empty() ||
         limits.max_pending_client_records == 0U ||
         limits.max_pending_client_bytes == 0U ||
@@ -613,6 +666,102 @@ private:
       fail(MonitorErrorCode::JoinBufferLimitExceeded,
            std::string(label) + " exceeds its configured join-buffer limit");
     }
+  }
+
+  void updateJoinBufferHighWater() {
+    auto combined = pending_client_bytes_;
+    checkedAdd(combined, pending_cdc_bytes_);
+    join_buffer_high_water_bytes_ =
+        std::max(join_buffer_high_water_bytes_, combined);
+  }
+
+  void beginMissingClientHeadWait(const RunScopedCorrelationId &correlation) {
+    if (missing_client_wait_started_nanoseconds_.has_value()) {
+      if (!missing_client_wait_correlation_.has_value() ||
+          *missing_client_wait_correlation_ != correlation) {
+        fail(MonitorErrorCode::InternalError,
+             "missing-client head wait changed without releasing its head");
+      }
+      return;
+    }
+    if (missing_client_head_wait_count_ ==
+        std::numeric_limits<std::uint64_t>::max()) {
+      fail(MonitorErrorCode::ResourceExhausted,
+           "missing-client head wait counter is exhausted");
+    }
+    missing_client_wait_correlation_ = correlation;
+    missing_client_wait_started_nanoseconds_ = monotonic_clock_nanoseconds_();
+    ++missing_client_head_wait_count_;
+  }
+
+  void closeMissingClientHeadWait(const RunScopedCorrelationId &correlation) {
+    if (!missing_client_wait_started_nanoseconds_.has_value()) {
+      return;
+    }
+    if (!missing_client_wait_correlation_.has_value() ||
+        *missing_client_wait_correlation_ != correlation) {
+      fail(MonitorErrorCode::InternalError,
+           "released CDC head differs from its missing-client wait");
+    }
+    const auto now = monotonic_clock_nanoseconds_();
+    const auto duration = now >= *missing_client_wait_started_nanoseconds_
+                              ? now - *missing_client_wait_started_nanoseconds_
+                              : 0U;
+    missing_client_head_wait_completed_nanoseconds_ = saturatingAdd(
+        missing_client_head_wait_completed_nanoseconds_, duration);
+    missing_client_head_wait_max_nanoseconds_ =
+        std::max(missing_client_head_wait_max_nanoseconds_, duration);
+    missing_client_wait_correlation_.reset();
+    missing_client_wait_started_nanoseconds_.reset();
+  }
+
+  void requireReleaseSequenceCapacity(const std::size_t count = 1U) const {
+    const auto converted = static_cast<std::uint64_t>(count);
+    if (converted >
+        std::numeric_limits<std::uint64_t>::max() - next_checker_commit_seq_) {
+      fail(MonitorErrorCode::ResourceExhausted,
+           "ordered release sequence space is exhausted");
+    }
+  }
+
+  void requireJoinedEventCapacity(const std::size_t reads,
+                                  const std::size_t writes) const {
+    const auto read_count = static_cast<std::uint64_t>(reads);
+    const auto write_count = static_cast<std::uint64_t>(writes);
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    if (read_count > maximum - joined_read_events_ ||
+        write_count > maximum - joined_write_events_ ||
+        read_count > maximum - write_count ||
+        read_count + write_count > maximum - joined_ordered_events_ ||
+        read_count + write_count > maximum - released_ordered_events_) {
+      fail(MonitorErrorCode::ResourceExhausted,
+           "joined event counters are exhausted");
+    }
+  }
+
+  void requireBootstrapEventCapacity(const std::size_t writes) const {
+    const auto write_count = static_cast<std::uint64_t>(writes);
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    if (write_count > maximum - released_bootstrap_write_events_ ||
+        write_count > maximum - released_ordered_events_) {
+      fail(MonitorErrorCode::ResourceExhausted,
+           "bootstrap release event counters are exhausted");
+    }
+  }
+
+  void recordJoinedEvents(const std::size_t reads, const std::size_t writes) {
+    const auto read_count = static_cast<std::uint64_t>(reads);
+    const auto write_count = static_cast<std::uint64_t>(writes);
+    joined_read_events_ += read_count;
+    joined_write_events_ += write_count;
+    joined_ordered_events_ += read_count + write_count;
+    released_ordered_events_ += read_count + write_count;
+  }
+
+  void recordBootstrapEvents(const std::size_t writes) {
+    const auto write_count = static_cast<std::uint64_t>(writes);
+    released_bootstrap_write_events_ += write_count;
+    released_ordered_events_ += write_count;
   }
 
   void reserveRetainedIdentities(const std::size_t records,
@@ -744,6 +893,7 @@ private:
     pending_client_bytes_ += charge;
     pending_client_high_water_bytes_ =
         std::max(pending_client_high_water_bytes_, pending_client_bytes_);
+    updateJoinBufferHighWater();
     ++accepted_client_transactions_;
     drainReadyPrefix();
   }
@@ -895,6 +1045,7 @@ private:
     pending_cdc_bytes_ += charge;
     pending_cdc_high_water_bytes_ =
         std::max(pending_cdc_high_water_bytes_, pending_cdc_bytes_);
+    updateJoinBufferHighWater();
     ++next_cdc_seq_;
     ++accepted_cdc_transactions_;
     switch (kind) {
@@ -1093,8 +1244,12 @@ private:
             return;
           }
           preflightAnchors();
+          requireReleaseSequenceCapacity(config_.expected_session_ids.size());
           for (const auto &session_id : config_.expected_session_ids) {
-            checker_.consumePhaseAnchor(next_checker_commit_seq_, session_id);
+            if (checker_.has_value()) {
+              checker_->consumePhaseAnchor(next_checker_commit_seq_,
+                                           session_id);
+            }
             ++next_checker_commit_seq_;
             ++phase_anchor_transactions_;
           }
@@ -1121,12 +1276,17 @@ private:
             syntheticUuid(bootstrap_transaction_tag, head.cdc_seq);
         const auto attempt_id =
             syntheticUuid(bootstrap_attempt_tag, head.cdc_seq);
+        requireReleaseSequenceCapacity();
+        requireBootstrapEventCapacity(head.writes.size());
         reserveSyntheticIdentity(transaction_id, attempt_id);
-        checker_.consumeBootstrap(next_checker_commit_seq_, head.cdc_seq,
-                                  head.writes);
+        if (checker_.has_value()) {
+          checker_->consumeBootstrap(next_checker_commit_seq_, head.cdc_seq,
+                                     head.writes);
+        }
         applyBootstrapWrites(head.writes);
         ++next_checker_commit_seq_;
         ++bootstrap_transactions_;
+        recordBootstrapEvents(head.writes.size());
         popCdcHead();
         continue;
       }
@@ -1139,13 +1299,25 @@ private:
       const auto correlation = *head.correlation_id;
       const auto client = client_by_correlation_.find(correlation);
       if (client == client_by_correlation_.end()) {
+        beginMissingClientHeadWait(correlation);
         head_block_reason_ = HeadBlockReason::MissingClient;
         return;
       }
-      checker_.consumeWorkload(next_checker_commit_seq_,
-                               client->second.transaction, head.writes);
+      requireReleaseSequenceCapacity();
+      requireJoinedEventCapacity(client->second.transaction.reads.size(),
+                                 head.writes.size());
+      closeMissingClientHeadWait(correlation);
+      if (checker_.has_value()) {
+        checker_->consumeWorkload(next_checker_commit_seq_,
+                                  client->second.transaction, head.writes);
+      }
       ++next_checker_commit_seq_;
       ++joined_workload_transactions_;
+      if (head.writes.empty()) {
+        ++marker_only_workload_transactions_;
+      }
+      recordJoinedEvents(client->second.transaction.reads.size(),
+                         head.writes.size());
       pending_client_bytes_ -= client->second.charge;
       client_by_correlation_.erase(client);
       pending_cdc_correlations_.erase(correlation);
@@ -1155,7 +1327,8 @@ private:
 
   TransactionJoinerConfig config_;
   ClientTxnParser parser_;
-  CheckerAdapter checker_;
+  std::optional<CheckerAdapter> checker_;
+  std::function<std::uint64_t()> monotonic_clock_nanoseconds_;
   std::unordered_set<std::string> expected_sessions_;
   std::unordered_set<std::string> application_tables_;
   BootstrapState bootstrap_state_;
@@ -1174,6 +1347,9 @@ private:
   std::unordered_set<std::string> reserved_transaction_ids_;
   std::unordered_set<std::string> reserved_attempt_ids_;
   std::optional<BootstrapPrefix> approved_bootstrap_prefix_;
+  std::optional<RunScopedCorrelationId> missing_client_wait_correlation_;
+  std::optional<std::uint64_t> missing_client_wait_started_nanoseconds_;
+  std::optional<AttributedViolation> no_checker_violation_;
   std::optional<Failure> failure_;
   JoinLifecycle lifecycle_ = JoinLifecycle::AwaitRunStart;
   HeadBlockReason head_block_reason_ = HeadBlockReason::None;
@@ -1185,6 +1361,12 @@ private:
   std::uint64_t accepted_bootstrap_cdc_transactions_ = 0;
   std::uint64_t accepted_workload_cdc_transactions_ = 0;
   std::uint64_t joined_workload_transactions_ = 0;
+  std::uint64_t marker_only_workload_transactions_ = 0;
+  std::uint64_t joined_read_events_ = 0;
+  std::uint64_t joined_write_events_ = 0;
+  std::uint64_t joined_ordered_events_ = 0;
+  std::uint64_t released_bootstrap_write_events_ = 0;
+  std::uint64_t released_ordered_events_ = 0;
   std::uint64_t bootstrap_transactions_ = 0;
   std::uint64_t phase_anchor_transactions_ = 0;
   std::uint64_t client_first_matches_ = 0;
@@ -1193,11 +1375,15 @@ private:
   std::size_t pending_client_high_water_bytes_ = 0;
   std::size_t pending_cdc_bytes_ = 0;
   std::size_t pending_cdc_high_water_bytes_ = 0;
+  std::size_t join_buffer_high_water_bytes_ = 0;
   std::size_t unmatched_client_records_ = 0;
   std::size_t unmatched_workload_cdc_slots_ = 0;
   std::size_t retained_identity_records_ = 0;
   std::size_t retained_identity_bytes_ = 0;
   std::size_t bootstrap_state_bytes_ = 0;
+  std::uint64_t missing_client_head_wait_count_ = 0;
+  std::uint64_t missing_client_head_wait_completed_nanoseconds_ = 0;
+  std::uint64_t missing_client_head_wait_max_nanoseconds_ = 0;
   bool end_fence_observed_ = false;
   bool end_fence_processed_ = false;
   bool bootstrap_state_validated_ = false;

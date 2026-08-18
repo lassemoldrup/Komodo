@@ -212,10 +212,113 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 trap 'echo "monitor:stop" >>"$EVENT_LOG"; exit 0' TERM INT
+processing_mode=audited
+metrics_output=
+while (( $# > 0 )); do
+  case "$1" in
+    --processing-mode) processing_mode=$2; shift 2 ;;
+    --metrics-output) metrics_output=$2; shift 2 ;;
+    *) echo "unexpected monitor argument: $1" >&2; exit 2 ;;
+  esac
+done
 echo 'monitor:start' >>"$EVENT_LOG"
+echo "monitor:mode:$processing_mode" >>"$EVENT_LOG"
 while ! grep -q '^fence:END_FENCE$' "$EVENT_LOG"; do
   sleep 0.05
 done
+if [[ $processing_mode == join-only ]]; then
+  [[ -n $metrics_output ]]
+  completion_status=completed
+  completed=true
+  reconciled=true
+  exit_status=0
+  if grep -q '^publish:run_failed$' "$EVENT_LOG"; then
+    completion_status=failed
+    completed=false
+    reconciled=false
+    exit_status=1
+  fi
+  python3 - "$metrics_output" "$completion_status" "$completed" "$reconciled" <<'PY'
+import json
+import os
+import sys
+
+path, completion_status, completed, reconciled = sys.argv[1:]
+completed = completed == "true"
+reconciled = reconciled == "true"
+measurement = {
+    "kind": "performance_measurement",
+    "run_id": os.environ["BLACKBOX_ACTIVE_RUN_ID"],
+    "processing_mode": "join-only",
+    "completed": completed,
+    "completion_status": completion_status,
+    "evidence_reconciled": reconciled,
+    "started_at_utc": "2026-08-18T00:00:00.000Z",
+    "finished_at_utc": "2026-08-18T00:00:01.000Z",
+    "monitor_wall_time_nanoseconds": 1_000_000_000,
+    "process": {"user_cpu_nanoseconds": 1, "system_cpu_nanoseconds": 1, "max_rss_kib": 1},
+    "assembler": {"completed_transactions": 3},
+    "joiner": {"released_phase_anchor_transactions": 1},
+    "checker": {"consumed_transactions": 0},
+    "reconciliation": {"evidence_reconciled": reconciled},
+    "diagnostics": [] if completed else [{"category": "OPERATIONAL", "code": "INTERNAL_ERROR", "message": "injected failure"}],
+}
+with open(path, "x", encoding="utf-8") as output:
+    json.dump(measurement, output, separators=(",", ":"))
+    output.write("\n")
+PY
+  echo "monitor:measurement:$completion_status" >>"$EVENT_LOG"
+  exit "$exit_status"
+fi
+if [[ -n $metrics_output ]]; then
+  while ! grep -q '^status:FINAL$' "$EVENT_LOG"; do
+    sleep 0.05
+  done
+  completion_status=completed
+  completed=true
+  reconciled=true
+  outcome=PASS
+  exit_status=0
+  if grep -q '^publish:run_failed$' "$EVENT_LOG"; then
+    completion_status=failed
+    completed=false
+    reconciled=false
+    outcome=INVALID
+    exit_status=4
+  fi
+  python3 - "$metrics_output" "$completion_status" "$completed" "$reconciled" "$outcome" <<'PY'
+import json
+import os
+import sys
+
+path, completion_status, completed, reconciled, outcome = sys.argv[1:]
+completed = completed == "true"
+reconciled = reconciled == "true"
+measurement = {
+    "kind": "performance_measurement",
+    "run_id": os.environ["BLACKBOX_ACTIVE_RUN_ID"],
+    "processing_mode": "audited",
+    "completed": completed,
+    "completion_status": completion_status,
+    "evidence_reconciled": reconciled,
+    "outcome": outcome,
+    "started_at_utc": "2026-08-18T00:00:00.000Z",
+    "finished_at_utc": "2026-08-18T00:00:01.000Z",
+    "monitor_wall_time_nanoseconds": 1_000_000_000,
+    "process": {"user_cpu_nanoseconds": 1, "system_cpu_nanoseconds": 1, "max_rss_kib": 1},
+    "assembler": {"completed_transactions": 3},
+    "joiner": {"released_phase_anchor_transactions": 1},
+    "checker": {"consumed_transactions": 1},
+    "reconciliation": {"evidence_reconciled": reconciled},
+    "diagnostics": [],
+}
+with open(path, "x", encoding="utf-8") as output:
+    json.dump(measurement, output, separators=(",", ":"))
+    output.write("\n")
+PY
+  echo "monitor:measurement:$completion_status" >>"$EVENT_LOG"
+  exit "$exit_status"
+fi
 SCRIPT
 
   cat >"$case_root/bin/loader" <<'SCRIPT'
@@ -260,6 +363,8 @@ run_case() {
   local hang_loader=${6:-0}
   local contaminate_marker=${7:-0}
   local fail_fence_phase=${8:-}
+  local processing_mode=${9:-audited}
+  local capture_metrics=${10:-0}
   local case_root="$TEST_ROOT/$name"
   mkdir -p "$case_root"
   write_test_programs "$case_root"
@@ -279,6 +384,17 @@ run_case() {
   export CONTAMINATE_MARKER=$contaminate_marker
   export FAIL_FENCE_PHASE=$fail_fence_phase
 
+  local metrics_path=
+  local run_id_path=
+  local bootstrap_manifest_path=
+  if [[ $processing_mode == join-only || $capture_metrics == 1 ]]; then
+    metrics_path="$case_root/monitor-metrics.json"
+  fi
+  if [[ $processing_mode == join-only ]]; then
+    run_id_path="$case_root/run-id.txt"
+    bootstrap_manifest_path="$case_root/bootstrap-manifest.json"
+  fi
+
   local status
   if BLACKBOX_DOCKER="$case_root/bin/docker" \
       BLACKBOX_LIVE_LOCK_TARGET="$case_root" \
@@ -289,6 +405,10 @@ run_case() {
       BLACKBOX_DB_HOST=fake \
       BLACKBOX_DB_PORT=0 \
       BLACKBOX_MONITOR_COMMAND="$case_root/bin/monitor" \
+      BLACKBOX_PROCESSING_MODE="$processing_mode" \
+      BLACKBOX_MONITOR_METRICS_PATH="$metrics_path" \
+      BLACKBOX_RUN_ID_PATH="$run_id_path" \
+      BLACKBOX_BOOTSTRAP_MANIFEST_PATH="$bootstrap_manifest_path" \
       BLACKBOX_LOADER_COMMAND="$case_root/bin/loader" \
       BLACKBOX_WORKLOAD_COMMAND="$case_root/bin/workload" \
       BLACKBOX_EXPECTED_SESSION_IDS=ycsb/worker/1 \
@@ -306,6 +426,7 @@ run_case() {
 
   CASE_STATUS=$status
   CASE_LOG="$case_root/events"
+  CASE_ROOT=$case_root
 }
 
 
@@ -328,6 +449,57 @@ final_line=$(line_of 'status:FINAL' "$CASE_LOG")
 (( loader_line < bootstrap_line && bootstrap_line < load_fence_line )) || fail 'bootstrap manifest/fence order is wrong'
 (( load_fence_line < load_ack_line && load_ack_line < workload_line )) || fail 'workload bypassed LOAD acknowledgement'
 (( workload_line < end_fence_line && end_fence_line < final_line )) || fail 'END/final order is wrong'
+
+run_case audited_metrics 0 0 0 0 0 0 '' audited 1
+[[ $CASE_STATUS == 0 ]] ||
+  fail "audited metrics lifecycle exited $CASE_STATUS: $(cat "$CASE_ROOT/stderr")"
+grep -q '^status:FINAL$' "$CASE_LOG" ||
+  fail 'audited metrics lifecycle did not observe FINAL'
+grep -q '^monitor:measurement:completed$' "$CASE_LOG" ||
+  fail 'audited metrics lifecycle did not wait for monitor measurement output'
+audited_final_line=$(line_of 'status:FINAL' "$CASE_LOG")
+audited_measurement_line=$(line_of 'monitor:measurement:completed' "$CASE_LOG")
+(( audited_final_line < audited_measurement_line )) ||
+  fail 'audited measurement was not written after FINAL publication'
+[[ $(jq -r '.outcome' "$CASE_ROOT/monitor-metrics.json") == PASS ]] ||
+  fail 'audited measurement did not preserve the terminal outcome'
+
+run_case join_only_clean 0 0 0 0 0 0 '' join-only
+[[ $CASE_STATUS == 0 ]] ||
+  fail "clean join-only lifecycle exited $CASE_STATUS: $(cat "$CASE_ROOT/stderr")"
+grep -q '^monitor:mode:join-only$' "$CASE_LOG" ||
+  fail 'join-only coordinator did not pass the monitor processing mode'
+grep -q '^monitor:measurement:completed$' "$CASE_LOG" ||
+  fail 'join-only coordinator did not wait for the completed measurement'
+if grep -q '^status:FINAL$' "$CASE_LOG"; then
+  fail 'join-only coordinator waited for a terminal status record'
+fi
+join_end_line=$(line_of 'fence:END_FENCE' "$CASE_LOG")
+join_measurement_line=$(line_of 'monitor:measurement:completed' "$CASE_LOG")
+(( join_end_line < join_measurement_line )) ||
+  fail 'join-only monitor completed before END_FENCE'
+join_run_id=$(cat "$CASE_ROOT/run-id.txt")
+[[ $(jq -r '.run_id' "$CASE_ROOT/monitor-metrics.json") == "$join_run_id" ]] ||
+  fail 'run-id provenance does not match the measurement'
+[[ $(jq -r '.run_id' "$CASE_ROOT/bootstrap-manifest.json") == "$join_run_id" ]] ||
+  fail 'BootstrapManifest provenance does not match the run ID'
+if grep -Eq 'PASS|VIOLATION|INVALID' "$CASE_ROOT/stdout" "$CASE_ROOT/stderr"; then
+  fail 'join-only lifecycle output implied an audited result'
+fi
+
+run_case join_only_loader_failure 0 0 9 0 0 0 '' join-only
+[[ $CASE_STATUS == 1 ]] ||
+  fail 'join-only loader failure did not fail operationally'
+grep -q '^monitor:measurement:failed$' "$CASE_LOG" ||
+  fail 'join-only failure did not produce a failed measurement'
+if grep -q '^status:FINAL$' "$CASE_LOG"; then
+  fail 'join-only failure waited for a terminal status record'
+fi
+[[ $(jq -r '.completion_status' "$CASE_ROOT/monitor-metrics.json") == failed ]] ||
+  fail 'join-only failure artifact has the wrong completion status'
+if grep -Eq 'PASS|VIOLATION|INVALID' "$CASE_ROOT/stdout" "$CASE_ROOT/stderr"; then
+  fail 'failed join-only lifecycle output implied an audited result'
+fi
 
 run_case active_connection 1
 [[ $CASE_STATUS != 0 ]] || fail 'unproven quiescence unexpectedly succeeded'

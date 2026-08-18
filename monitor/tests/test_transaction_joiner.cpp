@@ -300,6 +300,7 @@ void testStrictReadyPrefixAndEndDeferral() {
   BLACKBOX_CHECK(metrics.checker.next_commit_seq == 4U);
   BLACKBOX_CHECK(metrics.checker.phase_anchor_transactions == 2U);
   BLACKBOX_CHECK(metrics.checker.workload_transactions == 2U);
+  BLACKBOX_CHECK(metrics.marker_only_workload_transactions == 2U);
 
   metrics = joiner.metrics();
   BLACKBOX_CHECK(metrics.checker.next_commit_seq == 4U);
@@ -323,6 +324,117 @@ void testStrictReadyPrefixAndEndDeferral() {
   BLACKBOX_CHECK(audit.pending_cdc_slots == 0U);
   BLACKBOX_CHECK(audit.unmatched_client_records == 0U);
   BLACKBOX_CHECK(audit.unmatched_workload_cdc_slots == 0U);
+}
+
+void testHeadWaitClockAndCombinedJoinBufferPeak() {
+  std::uint64_t now = 100U;
+  auto joiner_config = config();
+  joiner_config.monotonic_clock_nanoseconds = [&] { return now; };
+  TransactionJoiner joiner(std::move(joiner_config));
+  openWorkload(joiner);
+
+  joiner.acceptCdcTransaction(workload(2U, session_one, 1U));
+  now = 140U;
+  joiner.acceptClientPayload(clientPayload(session_two, 1U, 1U, 2U));
+  now = 170U;
+  joiner.acceptCdcTransaction(workload(3U, session_two, 1U));
+  now = 190U;
+  auto metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_count == 1U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_current_nanoseconds == 90U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_total_nanoseconds == 90U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_max_nanoseconds == 90U);
+  BLACKBOX_CHECK(metrics.join_buffer_high_water_bytes ==
+                 metrics.pending_client_bytes + metrics.pending_cdc_bytes);
+  BLACKBOX_CHECK(metrics.join_buffer_high_water_bytes >
+                 metrics.pending_client_high_water_bytes);
+  BLACKBOX_CHECK(metrics.join_buffer_high_water_bytes >
+                 metrics.pending_cdc_high_water_bytes);
+
+  now = 250U;
+  joiner.acceptClientPayload(clientPayload(session_one, 1U, 1U, 1U));
+  metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.joined_workload_transactions == 2U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_count == 1U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_current_nanoseconds == 0U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_total_nanoseconds == 150U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_max_nanoseconds == 150U);
+
+  now = 300U;
+  joiner.acceptCdcTransaction(workload(4U, session_one, 2U));
+  now = 320U;
+  joiner.drain();
+  now = 340U;
+  joiner.acceptClientPayload(clientPayload(session_one, 2U, 2U, 3U));
+  metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.joined_workload_transactions == 3U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_count == 2U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_current_nanoseconds == 0U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_total_nanoseconds == 190U);
+  BLACKBOX_CHECK(metrics.missing_client_head_wait_max_nanoseconds == 150U);
+}
+
+void testOrderedJoiningWithoutCheckerExecution() {
+  auto joiner_config = config();
+  joiner_config.execute_consistency_check = false;
+  TransactionJoiner joiner(std::move(joiner_config));
+
+  joiner.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
+  joiner.acceptCdcTransaction(
+      bootstrap(1U, {NormalizedWrite{.key = key(42),
+                                     .state = NormalizedValueState::Present,
+                                     .value = mixedGoldenValue()},
+                     NormalizedWrite{.key = key(-1),
+                                     .state = NormalizedValueState::Present,
+                                     .value = allNullValue()}}));
+  joiner.acceptCdcTransaction(control(2U, RunFencePhase::LoadFinished));
+  const auto prefix = joiner.pendingBootstrapPrefix();
+  BLACKBOX_REQUIRE(prefix.has_value());
+  joiner.validateBootstrapState(BootstrapStateProof{
+      .prefix = *prefix,
+      .table_row_counts = {BootstrapTableCount{.table = "benchbase.usertable",
+                                               .row_count = 2}},
+      .canonical_state_digest =
+          "71749720e062cf361dbad1e139c88d7d39b10debeddf18562d35cd80ae53afa8",
+  });
+
+  joiner.acceptClientPayload(
+      clientPayload(session_one, 1U, 1U, 1U, {absentRead(0U, 42)}));
+  joiner.acceptCdcTransaction(workload(3U, session_one, 1U));
+  joiner.acceptClientPayload(clientPayload(session_two, 1U, 1U, 2U));
+  joiner.acceptCdcTransaction(
+      workload(4U, session_two, 1U, {presentWrite(7, "written")}));
+  joiner.acceptCdcTransaction(control(5U, RunFencePhase::EndFence));
+  joiner.processEndFence();
+
+  const auto metrics = joiner.metrics();
+  BLACKBOX_CHECK(joiner.lifecycle() == JoinLifecycle::Closed);
+  BLACKBOX_CHECK(metrics.bootstrap_state_validated);
+  BLACKBOX_CHECK(metrics.released_bootstrap_transactions == 1U);
+  BLACKBOX_CHECK(metrics.released_phase_anchor_transactions == 2U);
+  BLACKBOX_CHECK(metrics.released_workload_transactions == 2U);
+  BLACKBOX_CHECK(metrics.released_bootstrap_write_events == 2U);
+  BLACKBOX_CHECK(metrics.released_ordered_events == 4U);
+  BLACKBOX_CHECK(metrics.joined_workload_transactions == 2U);
+  BLACKBOX_CHECK(metrics.marker_only_workload_transactions == 1U);
+  BLACKBOX_CHECK(metrics.joined_read_events == 1U);
+  BLACKBOX_CHECK(metrics.joined_write_events == 1U);
+  BLACKBOX_CHECK(metrics.joined_ordered_events == 2U);
+  BLACKBOX_CHECK(joiner.checkerObservation() == CheckerObservation::NotStarted);
+  BLACKBOX_CHECK(!joiner.firstViolation().has_value());
+  BLACKBOX_CHECK(metrics.checker.next_commit_seq == 0U);
+  BLACKBOX_CHECK(metrics.checker.consumed_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.bootstrap_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.phase_anchor_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.workload_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.read_events == 0U);
+  BLACKBOX_CHECK(metrics.checker.write_events == 0U);
+  BLACKBOX_CHECK(metrics.checker.consume_total_nanoseconds == 0U);
+  BLACKBOX_CHECK(metrics.checker.consume_max_nanoseconds == 0U);
+  BLACKBOX_CHECK(metrics.checker.mapped_identity_records == 0U);
+  BLACKBOX_CHECK(metrics.checker.mapped_identity_bytes == 0U);
+  BLACKBOX_CHECK(metrics.checker.engine.retained_state_capacity_bytes == 0U);
+  BLACKBOX_CHECK(metrics.checker.engine.retained_state_bytes == 0U);
 }
 
 void testEndFenceCannotPassMissingClient() {
@@ -359,6 +471,8 @@ void testBootstrapGateAndAnchorLowerBound() {
   BLACKBOX_CHECK(pending->load_fence_cdc_seq == 2U);
   BLACKBOX_CHECK(pending->bootstrap_transactions == 1U);
   BLACKBOX_CHECK(joiner.metrics().checker.bootstrap_transactions == 1U);
+  BLACKBOX_CHECK(joiner.metrics().released_bootstrap_write_events == 2U);
+  BLACKBOX_CHECK(joiner.metrics().released_ordered_events == 2U);
   BLACKBOX_CHECK(joiner.metrics().checker.phase_anchor_transactions == 0U);
   joiner.acceptClientPayload(clientPayload(
       session_two, 1U, 1U, 2U, {presentReadBytes(0U, 42, mixedGoldenValue())}));
@@ -376,6 +490,7 @@ void testBootstrapGateAndAnchorLowerBound() {
   });
   BLACKBOX_CHECK(joiner.metrics().checker.phase_anchor_transactions == 2U);
   BLACKBOX_CHECK(joiner.metrics().joined_workload_transactions == 1U);
+  BLACKBOX_CHECK(joiner.metrics().released_ordered_events == 3U);
   BLACKBOX_CHECK(joiner.checkerObservation() == CheckerObservation::PassSoFar);
 
   joiner.acceptClientPayload(
@@ -383,6 +498,7 @@ void testBootstrapGateAndAnchorLowerBound() {
   joiner.acceptCdcTransaction(workload(4U, session_one, 1U));
   BLACKBOX_CHECK(joiner.checkerObservation() ==
                  CheckerObservation::ViolationObserved);
+  BLACKBOX_CHECK(joiner.metrics().released_ordered_events == 4U);
   BLACKBOX_REQUIRE(joiner.firstViolation().has_value());
   BLACKBOX_CHECK(joiner.firstViolation()->session_id == session_one);
   BLACKBOX_CHECK(
@@ -807,6 +923,8 @@ void testIncrementalUnmatchedMetricsUnderLongPendingPrefix() {
 
 int runTransactionJoinerTests() {
   testStrictReadyPrefixAndEndDeferral();
+  testHeadWaitClockAndCombinedJoinBufferPeak();
+  testOrderedJoiningWithoutCheckerExecution();
   testEndFenceCannotPassMissingClient();
   testBootstrapGateAndAnchorLowerBound();
   testBootstrapApprovalMustMatchExactPrefix();

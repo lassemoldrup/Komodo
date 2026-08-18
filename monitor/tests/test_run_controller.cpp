@@ -28,6 +28,7 @@ using blackbox::ClientReadSource;
 using blackbox::ClientValueState;
 using blackbox::FinalOutcome;
 using blackbox::NormalizedWrite;
+using blackbox::ProcessingMode;
 using blackbox::RunController;
 using blackbox::RunFencePhase;
 using blackbox::RunManifest;
@@ -725,6 +726,88 @@ void testFirstViolationOwnsReservedDiagnosticSlotImmediately() {
   BLACKBOX_CHECK(controller.diagnostics().front().code == "VIOLATION_OBSERVED");
 }
 
+void testJoinOnlyReconcilesWouldBeViolationWithoutVerdict() {
+  blackbox::RunControllerConfig config;
+  config.processing_mode = ProcessingMode::JoinOnly;
+  RunController controller(manifest(), config);
+  openWorkload(controller);
+
+  std::array<std::optional<std::string>, 10> fields{};
+  fields[0] = "impossible";
+  const ClientRead read{
+      .event_seq = 0U,
+      .key = CanonicalYcsbCodec::encodeKey("benchbase", "usertable", 17),
+      .state = ClientValueState::Present,
+      .value = CanonicalYcsbCodec::encodeValue(fields),
+      .source = ClientReadSource::Snapshot,
+  };
+  controller.acceptClientPayload(clientPayload(1U, {read}));
+  controller.acceptCdcTransaction(workload(2U, 1U));
+  controller.acceptClientPayload(donePayload(1U));
+  controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+  controller.onInputIdle();
+
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.processingMode() == ProcessingMode::JoinOnly);
+  BLACKBOX_CHECK(!controller.finalOutcome().has_value());
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  BLACKBOX_CHECK(controller.finalReconciliation()->evidence_reconciled);
+  BLACKBOX_CHECK(controller.diagnostics().empty());
+
+  const auto metrics = controller.joinerMetrics();
+  BLACKBOX_CHECK(metrics.released_bootstrap_transactions == 0U);
+  BLACKBOX_CHECK(metrics.released_phase_anchor_transactions == 1U);
+  BLACKBOX_CHECK(metrics.released_workload_transactions == 1U);
+  BLACKBOX_CHECK(metrics.joined_read_events == 1U);
+  BLACKBOX_CHECK(metrics.checker.consumed_transactions == 0U);
+  BLACKBOX_CHECK(metrics.checker.consume_total_nanoseconds == 0U);
+  BLACKBOX_CHECK(metrics.checker.mapped_identity_records == 0U);
+  BLACKBOX_CHECK(metrics.checker.engine.retained_state_bytes == 0U);
+
+  const auto statuses = controller.takePendingStatuses();
+  for (const auto &status_text : statuses) {
+    const auto status = Json::parse(status_text);
+    BLACKBOX_CHECK(status.at("lifecycle_state") != "FINAL");
+    BLACKBOX_CHECK(status.at("outcome") == "RUNNING");
+    BLACKBOX_CHECK(status.at("checker_observation") == "NOT_STARTED");
+    BLACKBOX_CHECK(status_text.find("PASS") == std::string::npos);
+    BLACKBOX_CHECK(status_text.find("VIOLATION") == std::string::npos);
+    BLACKBOX_CHECK(status_text.find("INVALID") == std::string::npos);
+  }
+  const auto report = controller.finalReport();
+  BLACKBOX_CHECK(report.find("PASS") == std::string::npos);
+  BLACKBOX_CHECK(report.find("VIOLATION") == std::string::npos);
+  BLACKBOX_CHECK(report.find("INVALID") == std::string::npos);
+  BLACKBOX_CHECK(report.find("completion_status=completed") !=
+                 std::string::npos);
+}
+
+void testJoinOnlyFailureHasNoAuditedOutcome() {
+  blackbox::RunControllerConfig config;
+  config.processing_mode = ProcessingMode::JoinOnly;
+  RunController controller(manifest(), config);
+  openWorkload(controller);
+  controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
+  controller.onInputIdle();
+
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(!controller.finalOutcome().has_value());
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  BLACKBOX_CHECK(!controller.finalReconciliation()->evidence_reconciled);
+  BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISSING"));
+  BLACKBOX_CHECK(controller.finalReport().find("completion_status=failed") !=
+                 std::string::npos);
+  const auto statuses = controller.takePendingStatuses();
+  BLACKBOX_CHECK(finalStatusCount(statuses) == 0U);
+  for (const auto &status_text : statuses) {
+    const auto status = Json::parse(status_text);
+    BLACKBOX_CHECK(status.at("checker_observation") == "NOT_STARTED");
+    BLACKBOX_CHECK(status_text.find("PASS") == std::string::npos);
+    BLACKBOX_CHECK(status_text.find("VIOLATION") == std::string::npos);
+    BLACKBOX_CHECK(status_text.find("INVALID") == std::string::npos);
+  }
+}
+
 void testCompletedSessionTrackingUsesTerminalAudit() {
   constexpr std::size_t session_count = 4096U;
   auto many_sessions = manifest();
@@ -763,6 +846,8 @@ int runRunControllerTests() {
   testJoinLimitAfterViolationPreservesObservation();
   testCleanViolationFinalizesAsViolation();
   testFirstViolationOwnsReservedDiagnosticSlotImmediately();
+  testJoinOnlyReconcilesWouldBeViolationWithoutVerdict();
+  testJoinOnlyFailureHasNoAuditedOutcome();
   testCompletedSessionTrackingUsesTerminalAudit();
   return 0;
 }

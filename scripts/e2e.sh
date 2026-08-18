@@ -18,6 +18,10 @@ BLACKBOX_LOADER_TIMEOUT_SECONDS=${BLACKBOX_LOADER_TIMEOUT_SECONDS:-600}
 BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=${BLACKBOX_WORKLOAD_TIMEOUT_SECONDS:-900}
 BLACKBOX_TERMINATION_GRACE_SECONDS=${BLACKBOX_TERMINATION_GRACE_SECONDS:-5}
 BLACKBOX_COORDINATOR_MARGIN_SECONDS=${BLACKBOX_COORDINATOR_MARGIN_SECONDS:-1800}
+BLACKBOX_PROCESSING_MODE=${BLACKBOX_PROCESSING_MODE:-audited}
+BLACKBOX_MONITOR_METRICS_PATH=${BLACKBOX_MONITOR_METRICS_PATH:-}
+BLACKBOX_RUN_ID_PATH=${BLACKBOX_RUN_ID_PATH:-}
+BLACKBOX_BOOTSTRAP_MANIFEST_PATH=${BLACKBOX_BOOTSTRAP_MANIFEST_PATH:-}
 BLACKBOX_MONITOR_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_TIMEOUT_SECONDS:-$((
   BLACKBOX_LOADER_TIMEOUT_SECONDS + BLACKBOX_WORKLOAD_TIMEOUT_SECONDS +
     2 * (BLACKBOX_TERMINATION_GRACE_SECONDS +
@@ -31,6 +35,24 @@ PHASE_COMMAND_STATUS=0
 PHASE_QUIESCENCE_PROVEN=0
 BOOTSTRAP_SCAN_FILE=
 END_FENCE_COMMITTED=0
+MONITOR_EXIT_STATUS=0
+
+
+write_provenance_file() {
+  local path=$1
+  local content=$2
+  local temporary="${path}.tmp.$$"
+  if ! (umask 077 && printf '%s\n' "$content" >"$temporary"); then
+    rm -f -- "$temporary"
+    blackbox_die "cannot write provenance file: $path"
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$path"; then
+    rm -f -- "$temporary"
+    blackbox_die "cannot install provenance file: $path"
+    return 1
+  fi
+}
 
 
 cleanup_owned_processes() {
@@ -71,18 +93,51 @@ require_configuration() {
   [[ $BLACKBOX_COORDINATOR_MARGIN_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_MONITOR_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
 
+  case "$BLACKBOX_PROCESSING_MODE" in
+    audited|join-only) ;;
+    *) blackbox_die "BLACKBOX_PROCESSING_MODE must be audited or join-only" ;;
+  esac
+  if [[ $BLACKBOX_PROCESSING_MODE == join-only && -z $BLACKBOX_MONITOR_METRICS_PATH ]]; then
+    blackbox_die "join-only processing requires BLACKBOX_MONITOR_METRICS_PATH"
+  fi
+  if [[ -n $BLACKBOX_MONITOR_METRICS_PATH && -e $BLACKBOX_MONITOR_METRICS_PATH ]]; then
+    blackbox_die "monitor metrics path already exists: $BLACKBOX_MONITOR_METRICS_PATH"
+  fi
+  if [[ -n $BLACKBOX_MONITOR_METRICS_PATH &&
+        ( $BLACKBOX_MONITOR_METRICS_PATH == "$BLACKBOX_RUN_ID_PATH" ||
+          $BLACKBOX_MONITOR_METRICS_PATH == "$BLACKBOX_BOOTSTRAP_MANIFEST_PATH" ) ]]; then
+    blackbox_die "monitor metrics and provenance paths must be distinct"
+  fi
+  if [[ -n $BLACKBOX_RUN_ID_PATH &&
+        $BLACKBOX_RUN_ID_PATH == "$BLACKBOX_BOOTSTRAP_MANIFEST_PATH" ]]; then
+    blackbox_die "run-id and BootstrapManifest provenance paths must be distinct"
+  fi
+
   IFS=',' read -r -a BLACKBOX_SESSION_IDS <<<"$BLACKBOX_EXPECTED_SESSION_IDS"
   (( ${#BLACKBOX_SESSION_IDS[@]} > 0 ))
 
-  # Audited runs never accept a caller-supplied epoch. Recreating the stack and
-  # minting the UUID here makes semantic run reuse unavailable by construction.
+  # Runs never accept a caller-supplied epoch. Recreating the stack and minting
+  # the UUID here makes semantic run reuse unavailable by construction.
   BLACKBOX_ACTIVE_RUN_ID=$(blackbox_new_uuid)
   export BLACKBOX_ACTIVE_RUN_ID
   export BLACKBOX_REDIS_HOST BLACKBOX_REDIS_PORT BLACKBOX_DB_HOST BLACKBOX_DB_PORT
   export BLACKBOX_BACKEND_SOURCE_ID BLACKBOX_DECLARED_ISOLATION
   export BLACKBOX_EXPECTED_SESSION_IDS
+  export BLACKBOX_PROCESSING_MODE BLACKBOX_MONITOR_METRICS_PATH
+  export BLACKBOX_RUN_ID_PATH BLACKBOX_BOOTSTRAP_MANIFEST_PATH
   export BLACKBOX_CLIENT_STREAM="blackbox:client:$BLACKBOX_ACTIVE_RUN_ID"
   export BLACKBOX_STATUS_STREAM="blackbox:status:$BLACKBOX_ACTIVE_RUN_ID"
+  if [[ -n $BLACKBOX_RUN_ID_PATH ]]; then
+    write_provenance_file "$BLACKBOX_RUN_ID_PATH" "$BLACKBOX_ACTIVE_RUN_ID"
+  fi
+
+  local -a monitor_measurement_arguments=()
+  if [[ $BLACKBOX_PROCESSING_MODE == join-only ]]; then
+    monitor_measurement_arguments+=(--processing-mode join-only)
+  fi
+  if [[ -n $BLACKBOX_MONITOR_METRICS_PATH ]]; then
+    monitor_measurement_arguments+=(--metrics-output "$BLACKBOX_MONITOR_METRICS_PATH")
+  fi
 
   if [[ -z ${BLACKBOX_MONITOR_COMMAND:-} ]]; then
     : "${BLACKBOX_MONITOR_BIN:?set BLACKBOX_MONITOR_BIN or BLACKBOX_MONITOR_COMMAND}"
@@ -94,7 +149,13 @@ require_configuration() {
       --redis-host "$BLACKBOX_REDIS_HOST" \
       --redis-port "$BLACKBOX_REDIS_PORT" \
       --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
-      --overall-timeout-ms "$monitor_timeout_ms"
+      --overall-timeout-ms "$monitor_timeout_ms" \
+      "${monitor_measurement_arguments[@]}"
+  elif (( ${#monitor_measurement_arguments[@]} > 0 )); then
+    local quoted_measurement_arguments
+    printf -v quoted_measurement_arguments '%q ' \
+      "${monitor_measurement_arguments[@]}"
+    BLACKBOX_MONITOR_COMMAND+=" $quoted_measurement_arguments"
   fi
 
   # Building the manifest is also the strict validation pass for the UUID,
@@ -266,7 +327,117 @@ run_client_phase() {
 }
 
 
+wait_for_owned_monitor_exit() {
+  if [[ -z $MONITOR_SESSION_ID ]]; then
+    blackbox_die "owned monitor process is unavailable"
+    return 1
+  fi
+  local deadline=$(( $(date +%s) + BLACKBOX_STATUS_TIMEOUT_SECONDS ))
+  while blackbox_session_has_processes "$MONITOR_SESSION_ID"; do
+    if (( $(date +%s) > deadline )); then
+      blackbox_die "timed out waiting for the owned monitor process to exit"
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  MONITOR_EXIT_STATUS=0
+  if wait "$MONITOR_SESSION_ID"; then
+    MONITOR_EXIT_STATUS=0
+  else
+    MONITOR_EXIT_STATUS=$?
+  fi
+  MONITOR_SESSION_ID=
+}
+
+
+validate_join_only_measurement() {
+  local expected_completion=$1
+  [[ -s $BLACKBOX_MONITOR_METRICS_PATH ]] || {
+    blackbox_die "join-only monitor did not write its measurement artifact"
+    return 1
+  }
+
+  local expected_completed=false
+  local expected_status=failed
+  local expected_reconciled=false
+  if [[ $expected_completion == completed ]]; then
+    expected_completed=true
+    expected_status=completed
+    expected_reconciled=true
+  fi
+  jq -e \
+    --arg run_id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --arg status "$expected_status" \
+    --argjson completed "$expected_completed" \
+    --argjson reconciled "$expected_reconciled" '
+      .kind == "performance_measurement" and
+      .run_id == $run_id and
+      .processing_mode == "join-only" and
+      .completed == $completed and
+      .completion_status == $status and
+      .evidence_reconciled == $reconciled and
+      (.assembler | type == "object") and
+      (.joiner | type == "object") and
+      (.checker | type == "object") and
+      (.process | type == "object") and
+      ([.. | objects | has("outcome") or has("verdict")] | any | not) and
+      ([.. | strings | select(. == "PASS" or . == "VIOLATION" or . == "INVALID")] | length == 0) and
+      (if $reconciled then .reconciliation.evidence_reconciled == true else true end)
+    ' "$BLACKBOX_MONITOR_METRICS_PATH" >/dev/null || {
+      blackbox_die "join-only monitor measurement failed validation"
+      return 1
+    }
+}
+
+
+validate_audited_measurement() {
+  local expected_outcome=$1
+  [[ -s $BLACKBOX_MONITOR_METRICS_PATH ]] || {
+    blackbox_die "audited monitor did not write its measurement artifact"
+    return 1
+  }
+
+  local expected_completed=true
+  local expected_status=completed
+  local expected_reconciled=true
+  if [[ $expected_outcome == INVALID ]]; then
+    expected_completed=false
+    expected_status=failed
+    expected_reconciled=false
+  fi
+  jq -e \
+    --arg run_id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --arg outcome "$expected_outcome" \
+    --arg status "$expected_status" \
+    --argjson completed "$expected_completed" \
+    --argjson reconciled "$expected_reconciled" '
+      .kind == "performance_measurement" and
+      .run_id == $run_id and
+      .processing_mode == "audited" and
+      .completed == $completed and
+      .completion_status == $status and
+      .evidence_reconciled == $reconciled and
+      .outcome == $outcome and
+      (.assembler | type == "object") and
+      (.joiner | type == "object") and
+      (.checker | type == "object") and
+      (.process | type == "object") and
+      .reconciliation.evidence_reconciled == $reconciled
+    ' "$BLACKBOX_MONITOR_METRICS_PATH" >/dev/null || {
+      blackbox_die "audited monitor measurement failed validation"
+      return 1
+    }
+}
+
+
 wait_for_failed_final() {
+  if [[ $BLACKBOX_PROCESSING_MODE == join-only ]]; then
+    blackbox_log "waiting for failed join-only measurement"
+    wait_for_owned_monitor_exit || return 1
+    validate_join_only_measurement failed
+    return
+  fi
   blackbox_log "waiting for final INVALID monitor result"
   if ! blackbox_wait_for_status FINAL; then
     return 1
@@ -278,13 +449,25 @@ wait_for_failed_final() {
     blackbox_die "failed run ended with non-INVALID monitor outcome: $outcome"
     return 1
   fi
+  if [[ -n $BLACKBOX_MONITOR_METRICS_PATH ]]; then
+    wait_for_owned_monitor_exit || return 1
+    if (( MONITOR_EXIT_STATUS != 4 )); then
+      blackbox_die "audited monitor exited $MONITOR_EXIT_STATUS after INVALID"
+      return 1
+    fi
+    validate_audited_measurement INVALID
+  fi
 }
 
 
 stop_monitor_without_fence() {
   local reason_code=$1
   local diagnostic=$2
-  blackbox_log "timeout-invalid outcome=INVALID reason_code=$reason_code diagnostic=$diagnostic"
+  if [[ $BLACKBOX_PROCESSING_MODE == join-only ]]; then
+    blackbox_log "completion_status=failed reason_code=$reason_code diagnostic=$diagnostic"
+  else
+    blackbox_log "timeout-invalid outcome=INVALID reason_code=$reason_code diagnostic=$diagnostic"
+  fi
 
   if [[ -z $MONITOR_SESSION_ID ]]; then
     return 0
@@ -405,6 +588,13 @@ run_loader_and_close_bootstrap() {
     close_failed_run CANONICAL_ENCODING_FAILED "post-loader canonical state encoding failed" 1
     return 1
   fi
+  if [[ -n $BLACKBOX_BOOTSTRAP_MANIFEST_PATH ]]; then
+    if ! write_provenance_file "$BLACKBOX_BOOTSTRAP_MANIFEST_PATH" "$manifest"; then
+      close_failed_run RESOURCE_EXHAUSTED \
+        "could not persist BootstrapManifest provenance" 1
+      return 1
+    fi
+  fi
   if ! blackbox_publish_record "$(blackbox_client_stream)" "$manifest" >/dev/null; then
     close_failed_run REDIS_PUBLICATION_FAILED "BootstrapManifest publication failed" 1
     return 1
@@ -449,21 +639,42 @@ run_workload_and_close() {
     return 1
   fi
   END_FENCE_COMMITTED=1
+  if [[ $BLACKBOX_PROCESSING_MODE == join-only ]]; then
+    blackbox_log "waiting for completed join-only measurement"
+    wait_for_owned_monitor_exit || return 1
+    if (( MONITOR_EXIT_STATUS != 0 )); then
+      blackbox_die "join-only monitor exited $MONITOR_EXIT_STATUS"
+      return 1
+    fi
+    validate_join_only_measurement completed
+    return
+  fi
   blackbox_log "waiting for final monitor result"
   blackbox_wait_for_status FINAL
 
   local outcome
   outcome=$(jq -r '.outcome' <<<"$MATCHED_STATUS")
   printf '%s\n' "$MATCHED_STATUS"
+  local result
   case "$outcome" in
-    PASS) return 0 ;;
-    VIOLATION) return 3 ;;
-    INVALID) return 4 ;;
+    PASS) result=0 ;;
+    VIOLATION) result=3 ;;
+    INVALID) result=4 ;;
     *)
       blackbox_die "unexpected final outcome: $outcome"
       return 1
       ;;
   esac
+  if [[ -n $BLACKBOX_MONITOR_METRICS_PATH ]]; then
+    wait_for_owned_monitor_exit || return 1
+    if (( MONITOR_EXIT_STATUS != result )); then
+      blackbox_die \
+        "audited monitor exited $MONITOR_EXIT_STATUS after $outcome"
+      return 1
+    fi
+    validate_audited_measurement "$outcome" || return 1
+  fi
+  return "$result"
 }
 
 

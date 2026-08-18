@@ -432,6 +432,39 @@ void checkCapturedLifecycleAndNormalization() {
   BLACKBOX_CHECK(transactions[10].fence_phase == RunFencePhase::EndFence);
 }
 
+void checkMeasurementMetrics() {
+  const auto captured =
+      loadFixtureNamed("mariadb_debezium_3_6_1_full_lifecycle.json");
+  const auto records = recordsFromFixture(captured);
+  DebeziumTxnAssembler assembler(assemblerConfig());
+  std::uint64_t expected_raw_bytes = 0U;
+  for (const auto &record : records) {
+    expected_raw_bytes += static_cast<std::uint64_t>(record.key_json.size());
+    expected_raw_bytes +=
+        static_cast<std::uint64_t>(record.envelope_json.size());
+    (void)assembler.accept(record);
+  }
+  assembler.finish();
+
+  const auto metrics = assembler.metrics();
+  BLACKBOX_CHECK(expected_raw_bytes == 30599U);
+  BLACKBOX_CHECK(metrics.accepted_raw_records == 55U);
+  BLACKBOX_CHECK(metrics.accepted_raw_bytes == expected_raw_bytes);
+  BLACKBOX_CHECK(metrics.startup_schema_records == 10U);
+  BLACKBOX_CHECK(metrics.begin_metadata_records == 11U);
+  BLACKBOX_CHECK(metrics.end_metadata_records == 11U);
+  BLACKBOX_CHECK(metrics.row_records == 23U);
+  BLACKBOX_CHECK(metrics.completed_transactions == 11U);
+  BLACKBOX_CHECK(metrics.completed_run_control_transactions == 3U);
+  BLACKBOX_CHECK(metrics.completed_bootstrap_transactions == 1U);
+  BLACKBOX_CHECK(metrics.completed_workload_transactions == 7U);
+  BLACKBOX_CHECK(metrics.raw_row_events == 23U);
+  BLACKBOX_CHECK(metrics.normalized_write_events == 9U);
+  BLACKBOX_CHECK(metrics.active_assembly_bytes == 0U);
+  BLACKBOX_CHECK(metrics.active_assembly_high_water_bytes > 0U);
+  BLACKBOX_CHECK(metrics.retained_identity_bytes > 0U);
+}
+
 void checkStructuralFailuresAreClosed() {
   const auto captured = loadFixture();
 
@@ -827,6 +860,7 @@ void checkAttemptGapsAndContiguousFrames() {
 int runDebeziumAssemblerTests() {
   checkCapturedStartupSchemaSnapshot();
   checkCapturedLifecycleAndNormalization();
+  checkMeasurementMetrics();
   checkStructuralFailuresAreClosed();
   checkMarkerAndFenceFailuresAreClosed();
   checkNormalizationFailuresAndPrimaryKeyUpdateRule();

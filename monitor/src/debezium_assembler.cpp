@@ -206,6 +206,7 @@ public:
       if (has_status == has_operation) {
         if (!has_status && envelope.contains("ddl")) {
           acceptStartupSchemaSnapshot(key, envelope);
+          recordAcceptedRaw(record);
           return std::nullopt;
         }
         fail(CdcErrorCode::CdcRecordMalformed,
@@ -213,9 +214,12 @@ public:
              "row data");
       }
       if (has_status) {
-        return acceptTransactionMetadata(record, key, envelope);
+        auto completed = acceptTransactionMetadata(record, key, envelope);
+        recordAcceptedRaw(record);
+        return completed;
       }
       acceptRow(record, key, envelope);
+      recordAcceptedRaw(record);
       return std::nullopt;
     } catch (const CdcAssemblerError &error) {
       rememberFailure(error);
@@ -302,6 +306,28 @@ public:
     return retained_identity_bytes_;
   }
 
+  [[nodiscard]] DebeziumAssemblerMetrics metrics() const noexcept {
+    return DebeziumAssemblerMetrics{
+        .accepted_raw_records = accepted_raw_records_,
+        .accepted_raw_bytes = accepted_raw_bytes_,
+        .startup_schema_records =
+            static_cast<std::uint64_t>(startup_schema_snapshot_records_),
+        .begin_metadata_records = begin_metadata_records_,
+        .end_metadata_records = end_metadata_records_,
+        .row_records = row_records_,
+        .completed_transactions = next_cdc_seq_,
+        .completed_run_control_transactions =
+            completed_run_control_transactions_,
+        .completed_bootstrap_transactions = completed_bootstrap_transactions_,
+        .completed_workload_transactions = completed_workload_transactions_,
+        .raw_row_events = raw_row_events_,
+        .normalized_write_events = normalized_write_events_,
+        .active_assembly_bytes = active_bytes_,
+        .active_assembly_high_water_bytes = active_bytes_high_water_,
+        .retained_identity_bytes = retained_identity_bytes_,
+    };
+  }
+
 private:
   enum class LifecyclePhase {
     AwaitRunStart,
@@ -362,6 +388,20 @@ private:
   [[noreturn]] void fail(const CdcErrorCode code,
                          const std::string &message) const {
     throw CdcAssemblerError(code, message, current_stream_id_);
+  }
+
+  void recordAcceptedRaw(const CdcStreamRecord &record) noexcept {
+    const auto add_saturating = [](const std::uint64_t current,
+                                   const std::uint64_t additional) {
+      return additional > std::numeric_limits<std::uint64_t>::max() - current
+                 ? std::numeric_limits<std::uint64_t>::max()
+                 : current + additional;
+    };
+    accepted_raw_records_ = add_saturating(accepted_raw_records_, 1U);
+    accepted_raw_bytes_ = add_saturating(
+        accepted_raw_bytes_,
+        static_cast<std::uint64_t>(record.key_json.size()) +
+            static_cast<std::uint64_t>(record.envelope_json.size()));
   }
 
   void rememberFailure(const CdcAssemblerError &error) {
@@ -936,6 +976,7 @@ private:
       transaction.begin_stream_id = record.stream_id;
       transaction.raw_bytes = raw_bytes;
       active_.emplace(envelope_id, std::move(transaction));
+      ++begin_metadata_records_;
       return std::nullopt;
     }
 
@@ -952,7 +993,9 @@ private:
       fail(CdcErrorCode::CdcBeginMissing,
            "Debezium END has no matching active BEGIN");
     }
-    return completeTransaction(active, envelope, record.stream_id);
+    auto completed = completeTransaction(active, envelope, record.stream_id);
+    ++end_metadata_records_;
+    return completed;
   }
 
   void validateSource(const Json &source, const std::string &transaction_id,
@@ -1124,6 +1167,7 @@ private:
     active->second.table_counts[active->second.rows.back().table.full_name] =
         collection_order;
     active->second.raw_bytes += raw_bytes;
+    ++row_records_;
   }
 
   void reserveActiveBytes(const std::size_t additional) {
@@ -1133,6 +1177,8 @@ private:
            "active CDC assembly byte limit exceeded");
     }
     active_bytes_ += additional;
+    active_bytes_high_water_ =
+        std::max(active_bytes_high_water_, active_bytes_);
   }
 
   void reserveRetainedIdentityBytes(const std::size_t additional) {
@@ -1193,12 +1239,29 @@ private:
     }
     const auto structural_id = active->second.structural_id;
     const auto released_bytes = active->second.raw_bytes;
+    const auto raw_row_count = active->second.rows.size();
+    const auto normalized_write_count = assembled.writes.size();
+    const auto classification = assembled.kind;
     reserveRetainedIdentityBytes(structural_id.size());
     active_.erase(active);
     active_bytes_ -= released_bytes;
     completed_structural_ids_.insert(structural_id);
     assembled.cdc_seq = next_cdc_seq_;
     ++next_cdc_seq_;
+    raw_row_events_ += static_cast<std::uint64_t>(raw_row_count);
+    normalized_write_events_ +=
+        static_cast<std::uint64_t>(normalized_write_count);
+    switch (classification) {
+    case CdcTransactionKind::RunControl:
+      ++completed_run_control_transactions_;
+      break;
+    case CdcTransactionKind::BootstrapApp:
+      ++completed_bootstrap_transactions_;
+      break;
+    case CdcTransactionKind::WorkloadMarked:
+      ++completed_workload_transactions_;
+      break;
+    }
     return assembled;
   }
 
@@ -1695,7 +1758,18 @@ private:
   StartupSchemaStage startup_schema_stage_ = StartupSchemaStage::ServerSettings;
   std::optional<StreamId> last_stream_id_;
   std::uint64_t next_cdc_seq_ = 0;
+  std::uint64_t accepted_raw_records_ = 0;
+  std::uint64_t accepted_raw_bytes_ = 0;
+  std::uint64_t begin_metadata_records_ = 0;
+  std::uint64_t end_metadata_records_ = 0;
+  std::uint64_t row_records_ = 0;
+  std::uint64_t completed_run_control_transactions_ = 0;
+  std::uint64_t completed_bootstrap_transactions_ = 0;
+  std::uint64_t completed_workload_transactions_ = 0;
+  std::uint64_t raw_row_events_ = 0;
+  std::uint64_t normalized_write_events_ = 0;
   std::size_t active_bytes_ = 0;
+  std::size_t active_bytes_high_water_ = 0;
   std::size_t retained_identity_bytes_ = 0;
   std::size_t startup_schema_snapshot_records_ = 0;
   std::size_t startup_schema_create_index_ = 0;
@@ -1742,6 +1816,10 @@ std::size_t DebeziumTxnAssembler::activeBytes() const noexcept {
 
 std::size_t DebeziumTxnAssembler::retainedIdentityBytes() const noexcept {
   return impl_->retainedIdentityBytes();
+}
+
+DebeziumAssemblerMetrics DebeziumTxnAssembler::metrics() const noexcept {
+  return impl_->metrics();
 }
 
 } // namespace blackbox

@@ -168,6 +168,41 @@ void testBootstrapVisibilityAndBorrowedLifetime() {
   BLACKBOX_CHECK(metrics.workload_transactions == 1U);
 }
 
+void testConsumeTimingAndEventCounters() {
+  const std::array<std::uint64_t, 6> clock_values{100U, 111U, 200U,
+                                                  225U, 300U, 307U};
+  std::size_t clock_index = 0U;
+  CheckerAdapter checker(CheckerAdapterConfig{
+      .run_id = std::string(run_id),
+      .expected_session_ids = {std::string(session_one),
+                               std::string(session_two)},
+      .monotonic_clock_nanoseconds =
+          [&] {
+            BLACKBOX_CHECK(clock_index < clock_values.size());
+            if (clock_index >= clock_values.size()) {
+              return std::uint64_t{0};
+            }
+            return clock_values[clock_index++];
+          },
+  });
+
+  checker.consumeBootstrap(0U, 1U, {presentWrite(1, "loaded")});
+  checker.consumePhaseAnchor(1U, session_one);
+  checker.consumeWorkload(
+      2U,
+      client(session_one, 1U, 1U,
+             {presentRead(0U, 1, "loaded"), absentRead(1U, 2)}),
+      {presentWrite(3, "written")});
+
+  BLACKBOX_CHECK(clock_index == clock_values.size());
+  const auto metrics = checker.metrics();
+  BLACKBOX_CHECK(metrics.consumed_transactions == 3U);
+  BLACKBOX_CHECK(metrics.read_events == 2U);
+  BLACKBOX_CHECK(metrics.write_events == 2U);
+  BLACKBOX_CHECK(metrics.consume_total_nanoseconds == 43U);
+  BLACKBOX_CHECK(metrics.consume_max_nanoseconds == 25U);
+}
+
 void testAnchorLowerBoundAndViolationAttribution() {
   auto checker = adapter();
   checker.consumeBootstrap(0U, 1U, {presentWrite(1, "loaded")});
@@ -361,6 +396,7 @@ void testStateLimitAndIdentityCollision() {
 int runCheckerAdapterTests() {
   testIdentityMapping();
   testBootstrapVisibilityAndBorrowedLifetime();
+  testConsumeTimingAndEventCounters();
   testAnchorLowerBoundAndViolationAttribution();
   testFracturedSnapshotViolationAttribution();
   testMarkerOnlyLocalReadsAndDeletes();

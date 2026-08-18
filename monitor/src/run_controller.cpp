@@ -109,6 +109,8 @@ public:
             .application_tables = manifest_.application_table_allowlist,
             .client_parser_limits = config_.client_parser_limits,
             .limits = config_.joiner_limits,
+            .execute_consistency_check =
+                config_.processing_mode == ProcessingMode::Audited,
         }) {
     validateConfig();
     for (const auto &session_id : manifest_.expected_session_ids) {
@@ -268,6 +270,10 @@ public:
     return joiner_.metrics().end_fence_processed;
   }
 
+  [[nodiscard]] ProcessingMode processingMode() const noexcept {
+    return config_.processing_mode;
+  }
+
   [[nodiscard]] std::optional<FinalOutcome> finalOutcome() const noexcept {
     return final_outcome_;
   }
@@ -292,6 +298,34 @@ public:
   }
 
   [[nodiscard]] std::string finalReport() const {
+    if (config_.processing_mode == ProcessingMode::JoinOnly) {
+      const bool evidence_reconciled =
+          final_reconciliation_.has_value() &&
+          final_reconciliation_->evidence_reconciled;
+      const std::string_view completion_status =
+          !terminal_ ? "running"
+                     : (evidence_reconciled ? "completed" : "failed");
+      const auto metrics = joiner_.metrics();
+      std::ostringstream result;
+      result << "run_id=" << manifest_.run_id << " processing_mode="
+             << blackbox::toString(config_.processing_mode)
+             << " completion_status=" << completion_status
+             << " evidence_reconciled="
+             << (evidence_reconciled ? "true" : "false")
+             << " accepted_client_transactions="
+             << metrics.accepted_client_transactions
+             << " assembled_cdc_transactions=" << assembled_cdc_transactions_
+             << " joined_workload_transactions="
+             << metrics.joined_workload_transactions
+             << " released_bootstrap_transactions="
+             << metrics.released_bootstrap_transactions
+             << " released_phase_anchor_transactions="
+             << metrics.released_phase_anchor_transactions
+             << " released_workload_transactions="
+             << metrics.released_workload_transactions
+             << " diagnostics=" << diagnostics_.size();
+      return result.str();
+    }
     if (!terminal_ || !final_outcome_.has_value() ||
         !final_reconciliation_.has_value()) {
       return "run_id=" + manifest_.run_id + " outcome=RUNNING";
@@ -337,7 +371,9 @@ private:
         config_.limits.max_diagnostics > 64U ||
         config_.limits.max_pending_status_records < 8U ||
         config_.limits.max_diagnostic_message_bytes == 0U ||
-        config_.limits.max_diagnostic_message_bytes > 4096U) {
+        config_.limits.max_diagnostic_message_bytes > 4096U ||
+        (config_.processing_mode != ProcessingMode::Audited &&
+         config_.processing_mode != ProcessingMode::JoinOnly)) {
       throw std::invalid_argument("run controller configuration is invalid");
     }
     const std::set<std::string> sessions(manifest_.expected_session_ids.begin(),
@@ -637,31 +673,71 @@ private:
 
     const auto expected_sessions = counter(sessions_.size());
     const auto completed_sessions = counter(audited_completed_sessions);
-    const auto expected_checker_transactions =
-        metrics.joined_workload_transactions +
-        metrics.checker.bootstrap_transactions +
-        metrics.checker.phase_anchor_transactions;
-    const bool exact =
-        endFenceObserved() && metrics.end_fence_processed &&
-        metrics.bootstrap_state_validated &&
-        completed_sessions == expected_sessions &&
-        publishedTransactionTotal() == metrics.accepted_client_transactions &&
-        metrics.accepted_client_transactions ==
-            metrics.accepted_workload_cdc_transactions &&
-        metrics.accepted_client_transactions ==
-            metrics.joined_workload_transactions &&
-        metrics.accepted_control_cdc_transactions == 3U &&
-        metrics.accepted_bootstrap_cdc_transactions ==
-            metrics.checker.bootstrap_transactions &&
-        metrics.checker.phase_anchor_transactions == expected_sessions &&
-        metrics.checker.consumed_transactions ==
-            expected_checker_transactions &&
-        joiner_audit.incremental_counters_match &&
-        joiner_audit.unmatched_client_records == 0U &&
-        joiner_audit.unmatched_workload_cdc_slots == 0U &&
-        audited_completed_sessions == completed_sessions_ &&
-        ambiguous_attempts_ == 0U && metrics.pending_cdc_slots == 0U &&
-        assembled_cdc_transactions_ == metrics.accepted_cdc_transactions;
+    bool exact = false;
+    if (config_.processing_mode == ProcessingMode::Audited) {
+      const auto expected_checker_transactions =
+          metrics.joined_workload_transactions +
+          metrics.checker.bootstrap_transactions +
+          metrics.checker.phase_anchor_transactions;
+      exact =
+          endFenceObserved() && metrics.end_fence_processed &&
+          metrics.bootstrap_state_validated &&
+          completed_sessions == expected_sessions &&
+          publishedTransactionTotal() == metrics.accepted_client_transactions &&
+          metrics.accepted_client_transactions ==
+              metrics.accepted_workload_cdc_transactions &&
+          metrics.accepted_client_transactions ==
+              metrics.joined_workload_transactions &&
+          metrics.accepted_control_cdc_transactions == 3U &&
+          metrics.accepted_bootstrap_cdc_transactions ==
+              metrics.checker.bootstrap_transactions &&
+          metrics.checker.phase_anchor_transactions == expected_sessions &&
+          metrics.checker.consumed_transactions ==
+              expected_checker_transactions &&
+          joiner_audit.incremental_counters_match &&
+          joiner_audit.unmatched_client_records == 0U &&
+          joiner_audit.unmatched_workload_cdc_slots == 0U &&
+          audited_completed_sessions == completed_sessions_ &&
+          ambiguous_attempts_ == 0U && metrics.pending_cdc_slots == 0U &&
+          assembled_cdc_transactions_ == metrics.accepted_cdc_transactions;
+    } else {
+      exact =
+          endFenceObserved() && metrics.end_fence_processed &&
+          metrics.bootstrap_state_validated &&
+          completed_sessions == expected_sessions &&
+          publishedTransactionTotal() == metrics.accepted_client_transactions &&
+          metrics.accepted_client_transactions ==
+              metrics.accepted_workload_cdc_transactions &&
+          metrics.accepted_client_transactions ==
+              metrics.joined_workload_transactions &&
+          metrics.accepted_client_transactions ==
+              metrics.released_workload_transactions &&
+          metrics.accepted_control_cdc_transactions == 3U &&
+          metrics.accepted_bootstrap_cdc_transactions ==
+              metrics.released_bootstrap_transactions &&
+          metrics.released_phase_anchor_transactions == expected_sessions &&
+          metrics.released_bootstrap_write_events <=
+              std::numeric_limits<std::uint64_t>::max() -
+                  metrics.joined_ordered_events &&
+          metrics.released_ordered_events ==
+              metrics.released_bootstrap_write_events +
+                  metrics.joined_ordered_events &&
+          metrics.checker.consumed_transactions == 0U &&
+          metrics.checker.consume_total_nanoseconds == 0U &&
+          metrics.checker.consume_max_nanoseconds == 0U &&
+          metrics.checker.mapped_identity_records == 0U &&
+          metrics.checker.mapped_identity_bytes == 0U &&
+          metrics.checker.engine.retained_state_bytes == 0U &&
+          metrics.checker.engine.peak_retained_state_bytes == 0U &&
+          joiner_.checkerObservation() == CheckerObservation::NotStarted &&
+          !joiner_.firstViolation().has_value() &&
+          joiner_audit.incremental_counters_match &&
+          joiner_audit.unmatched_client_records == 0U &&
+          joiner_audit.unmatched_workload_cdc_slots == 0U &&
+          audited_completed_sessions == completed_sessions_ &&
+          ambiguous_attempts_ == 0U && metrics.pending_cdc_slots == 0U &&
+          assembled_cdc_transactions_ == metrics.accepted_cdc_transactions;
+    }
     if (!exact) {
       invalidate(MonitorErrorCode::ReconciliationMismatch,
                  "final cross-component reconciliation equalities do not hold");
@@ -690,6 +766,11 @@ private:
         .ambiguous_attempts = ambiguous_attempts_,
     };
 
+    if (config_.processing_mode == ProcessingMode::JoinOnly) {
+      lifecycle_state_ = LifecycleState::Final;
+      terminal_ = true;
+      return;
+    }
     if (!invalid_) {
       queueStatus(LifecycleState::Reconciled);
       final_outcome_ =
@@ -924,6 +1005,10 @@ bool RunController::endFenceProcessed() const noexcept {
   return impl_->endFenceProcessed();
 }
 
+ProcessingMode RunController::processingMode() const noexcept {
+  return impl_->processingMode();
+}
+
 std::optional<FinalOutcome> RunController::finalOutcome() const noexcept {
   return impl_->finalOutcome();
 }
@@ -967,6 +1052,16 @@ std::string_view toString(const FinalOutcome outcome) noexcept {
     return "VIOLATION";
   case FinalOutcome::Invalid:
     return "INVALID";
+  }
+  std::abort();
+}
+
+std::string_view toString(const ProcessingMode mode) noexcept {
+  switch (mode) {
+  case ProcessingMode::Audited:
+    return "audited";
+  case ProcessingMode::JoinOnly:
+    return "join-only";
   }
   std::abort();
 }

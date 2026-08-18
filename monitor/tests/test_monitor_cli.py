@@ -4,8 +4,10 @@ import argparse
 import json
 import socket
 import subprocess
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 
 RUN_ID = "11111111-2222-3333-4444-555555555555"
@@ -172,8 +174,8 @@ class ScriptedRedis:
         self.close()
 
 
-def monitor_command(executable, port, timeout_ms):
-    return [
+def monitor_command(executable, port, timeout_ms, extra_arguments=None):
+    command = [
         executable,
         "--redis-host",
         "127.0.0.1",
@@ -184,12 +186,17 @@ def monitor_command(executable, port, timeout_ms):
         "--overall-timeout-ms",
         str(timeout_ms),
     ]
+    if extra_arguments:
+        command.extend(extra_arguments)
+    return command
 
 
-def run_monitor(executable, port, timeout_ms, process_timeout=3.0):
+def run_monitor(
+    executable, port, timeout_ms, process_timeout=3.0, extra_arguments=None
+):
     started = time.monotonic()
     result = subprocess.run(
-        monitor_command(executable, port, timeout_ms),
+        monitor_command(executable, port, timeout_ms, extra_arguments),
         capture_output=True,
         text=True,
         timeout=process_timeout,
@@ -338,6 +345,74 @@ def check_status_timeout(executable):
     print("status XADD: silent peer bounded by the operation timeout cap")
 
 
+def assert_no_audited_result(value):
+    if isinstance(value, dict):
+        assert "outcome" not in value, value
+        assert "verdict" not in value, value
+        for child in value.values():
+            assert_no_audited_result(child)
+    elif isinstance(value, list):
+        for child in value:
+            assert_no_audited_result(child)
+    elif isinstance(value, str):
+        assert value not in {"PASS", "VIOLATION", "INVALID"}, value
+
+
+def check_join_only_requires_metrics(executable):
+    result = subprocess.run(
+        monitor_command(
+            executable,
+            1,
+            1000,
+            ["--processing-mode", "join-only"],
+        ),
+        capture_output=True,
+        text=True,
+        timeout=2.0,
+        check=False,
+    )
+    assert result.returncode == 1, result
+    assert "join-only processing requires --metrics-output" in output(result)
+    print("join-only configuration: metrics output is mandatory")
+
+
+def check_join_only_early_failure_artifact(executable):
+    def handler(_connection_id, command):
+        assert command[0] == b"EVAL"
+        return resp_integer(0)
+
+    with tempfile.TemporaryDirectory() as directory:
+        metrics_path = Path(directory) / "monitor-metrics.json"
+        with ScriptedRedis(handler) as server:
+            result, elapsed = run_monitor(
+                executable,
+                server.port,
+                5000,
+                extra_arguments=[
+                    "--processing-mode",
+                    "join-only",
+                    "--metrics-output",
+                    str(metrics_path),
+                ],
+            )
+            assert result.returncode == 1, result
+            assert elapsed < 1.0, elapsed
+            assert not any(c[0] == b"XADD" for c in server.commands)
+        measurement = json.loads(metrics_path.read_text(encoding="utf-8"))
+        assert measurement["kind"] == "performance_measurement"
+        assert measurement["processing_mode"] == "join-only"
+        assert measurement["completed"] is False
+        assert measurement["completion_status"] == "failed"
+        assert measurement["evidence_reconciled"] is False
+        assert measurement["diagnostics"][0]["code"] == "COMPONENT_RESTARTED"
+        assert set(("assembler", "joiner", "checker", "process")) <= set(
+            measurement
+        )
+        assert_no_audited_result(measurement)
+        assert "outcome=INVALID" not in output(result)
+    print("join-only early failure: failed measurement written without verdict")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--monitor", required=True)
@@ -347,6 +422,8 @@ def main():
     check_manifest_timeout(args.monitor)
     check_main_read_timeout(args.monitor)
     check_status_timeout(args.monitor)
+    check_join_only_requires_metrics(args.monitor)
+    check_join_only_early_failure_artifact(args.monitor)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,11 @@ enum class FinalOutcome {
   Invalid,
 };
 
+enum class ProcessingMode {
+  Audited,
+  JoinOnly,
+};
+
 struct RunDiagnostic {
   DiagnosticCategory category = DiagnosticCategory::Protocol;
   std::string code;
@@ -65,6 +70,7 @@ struct RunControllerConfig {
   ProtocolRecordParserLimits record_parser_limits;
   TransactionJoinerLimits joiner_limits;
   RunControllerLimits limits;
+  ProcessingMode processing_mode = ProcessingMode::Audited;
 };
 
 // Owns one complete fenced run. The caller supplies assembled CDC transactions
@@ -100,6 +106,7 @@ public:
   [[nodiscard]] bool terminal() const noexcept;
   [[nodiscard]] bool endFenceObserved() const noexcept;
   [[nodiscard]] bool endFenceProcessed() const noexcept;
+  [[nodiscard]] ProcessingMode processingMode() const noexcept;
   [[nodiscard]] std::optional<FinalOutcome> finalOutcome() const noexcept;
   [[nodiscard]] const std::optional<ReconciliationSummary> &
   finalReconciliation() const noexcept;
@@ -116,5 +123,6 @@ private:
 
 [[nodiscard]] std::string_view toString(DiagnosticCategory category) noexcept;
 [[nodiscard]] std::string_view toString(FinalOutcome outcome) noexcept;
+[[nodiscard]] std::string_view toString(ProcessingMode mode) noexcept;
 
 } // namespace blackbox

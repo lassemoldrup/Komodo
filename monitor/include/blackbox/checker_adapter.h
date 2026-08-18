@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -54,6 +55,7 @@ struct CheckerAdapterConfig {
   std::size_t max_events_per_transaction = 101000U;
   std::size_t max_mapped_identity_records = 10000000U;
   std::size_t max_mapped_identity_bytes = 256U * 1024U * 1024U;
+  std::function<std::uint64_t()> monotonic_clock_nanoseconds = {};
 };
 
 struct CheckerAdapterMetrics {
@@ -62,6 +64,10 @@ struct CheckerAdapterMetrics {
   std::uint64_t bootstrap_transactions = 0;
   std::uint64_t phase_anchor_transactions = 0;
   std::uint64_t workload_transactions = 0;
+  std::uint64_t read_events = 0;
+  std::uint64_t write_events = 0;
+  std::uint64_t consume_total_nanoseconds = 0;
+  std::uint64_t consume_max_nanoseconds = 0;
   std::size_t mapped_identity_records = 0;
   std::size_t mapped_identity_bytes = 0;
   co_checker::online::SnapshotSOWWMetrics engine;

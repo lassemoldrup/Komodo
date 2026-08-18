@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -32,6 +33,13 @@ constexpr std::uint64_t bootstrap_transaction_tag = 0x626f6f7473747270ULL;
 constexpr std::uint64_t bootstrap_attempt_tag = 0x626f6f746174746dULL;
 constexpr std::uint64_t phase_anchor_transaction_tag = 0x7068617365616e63ULL;
 constexpr std::uint64_t phase_anchor_attempt_tag = 0x7068617365617474ULL;
+
+[[nodiscard]] std::uint64_t steadyClockNanoseconds() noexcept {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
 
 [[nodiscard]] bool isLowerUuid(const std::string_view value) {
   if (value.size() != 36U) {
@@ -178,6 +186,10 @@ public:
         engine_(co_checker::online::SnapshotSOWWOptions{
             .retained_state_capacity_bytes =
                 config_.max_retained_state_bytes}) {
+    monotonic_clock_nanoseconds_ = config_.monotonic_clock_nanoseconds;
+    if (!monotonic_clock_nanoseconds_) {
+      monotonic_clock_nanoseconds_ = steadyClockNanoseconds;
+    }
     if (config_.expected_session_ids.empty() ||
         config_.expected_session_ids.size() >
             std::numeric_limits<std::uint32_t>::max() ||
@@ -300,6 +312,10 @@ public:
         .bootstrap_transactions = bootstrap_transactions_,
         .phase_anchor_transactions = phase_anchor_transactions_,
         .workload_transactions = workload_transactions_,
+        .read_events = read_events_,
+        .write_events = write_events_,
+        .consume_total_nanoseconds = consume_total_nanoseconds_,
+        .consume_max_nanoseconds = consume_max_nanoseconds_,
         .mapped_identity_records = mapped_identity_records_,
         .mapped_identity_bytes = mapped_identity_bytes_,
         .engine = engine_.metrics(),
@@ -514,6 +530,28 @@ private:
     return events;
   }
 
+  void recordConsumeMetrics(const std::size_t read_count,
+                            const std::size_t write_count,
+                            const std::uint64_t start_nanoseconds,
+                            const std::uint64_t end_nanoseconds) noexcept {
+    const auto duration = end_nanoseconds >= start_nanoseconds
+                              ? end_nanoseconds - start_nanoseconds
+                              : 0U;
+    const auto saturating_add = [](const std::uint64_t current,
+                                   const std::uint64_t additional) {
+      return additional > std::numeric_limits<std::uint64_t>::max() - current
+                 ? std::numeric_limits<std::uint64_t>::max()
+                 : current + additional;
+    };
+    read_events_ =
+        saturating_add(read_events_, static_cast<std::uint64_t>(read_count));
+    write_events_ =
+        saturating_add(write_events_, static_cast<std::uint64_t>(write_count));
+    consume_total_nanoseconds_ =
+        saturating_add(consume_total_nanoseconds_, duration);
+    consume_max_nanoseconds_ = std::max(consume_max_nanoseconds_, duration);
+  }
+
   void consume(const std::uint64_t commit_seq,
                const CheckerTransactionIdentity &identity,
                const std::span<const ClientRead> reads,
@@ -546,7 +584,11 @@ private:
         .producer_id = identity.session_id.producer_id,
         .producer_seq = identity.session_seq,
     };
+    const auto consume_start = monotonic_clock_nanoseconds_();
     const auto result = engine_.consume(metadata, events);
+    const auto consume_end = monotonic_clock_nanoseconds_();
+    recordConsumeMetrics(reads.size(), writes.size(), consume_start,
+                         consume_end);
     if (result.error.has_value()) {
       fail(checkerErrorCode(result.error->code, external != nullptr),
            std::string("SnapshotSOWWEngine rejected transaction: ") +
@@ -593,6 +635,7 @@ private:
   RuntimeEpoch run_epoch_;
   std::unordered_map<std::string, std::uint32_t> session_ordinals_;
   co_checker::online::SnapshotSOWWEngine engine_;
+  std::function<std::uint64_t()> monotonic_clock_nanoseconds_;
   IdentityMap transaction_identities_;
   IdentityMap attempt_identities_;
   CheckerObservation observation_ = CheckerObservation::NotStarted;
@@ -603,6 +646,10 @@ private:
   std::uint64_t bootstrap_transactions_ = 0;
   std::uint64_t phase_anchor_transactions_ = 0;
   std::uint64_t workload_transactions_ = 0;
+  std::uint64_t read_events_ = 0;
+  std::uint64_t write_events_ = 0;
+  std::uint64_t consume_total_nanoseconds_ = 0;
+  std::uint64_t consume_max_nanoseconds_ = 0;
   std::size_t mapped_identity_records_ = 0;
   std::size_t mapped_identity_bytes_ = 0;
 };

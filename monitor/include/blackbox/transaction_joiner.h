@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -72,6 +73,8 @@ struct TransactionJoinerConfig {
   std::vector<std::string> application_tables;
   ClientTxnParserLimits client_parser_limits;
   TransactionJoinerLimits limits;
+  bool execute_consistency_check = true;
+  std::function<std::uint64_t()> monotonic_clock_nanoseconds = {};
 };
 
 struct TransactionJoinerMetrics {
@@ -81,7 +84,16 @@ struct TransactionJoinerMetrics {
   std::uint64_t accepted_control_cdc_transactions = 0;
   std::uint64_t accepted_bootstrap_cdc_transactions = 0;
   std::uint64_t accepted_workload_cdc_transactions = 0;
+  std::uint64_t released_bootstrap_transactions = 0;
+  std::uint64_t released_phase_anchor_transactions = 0;
+  std::uint64_t released_workload_transactions = 0;
+  std::uint64_t released_bootstrap_write_events = 0;
+  std::uint64_t released_ordered_events = 0;
   std::uint64_t joined_workload_transactions = 0;
+  std::uint64_t marker_only_workload_transactions = 0;
+  std::uint64_t joined_read_events = 0;
+  std::uint64_t joined_write_events = 0;
+  std::uint64_t joined_ordered_events = 0;
   std::uint64_t client_first_matches = 0;
   std::uint64_t cdc_first_matches = 0;
   std::size_t pending_client_records = 0;
@@ -90,8 +102,13 @@ struct TransactionJoinerMetrics {
   std::size_t pending_cdc_slots = 0;
   std::size_t pending_cdc_bytes = 0;
   std::size_t pending_cdc_high_water_bytes = 0;
+  std::size_t join_buffer_high_water_bytes = 0;
   std::size_t unmatched_client_records = 0;
   std::size_t unmatched_workload_cdc_slots = 0;
+  std::uint64_t missing_client_head_wait_count = 0;
+  std::uint64_t missing_client_head_wait_current_nanoseconds = 0;
+  std::uint64_t missing_client_head_wait_total_nanoseconds = 0;
+  std::uint64_t missing_client_head_wait_max_nanoseconds = 0;
   std::size_t retained_identity_records = 0;
   std::size_t retained_identity_bytes = 0;
   std::size_t bootstrap_state_rows = 0;
