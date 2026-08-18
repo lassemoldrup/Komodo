@@ -36,6 +36,7 @@ add_library(blackbox_monitor
   src/client_txn.cpp
   src/debezium_assembler.cpp
   src/monitor_error.cpp
+  src/protocol_records.cpp
   src/redis_reader.cpp
   src/strict_json.cpp
   src/transaction_joiner.cpp
@@ -107,6 +108,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     tests/test_client_txn.cpp
     tests/test_debezium_assembler.cpp
     tests/test_main.cpp
+    tests/test_protocol_records.cpp
     tests/test_redis_reader.cpp
     tests/test_transaction_joiner.cpp
   )

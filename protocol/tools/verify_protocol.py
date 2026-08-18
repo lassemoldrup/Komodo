@@ -37,6 +37,7 @@ ABSENT = 0x02
 SNAPSHOT = 0x01
 LOCAL = 0x02
 SAFE_JSON_INTEGER = 9_007_199_254_740_991
+CANONICAL_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class VerificationError(RuntimeError):
@@ -106,6 +107,14 @@ def decode_base64(value: str, label: str) -> bytes:
 
 
 def encode_ycsb_key(schema: str, table: str, key: int) -> bytes:
+    require(
+        CANONICAL_IDENTIFIER.fullmatch(schema) is not None,
+        f"schema is not a canonical lowercase identifier: {schema}",
+    )
+    require(
+        CANONICAL_IDENTIFIER.fullmatch(table) is not None,
+        f"table is not a canonical lowercase identifier: {table}",
+    )
     return lp(schema.encode("utf-8", "strict")) + lp(table.encode("utf-8", "strict")) + i32(key)
 
 
@@ -191,6 +200,37 @@ def validate_session_attempt_progress(entries: list[dict[str, int]], label: str)
         previous_surplus = surplus
 
 
+def validate_final_attempt_feasibility(
+    entries: list[dict[str, int]],
+    final_logical_transactions: int,
+    final_physical_attempts: int,
+    label: str,
+) -> None:
+    last_session_seq = entries[-1]["session_seq"] if entries else 0
+    last_txn_id = entries[-1]["txn_id"] if entries else 0
+    require(
+        last_session_seq <= final_logical_transactions,
+        f"{label}: final logical progress precedes the last published transaction",
+    )
+    require(
+        last_txn_id <= final_physical_attempts,
+        f"{label}: final physical progress precedes the last published attempt",
+    )
+
+    remaining_logical_transactions = final_logical_transactions - last_session_seq
+    remaining_physical_attempts = final_physical_attempts - last_txn_id
+    if remaining_logical_transactions == 0:
+        require(
+            remaining_physical_attempts == 0,
+            f"{label}: final attempt history allocates attempts after logical completion",
+        )
+    else:
+        require(
+            remaining_physical_attempts >= remaining_logical_transactions,
+            f"{label}: too few remaining attempts for remaining logical transactions",
+        )
+
+
 def correlation_step(previous: bytes, entry: bytes) -> bytes:
     return hashlib.sha256(CORRELATION_STEP_DOMAIN + previous + entry).digest()
 
@@ -206,27 +246,61 @@ def check_encoded_vector(label: str, expected: dict[str, Any], actual: bytes) ->
         require(sha256_hex(actual) == expected["sha256"], f"{label}: SHA-256 mismatch")
 
 
-def verify_schemas_and_examples() -> dict[str, list[dict[str, Any]]]:
+def documented_failure_codes() -> set[str]:
+    result_code_document = (PROTOCOL_ROOT / "result_error_codes.md").read_text(
+        encoding="utf-8"
+    )
+    require("## Error codes" in result_code_document, "error-code section is missing")
+    error_code_section = result_code_document.split("## Error codes", maxsplit=1)[1]
+    return set(
+        re.findall(
+            r"^\| `([A-Z][A-Z0-9_]*)` \|",
+            error_code_section,
+            re.MULTILINE,
+        )
+    )
+
+
+def load_schema_validator() -> tuple[Draft202012Validator, list[dict[str, Any]]]:
     schemas = [load_json(path) for path in sorted(SCHEMA_ROOT.glob("*.schema.json"))]
     for schema in schemas:
         Draft202012Validator.check_schema(schema)
+
+    common_schema = next(
+        schema for schema in schemas if schema["$id"].endswith("/common.schema.json")
+    )
+    schema_failure_codes = set(common_schema["$defs"]["failureCode"]["enum"])
+    require(
+        schema_failure_codes == documented_failure_codes(),
+        "RunFailed schema codes differ from documented error codes",
+    )
 
     record_schema = next(schema for schema in schemas if schema["$id"].endswith("/records.schema.json"))
     resolver = RefResolver.from_schema(
         record_schema, store={schema["$id"]: schema for schema in schemas}
     )
-    validator = Draft202012Validator(record_schema, resolver=resolver)
+    return Draft202012Validator(record_schema, resolver=resolver), schemas
+
+
+def verify_record_schema(
+    validator: Draft202012Validator, record: dict[str, Any], label: str
+) -> None:
+    errors = sorted(validator.iter_errors(record), key=lambda error: list(error.absolute_path))
+    if errors:
+        rendered = "; ".join(
+            f"{'/'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
+            for error in errors
+        )
+        raise VerificationError(f"schema validation failed for {label}: {rendered}")
+
+
+def verify_schemas_and_examples() -> dict[str, list[dict[str, Any]]]:
+    validator, _ = load_schema_validator()
 
     examples_by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for path in sorted(EXAMPLE_ROOT.glob("*.json")):
         record = load_json(path)
-        errors = sorted(validator.iter_errors(record), key=lambda error: list(error.absolute_path))
-        if errors:
-            rendered = "; ".join(
-                f"{'/'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
-                for error in errors
-            )
-            raise VerificationError(f"schema validation failed for {path.name}: {rendered}")
+        verify_record_schema(validator, record, path.name)
         examples_by_kind[record["kind"]].append(record)
     return examples_by_kind
 
@@ -284,6 +358,85 @@ def verify_golden_vectors() -> None:
         require(digest.hex() == vector["final_digest"], "correlation final digest mismatch")
 
 
+def verify_final_verdict(status: dict[str, Any], expected_sessions: int) -> None:
+    require(status["lifecycle_state"] == "FINAL", "example status is not final")
+    if status["outcome"] == "INVALID":
+        return
+    require(
+        status["outcome"] in {"PASS", "VIOLATION"},
+        "final status has a nonterminal outcome",
+    )
+
+    reconciliation = status["reconciliation"]
+    require(reconciliation["evidence_reconciled"], "final verdict lacks reconciliation")
+    require(
+        reconciliation["bootstrap_manifest_validated"],
+        "final verdict lacks validated bootstrap state",
+    )
+    require(reconciliation["end_fence_seen"], "final verdict lacks END_FENCE")
+    require(
+        reconciliation["expected_sessions"] == expected_sessions,
+        "final verdict expected-session count mismatch",
+    )
+    require(
+        reconciliation["completed_sessions"] == expected_sessions,
+        "final verdict completed-session count mismatch",
+    )
+    require(
+        reconciliation["accepted_client_transactions"]
+        == reconciliation["joined_workload_transactions"],
+        "final verdict client/joined counts differ",
+    )
+    require(
+        reconciliation["bootstrap_cdc_transactions"]
+        == reconciliation["bootstrap_checker_transactions"],
+        "final verdict bootstrap counts differ",
+    )
+    require(
+        reconciliation["phase_anchor_transactions"] == expected_sessions,
+        "final verdict phase-anchor count mismatch",
+    )
+    expected_checker_transactions = (
+        reconciliation["joined_workload_transactions"]
+        + reconciliation["bootstrap_checker_transactions"]
+        + reconciliation["phase_anchor_transactions"]
+    )
+    require(
+        reconciliation["checker_consumed_transactions"]
+        == expected_checker_transactions,
+        "final verdict checker transaction algebra differs",
+    )
+    require(
+        reconciliation["unmatched_client_records"] == 0
+        and reconciliation["unmatched_workload_cdc_slots"] == 0
+        and reconciliation["ambiguous_attempts"] == 0,
+        "final verdict retains incomplete or ambiguous evidence",
+    )
+    require(status["pending_cdc_slots"] == 0, "final verdict retains pending CDC slots")
+    require(
+        status["assembled_cdc_transactions"]
+        == reconciliation["bootstrap_cdc_transactions"]
+        + reconciliation["joined_workload_transactions"]
+        + 3,
+        "final verdict assembled CDC counter differs from bootstrap/workload/fences",
+    )
+    require(
+        status["joined_transactions"]
+        == reconciliation["joined_workload_transactions"],
+        "final verdict joined counters differ",
+    )
+    require(
+        status["checked_transactions"]
+        == reconciliation["checker_consumed_transactions"],
+        "final verdict checked counters differ",
+    )
+    require(
+        status["unmatched_client_records"]
+        == reconciliation["unmatched_client_records"],
+        "final verdict unmatched-client counters differ",
+    )
+
+
 def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> None:
     manifests = records["run_manifest"]
     require(len(manifests) == 1, "examples require exactly one RunManifest")
@@ -330,7 +483,12 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
         clients_by_session[client["session_id"]].append(client)
 
     done_records = records["session_done"]
-    require({record["session_id"] for record in done_records} == expected_sessions, "SessionDone roster mismatch")
+    done_session_ids = [record["session_id"] for record in done_records]
+    require(
+        len(done_session_ids) == len(set(done_session_ids)),
+        "duplicate SessionDone for one session",
+    )
+    require(set(done_session_ids) == expected_sessions, "SessionDone roster mismatch")
     for done in done_records:
         require(done["final_session_seq"] == done["logical_transactions_started"], "final session sequence mismatch")
         require(
@@ -376,6 +534,18 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
             not txn_ids or txn_ids[-1] <= done["physical_attempts_started"],
             "marker txn_id exceeds physical attempt count",
         )
+        validate_final_attempt_feasibility(
+            [
+                {
+                    "session_seq": client["session_seq"],
+                    "txn_id": client["correlation_id"]["txn_id"],
+                }
+                for client in session_clients
+            ],
+            done["logical_transactions_started"],
+            done["physical_attempts_started"],
+            f"session {done['session_id']}",
+        )
         for client in session_clients:
             digest = correlation_step(
                 digest,
@@ -409,35 +579,19 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
     require(len(statuses) == 1, "examples require exactly one MonitorStatus")
     status = statuses[0]
     reconciliation = status["reconciliation"]
-    require(status["lifecycle_state"] == "FINAL", "example status is not final")
     require(status["outcome"] == "PASS", "example status is not PASS")
-    require(reconciliation["evidence_reconciled"], "PASS without reconciliation")
-    require(reconciliation["expected_sessions"] == len(expected_sessions), "expected session count mismatch")
-    require(reconciliation["completed_sessions"] == len(done_records), "completed session count mismatch")
+    verify_final_verdict(status, len(expected_sessions))
+    require(
+        reconciliation["completed_sessions"] == len(done_records),
+        "completed session count mismatch",
+    )
     require(reconciliation["accepted_client_transactions"] == len(clients), "accepted client count mismatch")
     require(
         reconciliation["joined_workload_transactions"] == len(clients),
         "joined workload count mismatch",
     )
-    require(
-        reconciliation["checker_consumed_transactions"]
-        == reconciliation["joined_workload_transactions"]
-        + reconciliation["bootstrap_checker_transactions"]
-        + reconciliation["phase_anchor_transactions"],
-        "checker reconciliation count mismatch",
-    )
-    require(status["checked_transactions"] == reconciliation["checker_consumed_transactions"], "checked count mismatch")
-    require(reconciliation["unmatched_client_records"] == 0, "PASS has unmatched client")
-    require(reconciliation["unmatched_workload_cdc_slots"] == 0, "PASS has unmatched CDC")
-    require(reconciliation["ambiguous_attempts"] == 0, "PASS has ambiguous attempts")
 
-    error_codes = set(
-        re.findall(
-            r"^\| `([A-Z][A-Z0-9_]*)` \|",
-            (PROTOCOL_ROOT / "result_error_codes.md").read_text(encoding="utf-8"),
-            re.MULTILINE,
-        )
-    )
+    error_codes = documented_failure_codes()
     for failed in records["run_failed"]:
         require(failed["reason_code"] in error_codes, "RunFailed reason_code is undocumented")
 

@@ -6,6 +6,7 @@ int runCanonicalYcsbCodecTests();
 int runCheckerAdapterTests();
 int runClientTxnTests();
 int runDebeziumAssemblerTests();
+int runProtocolRecordTests();
 int runRedisReaderTests();
 int runTransactionJoinerTests();
 
@@ -14,6 +15,7 @@ int main() {
   runCheckerAdapterTests();
   runClientTxnTests();
   runDebeziumAssemblerTests();
+  runProtocolRecordTests();
   runRedisReaderTests();
   runTransactionJoinerTests();
   if (blackbox::test::failures != 0) {

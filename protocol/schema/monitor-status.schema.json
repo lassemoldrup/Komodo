@@ -136,6 +136,54 @@
       "then": {
         "properties": { "checker_observation": { "const": "VIOLATION_OBSERVED" } }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": { "enum": ["PASS", "VIOLATION"] }
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "assembled_cdc_transactions": {
+            "type": "integer",
+            "minimum": 3
+          },
+          "checked_transactions": {
+            "$ref": "common.schema.json#/$defs/positiveUint64"
+          },
+          "pending_cdc_slots": { "const": 0 },
+          "unmatched_client_records": { "const": 0 },
+          "reconciliation": {
+            "allOf": [
+              { "$ref": "#/$defs/reconciliation" },
+              {
+                "properties": {
+                  "evidence_reconciled": { "const": true },
+                  "bootstrap_manifest_validated": { "const": true },
+                  "end_fence_seen": { "const": true },
+                  "expected_sessions": {
+                    "$ref": "common.schema.json#/$defs/positiveUint64"
+                  },
+                  "completed_sessions": {
+                    "$ref": "common.schema.json#/$defs/positiveUint64"
+                  },
+                  "phase_anchor_transactions": {
+                    "$ref": "common.schema.json#/$defs/positiveUint64"
+                  },
+                  "checker_consumed_transactions": {
+                    "$ref": "common.schema.json#/$defs/positiveUint64"
+                  },
+                  "unmatched_client_records": { "const": 0 },
+                  "unmatched_workload_cdc_slots": { "const": 0 },
+                  "ambiguous_attempts": { "const": 0 }
+                }
+              }
+            ]
+          }
+        }
+      }
     }
   ]
 }

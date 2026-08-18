@@ -33,8 +33,18 @@ std::string_view toString(const MonitorErrorCode code) noexcept {
     return "SESSION_SEQUENCE_NON_INCREASING";
   case MonitorErrorCode::SessionAttemptProgressInvalid:
     return "SESSION_ATTEMPT_PROGRESS_INVALID";
+  case MonitorErrorCode::SessionDoneMissing:
+    return "SESSION_DONE_MISSING";
+  case MonitorErrorCode::SessionDoneMismatch:
+    return "SESSION_DONE_MISMATCH";
+  case MonitorErrorCode::ClientRecordAfterDone:
+    return "CLIENT_RECORD_AFTER_DONE";
   case MonitorErrorCode::RunIdMismatch:
     return "RUN_ID_MISMATCH";
+  case MonitorErrorCode::RunManifestMissing:
+    return "RUN_MANIFEST_MISSING";
+  case MonitorErrorCode::RunManifestDuplicate:
+    return "RUN_MANIFEST_DUPLICATE";
   case MonitorErrorCode::MarkerDuplicate:
     return "MARKER_DUPLICATE";
   case MonitorErrorCode::CorrelationMismatch:
@@ -49,8 +59,20 @@ std::string_view toString(const MonitorErrorCode code) noexcept {
     return "CHECKER_INPUT_REJECTED";
   case MonitorErrorCode::BootstrapStateMismatch:
     return "BOOTSTRAP_STATE_MISMATCH";
+  case MonitorErrorCode::BootstrapManifestMissing:
+    return "BOOTSTRAP_MANIFEST_MISSING";
   case MonitorErrorCode::PhaseAnchorFailed:
     return "PHASE_ANCHOR_FAILED";
+  case MonitorErrorCode::FenceMissing:
+    return "FENCE_MISSING";
+  case MonitorErrorCode::ClientHalfMissing:
+    return "CLIENT_HALF_MISSING";
+  case MonitorErrorCode::CdcHalfMissing:
+    return "CDC_HALF_MISSING";
+  case MonitorErrorCode::ReconciliationMismatch:
+    return "RECONCILIATION_MISMATCH";
+  case MonitorErrorCode::RedisPublicationFailed:
+    return "REDIS_PUBLICATION_FAILED";
   case MonitorErrorCode::JoinBufferLimitExceeded:
     return "JOIN_BUFFER_LIMIT_EXCEEDED";
   case MonitorErrorCode::CheckerStateLimitExceeded:

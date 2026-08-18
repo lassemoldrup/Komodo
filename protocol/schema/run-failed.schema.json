@@ -22,7 +22,7 @@
         "COORDINATOR"
       ]
     },
-    "reason_code": { "$ref": "common.schema.json#/$defs/errorCode" },
+    "reason_code": { "$ref": "common.schema.json#/$defs/failureCode" },
     "diagnostic": {
       "type": "string",
       "minLength": 1,

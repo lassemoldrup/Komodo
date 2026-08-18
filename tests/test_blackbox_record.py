@@ -142,7 +142,8 @@ class BlackboxRecordTest(unittest.TestCase):
             input_text=json.dumps(status),
             expected_status=2,
         )
-        self.assertIn("unreconciled evidence", result.stderr)
+        self.assertIn("schema validation", result.stderr)
+        self.assertIn("evidence_reconciled", result.stderr)
 
     def test_final_pass_requires_coordinator_session_count(self) -> None:
         status = (ROOT / "protocol/examples/monitor-status.json").read_text()
@@ -162,6 +163,21 @@ class BlackboxRecordTest(unittest.TestCase):
     def test_final_pass_requires_assembled_cdc_algebra(self) -> None:
         status = json.loads((ROOT / "protocol/examples/monitor-status.json").read_text())
         status["assembled_cdc_transactions"] = 0
+        result = self.run_tool(
+            "status-action",
+            "--run-id",
+            RUN_ID,
+            "--expected-sessions",
+            "2",
+            "--lifecycle",
+            "FINAL",
+            input_text=json.dumps(status),
+            expected_status=2,
+        )
+        self.assertIn("schema validation", result.stderr)
+        self.assertIn("assembled_cdc_transactions", result.stderr)
+
+        status["assembled_cdc_transactions"] = 5
         result = self.run_tool(
             "status-action",
             "--run-id",
