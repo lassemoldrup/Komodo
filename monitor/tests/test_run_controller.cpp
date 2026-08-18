@@ -345,6 +345,33 @@ void testEndWithoutDoneIsInvalid() {
   BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISSING"));
 }
 
+void testOtherwiseCleanRunWithoutEndFenceIsInvalid() {
+  RunController controller(manifest());
+  openWorkload(controller);
+  controller.acceptClientPayload(clientPayload(1U));
+  controller.acceptCdcTransaction(workload(2U, 1U));
+  controller.acceptClientPayload(donePayload(1U));
+  controller.onInputIdle();
+  BLACKBOX_CHECK(!controller.terminal());
+
+  controller.forceTimeoutFinal();
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
+  BLACKBOX_CHECK(hasDiagnostic(controller, "FENCE_MISSING"));
+  BLACKBOX_CHECK(!hasDiagnostic(controller, "SESSION_DONE_MISSING"));
+  BLACKBOX_CHECK(!hasDiagnostic(controller, "CLIENT_HALF_MISSING"));
+  BLACKBOX_CHECK(!hasDiagnostic(controller, "CDC_HALF_MISSING"));
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  const auto &reconciliation = *controller.finalReconciliation();
+  BLACKBOX_CHECK(!reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(!reconciliation.end_fence_seen);
+  BLACKBOX_CHECK(reconciliation.completed_sessions == 1U);
+  BLACKBOX_CHECK(reconciliation.accepted_client_transactions == 1U);
+  BLACKBOX_CHECK(reconciliation.joined_workload_transactions == 1U);
+  BLACKBOX_CHECK(reconciliation.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(reconciliation.unmatched_workload_cdc_slots == 0U);
+}
+
 void testTimeoutAndDuplicateControlRecordsAreInvalid() {
   {
     RunController controller(manifest());
@@ -445,6 +472,26 @@ void testSessionDoneMismatchAndPostDoneClientAreInvalid() {
   }
 }
 
+void testStoppedAdmissionDoesNotInventCdcOrderFailure() {
+  RunController controller(manifest());
+  openWorkload(controller);
+  controller.acceptClientPayload(donePayload(1U));
+  BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISMATCH"));
+
+  // Both transactions were assembled after the client-side failure. They are
+  // counted for closure, but neither may bypass stopped admission and create a
+  // false dense-sequence error inside the joiner.
+  controller.acceptCdcTransaction(workload(2U, 1U));
+  controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+  controller.onInputIdle();
+
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
+  BLACKBOX_CHECK(controller.endFenceObserved());
+  BLACKBOX_CHECK(!hasDiagnostic(controller, "CDC_ORDER_INVALID"));
+  BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISMATCH"));
+}
+
 void testSessionDoneRequiresFeasibleFinalAttemptHistory() {
   {
     RunController controller(manifest());
@@ -523,6 +570,44 @@ void testViolationThenOperationalInvalidityPreservesObservation() {
   BLACKBOX_CHECK(!controller.finalReconciliation()->evidence_reconciled);
   BLACKBOX_CHECK(hasDiagnostic(controller, "VIOLATION_OBSERVED"));
   BLACKBOX_CHECK(hasDiagnostic(controller, "RESOURCE_EXHAUSTED"));
+  const auto statuses = controller.takePendingStatuses();
+  const auto final = Json::parse(statuses.back());
+  BLACKBOX_CHECK(final.at("checker_observation") == "VIOLATION_OBSERVED");
+  BLACKBOX_CHECK(final.at("outcome") == "INVALID");
+}
+
+void testJoinLimitAfterViolationPreservesObservation() {
+  blackbox::RunControllerConfig config;
+  config.joiner_limits.max_pending_client_records = 1U;
+  RunController controller(manifest(), config);
+  openWorkload(controller);
+
+  std::array<std::optional<std::string>, 10> fields{};
+  fields[0] = "impossible";
+  const ClientRead read{
+      .event_seq = 0U,
+      .key = CanonicalYcsbCodec::encodeKey("benchbase", "usertable", 11),
+      .state = ClientValueState::Present,
+      .value = CanonicalYcsbCodec::encodeValue(fields),
+      .source = ClientReadSource::Snapshot,
+  };
+  controller.acceptClientPayload(clientPayload(1U, {read}));
+  controller.acceptCdcTransaction(workload(2U, 1U));
+  BLACKBOX_CHECK(controller.joinerMetrics().checker.workload_transactions ==
+                 1U);
+  BLACKBOX_CHECK(hasDiagnostic(controller, "VIOLATION_OBSERVED"));
+
+  controller.acceptClientPayload(clientPayload(2U));
+  controller.acceptClientPayload(clientPayload(3U));
+  BLACKBOX_CHECK(hasDiagnostic(controller, "JOIN_BUFFER_LIMIT_EXCEEDED"));
+  controller.acceptClientPayload(donePayload(2U));
+  controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+  controller.onInputIdle();
+
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
+  BLACKBOX_CHECK(hasDiagnostic(controller, "VIOLATION_OBSERVED"));
+  BLACKBOX_CHECK(hasDiagnostic(controller, "JOIN_BUFFER_LIMIT_EXCEEDED"));
   const auto statuses = controller.takePendingStatuses();
   const auto final = Json::parse(statuses.back());
   BLACKBOX_CHECK(final.at("checker_observation") == "VIOLATION_OBSERVED");
@@ -613,12 +698,15 @@ void testCompletedSessionTrackingUsesTerminalAudit() {
 int runRunControllerTests() {
   testCleanPassRequiresDoneEndAndIdle();
   testEndWithoutDoneIsInvalid();
+  testOtherwiseCleanRunWithoutEndFenceIsInvalid();
   testTimeoutAndDuplicateControlRecordsAreInvalid();
   testMissingClientDoesNotProcessEndFence();
   testMissingCdcIsInvalidAfterOrderedEnd();
   testSessionDoneMismatchAndPostDoneClientAreInvalid();
+  testStoppedAdmissionDoesNotInventCdcOrderFailure();
   testSessionDoneRequiresFeasibleFinalAttemptHistory();
   testViolationThenOperationalInvalidityPreservesObservation();
+  testJoinLimitAfterViolationPreservesObservation();
   testCleanViolationFinalizesAsViolation();
   testFirstViolationOwnsReservedDiagnosticSlotImmediately();
   testCompletedSessionTrackingUsesTerminalAudit();

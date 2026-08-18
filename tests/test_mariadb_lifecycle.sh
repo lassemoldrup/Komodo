@@ -450,6 +450,33 @@ wait_ddl_record() {
 }
 
 
+wait_unmarked_application_transaction() {
+  local deadline=$(( $(date +%s) + STACK_TIMEOUT_SECONDS ))
+  while (( $(date +%s) <= deadline )); do
+    if blackbox_redis --json XRANGE cdc - + | jq -e '
+      [ .[] | ((.[1][1] | fromjson?) // {}) ] as $events |
+      first($events[] | select(
+        .op? != null and
+        .source.table? == "usertable" and
+        .after.ycsb_key? == 9001)) as $application |
+      ($application.transaction.id? // null) as $transaction_id |
+      $transaction_id != null and
+      any($events[];
+        .status? == "END" and
+        .id? == $transaction_id) and
+      (any($events[];
+        .op? != null and
+        .source.table? == "session_txn" and
+        .transaction.id? == $transaction_id) | not)
+    ' >/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+
 publish_client_txn() {
   local session_id=$1
   local session_seq=$2
@@ -565,6 +592,64 @@ publish_clean_session_done() {
 }
 
 
+run_unmarked_application_negative() {
+  reset_database_and_redis
+  start_connector_with_snapshot_schema
+
+  BLACKBOX_ACTIVE_RUN_ID=$(blackbox_new_uuid)
+  # Consumed by helpers sourced from blackbox_lifecycle.sh.
+  # shellcheck disable=SC2034
+  BLACKBOX_SESSION_IDS=(ycsb/worker/external-writer)
+  export BLACKBOX_ACTIVE_RUN_ID
+  # shellcheck disable=SC2034
+  STATUS_CURSOR=0-0
+  MATCHED_STATUS=
+  # shellcheck disable=SC2034
+  STATUS_LAST_LIFECYCLE=
+
+  start_live_monitor
+  blackbox_publish_record \
+    "$(blackbox_client_stream)" "$(blackbox_build_run_manifest)" >/dev/null
+  blackbox_commit_fence RUN_START
+  wait_cdc_fence RUN_START
+  blackbox_wait_for_status START_FENCE_SEEN
+
+  blackbox_capture_bootstrap_scan "$SCAN_PATH"
+  local bootstrap_manifest
+  bootstrap_manifest=$(blackbox_build_bootstrap_manifest "$SCAN_PATH")
+  blackbox_publish_record \
+    "$(blackbox_client_stream)" "$bootstrap_manifest" >/dev/null
+  blackbox_commit_fence LOAD_FINISHED
+  wait_cdc_fence LOAD_FINISHED
+  blackbox_wait_for_status LOAD_FINISHED_SEEN
+
+  # This modeled-table transaction deliberately has no session_txn marker.
+  # It is an identifiable post-load external writer and must terminate the
+  # one-run monitor as INVALID rather than being skipped from the checked run.
+  blackbox_database_query "
+    START TRANSACTION;
+    INSERT INTO usertable
+      (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10)
+    VALUES
+      (9001, 'external', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    COMMIT;
+  " >/dev/null
+  wait_unmarked_application_transaction
+  blackbox_wait_for_status FINAL
+  jq -e '
+    .lifecycle_state == "FINAL" and
+    .outcome == "INVALID" and
+    .reconciliation.evidence_reconciled == false and
+    any(.diagnostics[];
+      .category == "PROTOCOL" and
+      .code == "UNMARKED_APPLICATION_TRANSACTION")
+  ' <<<"$MATCHED_STATUS" >/dev/null
+  wait_monitor_exit 4
+  [[ $(blackbox_redis --json XRANGE "$(blackbox_status_stream)" - + | jq \
+    '[.[] | (.[1][1] | fromjson) | select(.lifecycle_state == "FINAL")] | length') == 1 ]]
+}
+
+
 run_unknown_table_negative() {
   reset_database_and_redis
   root_database_query \
@@ -650,6 +735,8 @@ main() {
     return 1
   fi
   BLACKBOX_ACTIVE_RUN_ID=${BLACKBOX_ACTIVE_RUN_ID:-$(blackbox_new_uuid)}
+  # Consumed by helpers sourced from blackbox_lifecycle.sh.
+  # shellcheck disable=SC2034
   BLACKBOX_SESSION_IDS=(ycsb/worker/1)
   export BLACKBOX_ACTIVE_RUN_ID
   local positive_run_id=$BLACKBOX_ACTIVE_RUN_ID
@@ -730,10 +817,12 @@ main() {
   " >/dev/null
   publish_client_txn ycsb/worker/1 1 1 mixed42
 
-  # Marker-only commit: successful no-application-write transactions must
-  # still occupy a CDC slot after marker filtering.
+  # A genuine zero-row application UPDATE emits no application CDC row. The
+  # successful transaction must still occupy a marker-only CDC slot after the
+  # marker is filtered.
   blackbox_database_query "
     START TRANSACTION;
+    UPDATE usertable SET field1 = 'not-written' WHERE ycsb_key = 2147483647;
     INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 2)
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
@@ -844,7 +933,9 @@ main() {
     [.transactions[] | select(.kind == "RUN_CONTROL") | .fence_phase] ==
       ["RUN_START", "LOAD_FINISHED", "END_FENCE"] and
     [.transactions[3:10][].correlation_id.txn_id] == [1, 2, 3, 4, 5, 6, 7] and
-    [.transactions[3:10][].write_count] == [1, 0, 1, 1, 1, 1, 2]
+    [.transactions[3:10][].write_count] == [1, 0, 1, 1, 1, 1, 2] and
+    .transactions[4].correlation_id.txn_id == 2 and
+    .transactions[4].write_count == 0
   ' "$INGEST_PATH" >/dev/null
 
   jq -e '
@@ -904,12 +995,14 @@ main() {
     ] and
     [.transactions[3:10][].correlation_id.txn_id] == [1, 2, 3, 4, 5, 6, 7] and
     [.transactions[3:10][].writes | length] == [1, 0, 1, 1, 1, 1, 2] and
+    .transactions[4].correlation_id.txn_id == 2 and
     .transactions[4].writes == [] and
     .transactions[5].writes[0].value_state == "absent" and
     .transactions[7].writes[0].value_hex == .transactions[6].writes[0].value_hex and
     [.transactions[9].writes[].value_state] == ["present", "absent"]
   ' "$REPLAY_PATH" >/dev/null
 
+  run_unmarked_application_negative
   run_unknown_table_negative
   run_ddl_negative
 

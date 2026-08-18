@@ -182,8 +182,7 @@ public:
         transaction.fence_phase == RunFencePhase::EndFence) {
       end_fence_assembled_ = true;
     }
-    const bool control = transaction.kind == CdcTransactionKind::RunControl;
-    if ((!admission_stopped_ || control) && !joiner_.failed()) {
+    if (!admission_stopped_ && !joiner_.failed()) {
       try {
         joiner_.acceptCdcTransaction(std::move(transaction));
       } catch (const MonitorError &error) {

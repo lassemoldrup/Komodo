@@ -3,8 +3,11 @@ DB ?= mariadb
 COMPOSE = docker compose --profile $(DB)
 MONITOR_BUILD_DIR ?= /tmp/db-monitoring-blackbox-monitor-build
 CO_CHECKER_ROOT ?= $(abspath ../co-checker)
+BENCHBASE_ROOT ?= $(abspath ../benchbase)
+PROBE_BUILD_DIR ?= /tmp/db-monitoring-fractured-read-probe-build
+MAVEN ?= mvn
 
-.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build test-monitor test-lifecycle test-lifecycle-live
+.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live
 
 ## Start the stack for $(DB)
 up:
@@ -62,6 +65,13 @@ monitor-build:
 		-DCO_CHECKER_ROOT=$(CO_CHECKER_ROOT)
 	cmake --build $(MONITOR_BUILD_DIR)
 
+probe-client-build:
+	mkdir -p $(PROBE_BUILD_DIR)
+	cd $(BENCHBASE_ROOT) && $(MAVEN) --batch-mode --activate-profiles mariadb \
+		-Dmaven.gitcommitid.skip=true \
+		-DbuildDirectory=$(PROBE_BUILD_DIR) \
+		-DskipTests compile
+
 test-monitor: monitor-build
 	ctest --test-dir $(MONITOR_BUILD_DIR) --output-on-failure
 
@@ -79,3 +89,9 @@ test-lifecycle-live: test-monitor
 	BLACKBOX_PREFIX_INGEST_BIN=$(MONITOR_BUILD_DIR)/blackbox_prefix_ingest \
 	BLACKBOX_MONITOR_BIN=$(MONITOR_BUILD_DIR)/blackbox_run_monitor \
 		./tests/test_mariadb_lifecycle.sh
+
+## Destructive semantic acceptance runs against fresh MariaDB/CDC stacks
+test-correctness-live: test-monitor probe-client-build
+	BLACKBOX_MONITOR_BIN=$(MONITOR_BUILD_DIR)/blackbox_run_monitor \
+	BLACKBOX_BENCHBASE_BUILD_DIR=$(PROBE_BUILD_DIR) \
+		./tests/test_semantic_correctness.sh

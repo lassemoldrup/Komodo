@@ -242,6 +242,14 @@ MariaDB/Debezium/Redis evidence. The prefix tool deliberately leaves
 `END_FENCE` queued so its output continues to expose the pre-closure ordered
 prefix; the one-run monitor performs the audited terminal reconciliation.
 
+`make test-correctness-live` builds the BenchBase `FracturedReadProbe` client
+and runs four fresh audited stacks: a clean repeatable-read pass, a coordinated
+read-committed fractured-read violation, the same coordinated probe passing
+under repeatable read, and an intentionally omitted client record producing an
+invalid result. The harness validates the canonical client values as well as
+the terminal reconciliation. These runs generate fresh run IDs and disposable
+logs; they do not replace or modify the checked-in captured CDC fixtures.
+
 ## Constraints
 
 **All backends** — durability is deliberately disabled (tmpfs datadirs,

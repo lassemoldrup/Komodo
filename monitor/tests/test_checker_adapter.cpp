@@ -204,6 +204,43 @@ void testAnchorLowerBoundAndViolationAttribution() {
   BLACKBOX_CHECK(checker.metrics().next_commit_seq == 5U);
 }
 
+void testFracturedSnapshotViolationAttribution() {
+  auto checker = adapter();
+  checker.consumeBootstrap(
+      0U, 1U,
+      {presentWrite(1, "old-a"), presentWrite(2, "old-b")});
+  checker.consumePhaseAnchor(1U, session_one);
+  checker.consumePhaseAnchor(2U, session_two);
+
+  checker.consumeWorkload(
+      3U,
+      client(session_two, 1U, 1U, {},
+             "33333333-3333-4333-8333-333333333333",
+             "44444444-4444-4444-8444-444444444444"),
+      {presentWrite(1, "new-a"), presentWrite(2, "new-b")});
+
+  const auto fractured = client(
+      session_one, 1U, 1U,
+      {presentRead(0U, 1, "old-a"), presentRead(1U, 2, "new-b")},
+      "55555555-5555-4555-8555-555555555555",
+      "66666666-6666-4666-8666-666666666666");
+  checker.consumeWorkload(4U, fractured, {});
+
+  BLACKBOX_CHECK(checker.observation() ==
+                 CheckerObservation::ViolationObserved);
+  BLACKBOX_REQUIRE(checker.firstViolation().has_value());
+  const auto &captured = *checker.firstViolation();
+  BLACKBOX_CHECK(captured.run_id == run_id);
+  BLACKBOX_CHECK(captured.session_id == session_one);
+  BLACKBOX_CHECK(captured.logical_txn_id == fractured.logical_txn_id);
+  BLACKBOX_CHECK(captured.attempt_id == fractured.attempt_id);
+  BLACKBOX_CHECK(captured.correlation_id == fractured.correlation_id);
+  BLACKBOX_CHECK(captured.session_seq == fractured.session_seq);
+  BLACKBOX_CHECK(captured.checker_violation.commit_seq == 4U);
+  BLACKBOX_CHECK(captured.checker_violation.kind ==
+                 co_checker::online::ViolationKind::NoCompatibleSnapshot);
+}
+
 void testMarkerOnlyLocalReadsAndDeletes() {
   auto checker = adapter();
   checker.consumeBootstrap(0U, 1U, {presentWrite(1, "loaded")});
@@ -325,6 +362,7 @@ int runCheckerAdapterTests() {
   testIdentityMapping();
   testBootstrapVisibilityAndBorrowedLifetime();
   testAnchorLowerBoundAndViolationAttribution();
+  testFracturedSnapshotViolationAttribution();
   testMarkerOnlyLocalReadsAndDeletes();
   testConflictingRepeatedReads();
   testInputAndSequenceErrorsAreSticky();
