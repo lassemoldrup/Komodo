@@ -51,9 +51,10 @@ sql:
 logs:
 	$(COMPOSE) logs -f --tail=100
 
-## Run the audited MariaDB lifecycle (requires the three BLACKBOX_*_COMMAND hooks)
-e2e:
-	./scripts/e2e.sh
+## Run the audited MariaDB lifecycle (requires loader/workload command hooks)
+e2e: monitor-build
+	BLACKBOX_MONITOR_BIN=$(MONITOR_BUILD_DIR)/blackbox_run_monitor \
+		./scripts/e2e.sh
 
 ## Fast protocol/lifecycle tests with controlled monitor acknowledgements
 monitor-build:
@@ -76,4 +77,5 @@ test-lifecycle-live: test-monitor
 	BLACKBOX_CDC_REPLAY_BIN=$(MONITOR_BUILD_DIR)/blackbox_cdc_replay \
 	BLACKBOX_CDC_INGEST_BIN=$(MONITOR_BUILD_DIR)/blackbox_cdc_ingest \
 	BLACKBOX_PREFIX_INGEST_BIN=$(MONITOR_BUILD_DIR)/blackbox_prefix_ingest \
+	BLACKBOX_MONITOR_BIN=$(MONITOR_BUILD_DIR)/blackbox_run_monitor \
 		./tests/test_mariadb_lifecycle.sh

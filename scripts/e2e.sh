@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Sound MariaDB black-box lifecycle coordinator.
 #
-# The monitor command is intentionally injected until the CDC monitor binary
-# lands. Tests drive the same acknowledgement gates with schema-valid status
-# records; no acknowledgement is synthesized by this script.
+# The built one-run monitor is the default. Tests may inject a controlled
+# command to drive the same acknowledgement gates; this script never
+# synthesizes a monitor status.
 
 set -Eeuo pipefail
 
@@ -16,6 +16,13 @@ BLACKBOX_STACK_TIMEOUT_SECONDS=${BLACKBOX_STACK_TIMEOUT_SECONDS:-120}
 BLACKBOX_LOADER_TIMEOUT_SECONDS=${BLACKBOX_LOADER_TIMEOUT_SECONDS:-600}
 BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=${BLACKBOX_WORKLOAD_TIMEOUT_SECONDS:-900}
 BLACKBOX_TERMINATION_GRACE_SECONDS=${BLACKBOX_TERMINATION_GRACE_SECONDS:-5}
+BLACKBOX_COORDINATOR_MARGIN_SECONDS=${BLACKBOX_COORDINATOR_MARGIN_SECONDS:-1800}
+BLACKBOX_MONITOR_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_TIMEOUT_SECONDS:-$((
+  BLACKBOX_LOADER_TIMEOUT_SECONDS + BLACKBOX_WORKLOAD_TIMEOUT_SECONDS +
+    2 * (BLACKBOX_TERMINATION_GRACE_SECONDS +
+      BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS) +
+    3 * BLACKBOX_STATUS_TIMEOUT_SECONDS + BLACKBOX_COORDINATOR_MARGIN_SECONDS
+))}
 
 MONITOR_SESSION_ID=
 PHASE_SESSION_ID=
@@ -50,7 +57,6 @@ require_configuration() {
   blackbox_require_command pgrep
   blackbox_require_command pkill
 
-  : "${BLACKBOX_MONITOR_COMMAND:?set BLACKBOX_MONITOR_COMMAND to the one-run monitor command}"
   : "${BLACKBOX_LOADER_COMMAND:?set BLACKBOX_LOADER_COMMAND to the non-DDL BenchBase loader command}"
   : "${BLACKBOX_WORKLOAD_COMMAND:?set BLACKBOX_WORKLOAD_COMMAND to the BenchBase workload command}"
   : "${BLACKBOX_EXPECTED_SESSION_IDS:?set BLACKBOX_EXPECTED_SESSION_IDS to a comma-separated worker roster}"
@@ -61,6 +67,8 @@ require_configuration() {
   [[ $BLACKBOX_LOADER_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_WORKLOAD_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_TERMINATION_GRACE_SECONDS =~ ^[1-9][0-9]*$ ]]
+  [[ $BLACKBOX_COORDINATOR_MARGIN_SECONDS =~ ^[1-9][0-9]*$ ]]
+  [[ $BLACKBOX_MONITOR_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
 
   IFS=',' read -r -a BLACKBOX_SESSION_IDS <<<"$BLACKBOX_EXPECTED_SESSION_IDS"
   (( ${#BLACKBOX_SESSION_IDS[@]} > 0 ))
@@ -74,6 +82,19 @@ require_configuration() {
   export BLACKBOX_EXPECTED_SESSION_IDS
   export BLACKBOX_CLIENT_STREAM="blackbox:client:$BLACKBOX_ACTIVE_RUN_ID"
   export BLACKBOX_STATUS_STREAM="blackbox:status:$BLACKBOX_ACTIVE_RUN_ID"
+
+  if [[ -z ${BLACKBOX_MONITOR_COMMAND:-} ]]; then
+    : "${BLACKBOX_MONITOR_BIN:?set BLACKBOX_MONITOR_BIN or BLACKBOX_MONITOR_COMMAND}"
+    [[ -x $BLACKBOX_MONITOR_BIN ]] ||
+      blackbox_die "one-run monitor is not executable: $BLACKBOX_MONITOR_BIN"
+    local monitor_timeout_ms=$(( BLACKBOX_MONITOR_TIMEOUT_SECONDS * 1000 ))
+    printf -v BLACKBOX_MONITOR_COMMAND '%q ' \
+      "$BLACKBOX_MONITOR_BIN" \
+      --redis-host "$BLACKBOX_REDIS_HOST" \
+      --redis-port "$BLACKBOX_REDIS_PORT" \
+      --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+      --overall-timeout-ms "$monitor_timeout_ms"
+  fi
 
   # Building the manifest is also the strict validation pass for the UUID,
   # source identity, isolation, and expected-session roster.
@@ -259,6 +280,30 @@ wait_for_failed_final() {
 }
 
 
+stop_monitor_without_fence() {
+  local reason_code=$1
+  local diagnostic=$2
+  blackbox_log "timeout-invalid outcome=INVALID reason_code=$reason_code diagnostic=$diagnostic"
+
+  if [[ -z $MONITOR_SESSION_ID ]]; then
+    return 0
+  fi
+  if blackbox_session_has_processes "$MONITOR_SESSION_ID"; then
+    pkill --signal TERM --session "$MONITOR_SESSION_ID" >/dev/null 2>&1 || true
+    local deadline=$(( $(date +%s) + BLACKBOX_TERMINATION_GRACE_SECONDS ))
+    while blackbox_session_has_processes "$MONITOR_SESSION_ID" \
+        && (( $(date +%s) <= deadline )); do
+      sleep 0.1
+    done
+    if blackbox_session_has_processes "$MONITOR_SESSION_ID"; then
+      pkill --signal KILL --session "$MONITOR_SESSION_ID" >/dev/null 2>&1 || true
+    fi
+  fi
+  wait "$MONITOR_SESSION_ID" >/dev/null 2>&1 || true
+  MONITOR_SESSION_ID=
+}
+
+
 close_failed_run() {
   local reason_code=$1
   local diagnostic=$2
@@ -269,11 +314,19 @@ close_failed_run() {
   fi
   blackbox_publish_run_failed "$reason_code" "$diagnostic" || true
 
+  if (( write_end_fence == 0 )); then
+    stop_monitor_without_fence "$reason_code" "$diagnostic"
+    return 0
+  fi
+
   if (( write_end_fence == 1 && END_FENCE_COMMITTED == 0 )); then
     if blackbox_commit_fence END_FENCE; then
       END_FENCE_COMMITTED=1
     else
       blackbox_log "END_FENCE commit failed during best-effort failure closure"
+      stop_monitor_without_fence COMMIT_OUTCOME_AMBIGUOUS \
+        "$diagnostic; END_FENCE commit did not complete with a known outcome"
+      return 0
     fi
   fi
   wait_for_failed_final || true
@@ -297,9 +350,8 @@ publish_manifest_and_start_fence() {
   manifest=$(blackbox_build_run_manifest)
   blackbox_publish_record "$(blackbox_client_stream)" "$manifest" >/dev/null
   if ! blackbox_commit_fence RUN_START; then
-    blackbox_publish_run_failed COMMIT_OUTCOME_AMBIGUOUS \
-      "RUN_START commit did not complete with a known outcome" || true
-    wait_for_failed_final || true
+    close_failed_run COMMIT_OUTCOME_AMBIGUOUS \
+      "RUN_START commit did not complete with a known outcome; END_FENCE is forbidden" 0
     return 1
   fi
   blackbox_log "waiting for START_FENCE_SEEN"

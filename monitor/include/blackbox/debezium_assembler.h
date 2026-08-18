@@ -48,9 +48,8 @@ public:
   [[nodiscard]] std::optional<CdcTransaction>
   accept(const CdcStreamRecord &record);
 
-  // Declare end-of-input. An active BEGIN without END is fatal. This does not
-  // require lifecycle closure; END_FENCE reconciliation belongs to a later
-  // milestone.
+  // Declare end-of-input. An active BEGIN without END is fatal. Run lifecycle
+  // closure and END_FENCE reconciliation remain the controller's responsibility.
   void finish();
 
   [[nodiscard]] bool failed() const noexcept;

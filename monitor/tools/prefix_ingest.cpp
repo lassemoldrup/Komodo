@@ -2,6 +2,7 @@
 #include "blackbox/cdc_types.h"
 #include "blackbox/debezium_assembler.h"
 #include "blackbox/monitor_error.h"
+#include "blackbox/protocol_records.h"
 #include "blackbox/redis_reader.h"
 #include "blackbox/transaction_joiner.h"
 
@@ -32,6 +33,8 @@ using blackbox::CdcTransactionKind;
 using blackbox::DebeziumAssemblerConfig;
 using blackbox::DebeziumTxnAssembler;
 using blackbox::MonitorError;
+using blackbox::ProtocolRecordKind;
+using blackbox::ProtocolRecordParser;
 using blackbox::RedisStreamRecord;
 using blackbox::RedisStreamSpec;
 using blackbox::RunFencePhase;
@@ -224,6 +227,7 @@ int run(const Options &options) {
       .client_parser_limits = {},
       .limits = {},
   });
+  ProtocolRecordParser record_parser;
 
   std::size_t client_records = 0;
   std::size_t xread_calls = 0;
@@ -238,8 +242,21 @@ int run(const Options &options) {
   while (!end_prefix_drained() && std::chrono::steady_clock::now() < deadline) {
     (void)reader.read_once([&](const RedisStreamRecord &record) {
       if (record.stream_name == client_stream) {
-        joiner.acceptClientPayload(record.value);
-        ++client_records;
+        const auto kind = record_parser.kind(record.value);
+        if (kind == ProtocolRecordKind::ClientTxn) {
+          joiner.acceptClientPayload(record.value);
+          ++client_records;
+        } else if (kind == ProtocolRecordKind::SessionDone) {
+          const auto done = record_parser.parseSessionDone(record.value);
+          if (done.run_id != options.run_id) {
+            throw MonitorError(blackbox::MonitorErrorCode::RunIdMismatch,
+                               "SessionDone belongs to another run");
+          }
+        } else {
+          throw MonitorError(
+              blackbox::MonitorErrorCode::ClientRecordMalformed,
+              "prefix ingestion received an unexpected client record kind");
+        }
       } else {
         auto completed = assembler.accept(CdcStreamRecord{
             .stream_id = record.stream_id,

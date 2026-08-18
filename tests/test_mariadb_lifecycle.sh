@@ -21,12 +21,19 @@ INGEST_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-ingest.XXXXXX.log)
 PREFIX_INGEST_PATH=$(mktemp /tmp/mariadb-prefix-ingest.XXXXXX.json)
 PREFIX_ERROR_PATH=$(mktemp /tmp/mariadb-prefix-ingest.XXXXXX.log)
 BAD_PREFIX_ERROR_PATH=$(mktemp /tmp/mariadb-prefix-invalid.XXXXXX.log)
+MONITOR_PATH=$(mktemp /tmp/mariadb-run-monitor.XXXXXX.log)
+MONITOR_ERROR_PATH=$(mktemp /tmp/mariadb-run-monitor.XXXXXX.err)
+CONCURRENT_MONITOR_PATH=$(mktemp /tmp/mariadb-concurrent-monitor.XXXXXX.log)
+CONCURRENT_MONITOR_ERROR_PATH=$(mktemp /tmp/mariadb-concurrent-monitor.XXXXXX.err)
+RESTART_MONITOR_PATH=$(mktemp /tmp/mariadb-restart-monitor.XXXXXX.log)
+RESTART_MONITOR_ERROR_PATH=$(mktemp /tmp/mariadb-restart-monitor.XXXXXX.err)
 UNKNOWN_INGEST_PATH=$(mktemp /tmp/mariadb-cdc-unknown.XXXXXX.json)
 UNKNOWN_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-unknown.XXXXXX.log)
 DDL_INGEST_PATH=$(mktemp /tmp/mariadb-cdc-ddl.XXXXXX.json)
 DDL_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-ddl.XXXXXX.log)
 INGEST_PID=
 PREFIX_PID=
+MONITOR_PID=
 
 
 compose() {
@@ -43,6 +50,10 @@ cleanup() {
     kill "$PREFIX_PID" >/dev/null 2>&1 || true
     wait "$PREFIX_PID" >/dev/null 2>&1 || true
   fi
+  if [[ -n $MONITOR_PID ]] && kill -0 "$MONITOR_PID" >/dev/null 2>&1; then
+    kill "$MONITOR_PID" >/dev/null 2>&1 || true
+    wait "$MONITOR_PID" >/dev/null 2>&1 || true
+  fi
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -f -- "$SCAN_PATH"
   rm -f -- "$REPLAY_PATH"
@@ -51,6 +62,12 @@ cleanup() {
   rm -f -- "$PREFIX_INGEST_PATH"
   rm -f -- "$PREFIX_ERROR_PATH"
   rm -f -- "$BAD_PREFIX_ERROR_PATH"
+  rm -f -- "$MONITOR_PATH"
+  rm -f -- "$MONITOR_ERROR_PATH"
+  rm -f -- "$CONCURRENT_MONITOR_PATH"
+  rm -f -- "$CONCURRENT_MONITOR_ERROR_PATH"
+  rm -f -- "$RESTART_MONITOR_PATH"
+  rm -f -- "$RESTART_MONITOR_ERROR_PATH"
   rm -f -- "$UNKNOWN_INGEST_PATH"
   rm -f -- "$UNKNOWN_ERROR_PATH"
   rm -f -- "$DDL_INGEST_PATH"
@@ -303,6 +320,71 @@ wait_prefix_exit() {
 }
 
 
+start_live_monitor() {
+  "$BLACKBOX_MONITOR_BIN" \
+    --redis-host "$BLACKBOX_REDIS_HOST" \
+    --redis-port "$BLACKBOX_REDIS_PORT" \
+    --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
+    >"$MONITOR_PATH" 2>"$MONITOR_ERROR_PATH" &
+  MONITOR_PID=$!
+  sleep 0.2
+  if ! kill -0 "$MONITOR_PID" >/dev/null 2>&1; then
+    wait "$MONITOR_PID" >/dev/null 2>&1 || true
+    cat "$MONITOR_ERROR_PATH" >&2
+    echo "one-run monitor exited before RunManifest publication" >&2
+    return 1
+  fi
+}
+
+
+wait_monitor_exit() {
+  local expected_status=$1
+  local status
+  if wait "$MONITOR_PID"; then
+    status=0
+  else
+    status=$?
+  fi
+  MONITOR_PID=
+  if (( status != expected_status )); then
+    cat "$MONITOR_ERROR_PATH" >&2
+    cat "$MONITOR_PATH" >&2
+    echo "one-run monitor exited with $status, expected $expected_status" >&2
+    return 1
+  fi
+}
+
+
+expect_monitor_ownership_rejection() {
+  local output_path=$1
+  local error_path=$2
+  local status
+  if "$BLACKBOX_MONITOR_BIN" \
+    --redis-host "$BLACKBOX_REDIS_HOST" \
+    --redis-port "$BLACKBOX_REDIS_PORT" \
+    --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --overall-timeout-ms 1000 \
+    >"$output_path" 2>"$error_path"; then
+    status=0
+  else
+    status=$?
+  fi
+  if (( status != 4 )); then
+    cat "$output_path" >&2
+    cat "$error_path" >&2
+    echo "duplicate monitor exited with $status, expected 4" >&2
+    return 1
+  fi
+  if ! grep -Fq COMPONENT_RESTARTED "$output_path" "$error_path"; then
+    cat "$output_path" >&2
+    cat "$error_path" >&2
+    echo "duplicate monitor did not report COMPONENT_RESTARTED" >&2
+    return 1
+  fi
+}
+
+
 wait_cdc_fence() {
   local phase=$1
   local deadline=$(( $(date +%s) + STACK_TIMEOUT_SECONDS ))
@@ -425,6 +507,64 @@ publish_client_txn() {
 }
 
 
+rolling_session_digest() {
+  local session_id=$1
+  local transaction_count=$2
+  python3 - "$BLACKBOX_ACTIVE_RUN_ID" "$session_id" "$transaction_count" <<'PY'
+import hashlib
+import struct
+import sys
+import uuid
+
+run_id, session_id, count_text = sys.argv[1:]
+session = session_id.encode("utf-8")
+digest = hashlib.sha256(
+    b"db-monitoring/session-marker-seed\x00"
+    + uuid.UUID(run_id).bytes
+    + struct.pack(">I", len(session))
+    + session
+).digest()
+for sequence in range(1, int(count_text) + 1):
+    digest = hashlib.sha256(
+        b"db-monitoring/session-marker-step\x00"
+        + digest
+        + struct.pack(">QQ", sequence, sequence)
+    ).digest()
+print(digest.hex())
+PY
+}
+
+
+publish_clean_session_done() {
+  local session_id=$1
+  local transaction_count=$2
+  local digest payload
+  digest=$(rolling_session_digest "$session_id" "$transaction_count")
+  payload=$(jq -cn \
+    --arg run_id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --arg session_id "$session_id" \
+    --arg digest "$digest" \
+    --argjson count "$transaction_count" '
+      {
+        kind: "session_done",
+        run_id: $run_id,
+        session_id: $session_id,
+        final_session_seq: $count,
+        logical_transactions_started: $count,
+        successful_transactions: $count,
+        terminal_aborted_transactions: 0,
+        physical_attempts_started: $count,
+        definitively_aborted_attempts: 0,
+        published_transactions: $count,
+        retry_attempts: 0,
+        ambiguous_attempts: 0,
+        rolling_correlation_digest: $digest
+      }
+    ')
+  blackbox_publish_record "$(blackbox_client_stream)" "$payload" >/dev/null
+}
+
+
 run_unknown_table_negative() {
   reset_database_and_redis
   root_database_query \
@@ -505,6 +645,10 @@ main() {
     echo "BLACKBOX_PREFIX_INGEST_BIN must name the built C++ prefix ingestion tool" >&2
     return 1
   fi
+  if [[ -z ${BLACKBOX_MONITOR_BIN:-} || ! -x $BLACKBOX_MONITOR_BIN ]]; then
+    echo "BLACKBOX_MONITOR_BIN must name the built one-run monitor" >&2
+    return 1
+  fi
   BLACKBOX_ACTIVE_RUN_ID=${BLACKBOX_ACTIVE_RUN_ID:-$(blackbox_new_uuid)}
   BLACKBOX_SESSION_IDS=(ycsb/worker/1)
   export BLACKBOX_ACTIVE_RUN_ID
@@ -529,6 +673,10 @@ main() {
 
   start_connector_with_snapshot_schema
   start_live_ingest "$INGEST_PATH" "$INGEST_ERROR_PATH"
+  start_live_monitor
+  expect_monitor_ownership_rejection \
+    "$CONCURRENT_MONITOR_PATH" "$CONCURRENT_MONITOR_ERROR_PATH"
+  [[ $(blackbox_redis --raw XLEN "$(blackbox_status_stream)" | tr -d '[:space:]') == 0 ]]
   # Let at least one finite blocking read time out before the first wake-up.
   sleep 0.2
 
@@ -538,6 +686,7 @@ main() {
   wait_ingest_blocked
   blackbox_commit_fence RUN_START
   wait_cdc_fence RUN_START
+  blackbox_wait_for_status START_FENCE_SEEN
   wait_ingest_blocked
 
   blackbox_database_query "
@@ -563,6 +712,7 @@ main() {
   start_live_prefix "$bootstrap_client_cursor" "$bootstrap_count" "$bootstrap_digest"
   blackbox_commit_fence LOAD_FINISHED
   wait_cdc_fence LOAD_FINISHED
+  blackbox_wait_for_status LOAD_FINISHED_SEEN
   wait_ingest_blocked
 
   # Loader/bootstrap activity must not create workload marker state.
@@ -645,14 +795,49 @@ main() {
     COMMIT;
   " >/dev/null
   publish_client_txn ycsb/worker/1 7 7
+  publish_clean_session_done ycsb/worker/1 7
   blackbox_commit_fence END_FENCE
 
   wait_end_fence
+  blackbox_wait_for_status FINAL
+  jq -e '
+    .lifecycle_state == "FINAL" and
+    .outcome == "PASS" and
+    .checker_observation == "PASS_SO_FAR" and
+    .assembled_cdc_transactions == 11 and
+    .joined_transactions == 7 and
+    .checked_transactions == 9 and
+    .pending_cdc_slots == 0 and
+    .unmatched_client_records == 0 and
+    (.diagnostics | length) == 0 and
+    .reconciliation.evidence_reconciled == true and
+    .reconciliation.bootstrap_manifest_validated == true and
+    .reconciliation.end_fence_seen == true and
+    .reconciliation.expected_sessions == 1 and
+    .reconciliation.completed_sessions == 1 and
+    .reconciliation.accepted_client_transactions == 7 and
+    .reconciliation.joined_workload_transactions == 7 and
+    .reconciliation.bootstrap_cdc_transactions == 1 and
+    .reconciliation.bootstrap_checker_transactions == 1 and
+    .reconciliation.phase_anchor_transactions == 1 and
+    .reconciliation.checker_consumed_transactions == 9 and
+    .reconciliation.unmatched_client_records == 0 and
+    .reconciliation.unmatched_workload_cdc_slots == 0 and
+    .reconciliation.ambiguous_attempts == 0
+  ' <<<"$MATCHED_STATUS" >/dev/null
+  wait_monitor_exit 0
+  grep -Fq 'outcome=PASS' "$MONITOR_PATH"
+  [[ $(blackbox_redis --json XRANGE "$(blackbox_status_stream)" - + | jq \
+    '[.[] | (.[1][1] | fromjson) | select(.lifecycle_state == "FINAL")] | length') == 1 ]]
+  expect_monitor_ownership_rejection \
+    "$RESTART_MONITOR_PATH" "$RESTART_MONITOR_ERROR_PATH"
+  [[ $(blackbox_redis --json XRANGE "$(blackbox_status_stream)" - + | jq \
+    '[.[] | (.[1][1] | fromjson) | select(.lifecycle_state == "FINAL")] | length') == 1 ]]
   wait_ingest_exit 0 "$INGEST_ERROR_PATH"
   wait_prefix_exit 0
   jq -e '
     .completed_transactions == 11 and
-    .client_records_seen == 9 and
+    .client_records_seen == 10 and
     .xread_calls > .nonempty_xread_calls and
     .nonempty_xread_calls >= 3 and
     [.transactions[].cdc_seq] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] and

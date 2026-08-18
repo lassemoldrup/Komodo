@@ -191,6 +191,39 @@ unchanged `SnapshotSOWWEngine` synchronously through `CheckerAdapter`. Dense
 checker order therefore covers bootstrap transactions, anchors, and joined
 workload transactions only; controls never create a gap.
 
+`blackbox_run_monitor` owns one complete audited run. It first requires the
+client stream's first record to be the authoritative `RunManifest`, then replays
+CDC from `0-0` while consuming the remaining client records from the manifest's
+exact stream cursor. It validates the `BootstrapManifest`, every `SessionDone`
+counter set and rolling marker digest, and any `RunFailed` notification. The
+monitor continues CDC ingestion behind a blocked checker head, remembers but
+does not process `END_FENCE` out of order, and waits for an input-idle boundary
+after closure so an already-queued post-done or post-fence record cannot be
+skipped.
+
+Before any status append or evidence replay, the monitor atomically claims
+`blackbox:monitor-owner:<run_id>` only if both that key and the run's status
+stream are absent. The permanent claim makes a concurrent or replacement
+monitor fail with `COMPONENT_RESTARTED`; it is removed only when the fresh Redis
+stack is destroyed. Redis connection, ownership, blocking-read, and status-write
+operations all have deadlines bounded by the run's overall timeout.
+
+At shutdown it reconciles the expected session roster, accepted client and
+marker-bearing CDC counts, joined transactions, bootstrap transactions, phase
+anchors, checker totals, unmatched halves, and ambiguous attempts. A clean run
+emits exactly one final `PASS` or `VIOLATION`; any protocol or operational
+invalidity emits `INVALID`, even if the checker previously observed a
+violation. The earlier attributed violation remains in the final diagnostics.
+Lifecycle acknowledgements and the terminal record are written to
+`blackbox:status:<run_id>` with acknowledged `XADD`s, and the process prints a
+human-readable final report.
+
+When the coordinator cannot prove client/database quiescence or a fence commit
+has an ambiguous outcome, it cannot create an audited closing barrier. That
+path publishes best-effort `RunFailed`, reports timeout-invalid locally,
+terminates its owned monitor process, and deliberately does not wait for or
+claim a terminal monitor record.
+
 Build and run the C++ codec, reader, captured-fixture, and assembler tests from
 the canonical development container with:
 
@@ -204,9 +237,10 @@ make test-monitor
 `blackbox_prefix_ingest` additionally consumes client transactions after an
 explicit client cursor and requires the exact validated bootstrap prefix,
 table count, and digest before releasing anchors. `make test-lifecycle-live`
-runs all three paths against fresh MariaDB/Debezium/Redis evidence. The prefix
-tool deliberately leaves `END_FENCE` queued: session shutdown, final
-reconciliation, and terminal-result emission remain absent.
+runs those diagnostic paths plus the complete one-run monitor against fresh
+MariaDB/Debezium/Redis evidence. The prefix tool deliberately leaves
+`END_FENCE` queued so its output continues to expose the pre-closure ordered
+prefix; the one-run monitor performs the audited terminal reconciliation.
 
 ## Constraints
 

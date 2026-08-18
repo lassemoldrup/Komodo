@@ -75,6 +75,10 @@ case "$query" in
   *"INSERT INTO checker_run_fence"*)
     phase=$(sed -n "s/.*VALUES ('[^']*', '\([^']*\)',.*/\1/p" <<<"$query")
     [[ -n $phase ]]
+    if [[ $phase == ${FAIL_FENCE_PHASE:-} ]]; then
+      echo "fence_failed:$phase" >>"$EVENT_LOG"
+      exit 1
+    fi
     echo "fence:$phase" >>"$EVENT_LOG"
     ;;
   *)
@@ -207,6 +211,7 @@ SCRIPT
   cat >"$case_root/bin/monitor" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'echo "monitor:stop" >>"$EVENT_LOG"; exit 0' TERM INT
 echo 'monitor:start' >>"$EVENT_LOG"
 while ! grep -q '^fence:END_FENCE$' "$EVENT_LOG"; do
   sleep 0.05
@@ -254,6 +259,7 @@ run_case() {
   local emit_lifecycle_regression=${5:-0}
   local hang_loader=${6:-0}
   local contaminate_marker=${7:-0}
+  local fail_fence_phase=${8:-}
   local case_root="$TEST_ROOT/$name"
   mkdir -p "$case_root"
   write_test_programs "$case_root"
@@ -271,6 +277,7 @@ run_case() {
   export EMIT_LIFECYCLE_REGRESSION=$emit_lifecycle_regression
   export HANG_LOADER=$hang_loader
   export CONTAMINATE_MARKER=$contaminate_marker
+  export FAIL_FENCE_PHASE=$fail_fence_phase
 
   local status
   if BLACKBOX_DOCKER="$case_root/bin/docker" \
@@ -327,7 +334,37 @@ if grep -q '^fence:END_FENCE$' "$CASE_LOG"; then
   fail 'END_FENCE was written without proven client quiescence'
 fi
 grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'quiescence failure did not publish a diagnostic'
-grep -q '^status:FINAL$' "$CASE_LOG" || fail 'quiescence failure did not wait for final monitor status'
+grep -q '^monitor:stop$' "$CASE_LOG" || fail 'quiescence failure did not stop the monitor'
+if grep -q '^status:FINAL$' "$CASE_LOG"; then
+  fail 'quiescence failure incorrectly awaited a terminal monitor result'
+fi
+grep -q 'timeout-invalid outcome=INVALID' "$TEST_ROOT/active_connection/stderr" ||
+  fail 'quiescence failure did not report timeout-invalid'
+
+run_case ambiguous_run_start 0 0 0 0 0 0 RUN_START
+[[ $CASE_STATUS == 1 ]] || fail 'ambiguous RUN_START did not fail operationally'
+grep -q '^fence_failed:RUN_START$' "$CASE_LOG" || fail 'RUN_START failure was not injected'
+grep -q '^publish:run_failed$' "$CASE_LOG" || fail 'ambiguous RUN_START lacked a diagnostic'
+grep -q '^monitor:stop$' "$CASE_LOG" || fail 'ambiguous RUN_START did not stop the monitor'
+if grep -q '^status:FINAL$\|^fence:END_FENCE$' "$CASE_LOG"; then
+  fail 'ambiguous RUN_START attempted audited closure'
+fi
+
+run_case ambiguous_load_fence 0 0 0 0 0 0 LOAD_FINISHED
+[[ $CASE_STATUS == 1 ]] || fail 'ambiguous LOAD_FINISHED did not fail operationally'
+grep -q '^fence_failed:LOAD_FINISHED$' "$CASE_LOG" || fail 'LOAD_FINISHED failure was not injected'
+grep -q '^monitor:stop$' "$CASE_LOG" || fail 'ambiguous LOAD_FINISHED did not stop the monitor'
+if grep -q '^status:FINAL$\|^fence:END_FENCE$' "$CASE_LOG"; then
+  fail 'ambiguous LOAD_FINISHED attempted audited closure'
+fi
+
+run_case ambiguous_end_fence 0 0 0 0 0 0 END_FENCE
+[[ $CASE_STATUS == 1 ]] || fail 'ambiguous END_FENCE did not fail operationally'
+grep -q '^fence_failed:END_FENCE$' "$CASE_LOG" || fail 'END_FENCE failure was not injected'
+grep -q '^monitor:stop$' "$CASE_LOG" || fail 'ambiguous END_FENCE did not stop the monitor'
+if grep -q '^status:FINAL$' "$CASE_LOG"; then
+  fail 'ambiguous END_FENCE incorrectly awaited a terminal monitor result'
+fi
 
 run_case missing_start_ack 0 1
 [[ $CASE_STATUS != 0 ]] || fail 'missing START acknowledgement unexpectedly succeeded'
