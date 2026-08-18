@@ -60,7 +60,7 @@ struct TransactionJoinerLimits {
   std::size_t max_pending_cdc_slots = 1000000U;
   std::size_t max_pending_cdc_bytes = 256U * 1024U * 1024U;
   std::size_t max_retained_identity_records = 10000000U;
-  std::size_t max_retained_identity_bytes = 256U * 1024U * 1024U;
+  std::size_t max_retained_identity_bytes = 512U * 1024U * 1024U;
   std::size_t max_events_per_transaction = 101000U;
   std::size_t max_bootstrap_state_rows = 10000000U;
   std::size_t max_bootstrap_state_bytes = 256U * 1024U * 1024U;
