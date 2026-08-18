@@ -255,6 +255,64 @@ run retains its raw CDC, client, and status streams plus Compose state and
 container logs before teardown. These runs generate fresh run IDs and do not
 replace or modify the checked-in captured CDC fixtures.
 
+## Performance measurement
+
+Create the required detached, clean pre-instrumentation worktree once, from the
+canonical development container:
+
+```bash
+docker exec db-monitoring-dev bash -lc '
+  git -C /home/yifan/code/db-monitoring/benchbase worktree add --detach \
+    /media/newhd/yifan/db-monitoring-builds/blackbox-performance/worktrees/benchbase-2224eec \
+    2224eeca0d81565e762e584a9214569a28205e3d
+'
+```
+
+The smoke target executes every real stage once with two terminals, scale one,
+one second of warmup, and two requested measurement seconds. The measured target
+uses three rotated repetitions, four terminals, scale ten, five seconds of
+warmup, and twenty requested measurement seconds:
+
+```bash
+docker exec db-monitoring-dev bash -lc '
+  cd /home/yifan/code/db-monitoring/si-monitoring
+  make performance-smoke \
+    PERFORMANCE_OUTPUT_ROOT=/media/newhd/yifan/db-monitoring-builds/blackbox-performance/smoke-20260818
+  make performance-measure \
+    PERFORMANCE_OUTPUT_ROOT=/media/newhd/yifan/db-monitoring-builds/blackbox-performance/run-20260818
+'
+```
+
+`PERFORMANCE_BASELINE_ROOT` overrides the worktree path. An output root must be
+below `/media/newhd/yifan/db-monitoring-builds` and must not already contain files. Normal measured
+runs require clean current BenchBase, monitor, and checker worktrees; `--smoke`
+is the explicit exception used to test uncommitted harness changes. The runner
+also requires that its own process is inside `db-monitoring-dev`.
+
+Throughput, request latency, the authoritative actual elapsed time, and the
+measured epoch window come from BenchBase's raw CSV and summary JSON. Redis
+logical bytes count UTF-8 stream field and value bytes; per-stream allocation is
+`MEMORY USAGE`, and network bytes are workload-window `INFO stats` counter
+deltas from workload-process start through pipeline drain. CDC delivery lag is Redis stream time minus Debezium envelope time;
+source lag is Redis stream time minus database source time. Head-of-line wait,
+join-buffer high-water bytes, checker consume time/rate, checker retained state,
+event counts, reconciliation, and full-lifecycle monitor CPU/RSS come from the
+monitor metrics endpoint. BenchBase process-tree and MariaDB/Redis/Debezium
+CPU/RSS use the raw `workload_process_window` resource sample CSV (JVM startup,
+warmup, measured requests, and teardown). CDC analysis begins at BenchBase's
+first measured request and ends at the Debezium transaction `END` containing
+`END_FENCE`, so late delivery is retained. Join-only records measurement completion and
+evidence reconciliation but deliberately leaves audited outcome fields empty.
+
+Each output root contains generated input configurations, build logs and exact
+commands, host/JVM/container/image provenance, `stage_order.csv`, and one
+checksummed directory per raw trial. The aggregate deliverables are
+`raw_trials.csv`, `summary_statistics.csv` (median, min, max, and MAD without
+outlier removal), `overhead.csv`, `artifact_index.csv`, and the root
+`SHA256SUMS`. Large distributions, Redis captures, BenchBase result sets,
+Compose logs, and resource samples remain under that output root on the artifact
+volume.
+
 ## Constraints
 
 **All backends** — durability is deliberately disabled (tmpfs datadirs,

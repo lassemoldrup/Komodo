@@ -6,8 +6,10 @@ CO_CHECKER_ROOT ?= $(abspath ../co-checker)
 BENCHBASE_ROOT ?= $(abspath ../benchbase)
 PROBE_BUILD_DIR ?= /tmp/db-monitoring-fractured-read-probe-build
 MAVEN ?= mvn
+PERFORMANCE_BASELINE_ROOT ?= /media/newhd/yifan/db-monitoring-builds/blackbox-performance/worktrees/benchbase-2224eec
+PERFORMANCE_OUTPUT_ROOT ?=
 
-.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live
+.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live performance-smoke performance-measure
 
 ## Start the stack for $(DB)
 up:
@@ -82,6 +84,7 @@ test-lifecycle: test-monitor
 	python3 -m unittest discover -s tests -p 'test_*.py' -v
 	./tests/test_live_lock.sh
 	./tests/test_e2e_lifecycle.sh
+	./tests/test_blackbox_performance_harness.sh
 
 ## Destructive integration against the pinned MariaDB/Debezium/Redis stack
 test-lifecycle-live: test-monitor
@@ -98,3 +101,19 @@ test-correctness-live: test-monitor probe-client-build
 	BLACKBOX_BENCHBASE_ROOT="$(abspath $(BENCHBASE_ROOT))" \
 	BLACKBOX_MAVEN="$(MAVEN)" \
 		./tests/test_semantic_correctness.sh
+
+## Run all six real performance stages once with the fixed smoke configuration
+performance-smoke:
+	@set -- --smoke --baseline-root "$(PERFORMANCE_BASELINE_ROOT)"; \
+	if [ -n "$(PERFORMANCE_OUTPUT_ROOT)" ]; then \
+		set -- "$$@" --output-root "$(PERFORMANCE_OUTPUT_ROOT)"; \
+	fi; \
+	./scripts/run_blackbox_performance.sh "$$@"
+
+## Run three rotated measured repetitions of all six performance stages
+performance-measure:
+	@set -- --baseline-root "$(PERFORMANCE_BASELINE_ROOT)"; \
+	if [ -n "$(PERFORMANCE_OUTPUT_ROOT)" ]; then \
+		set -- "$$@" --output-root "$(PERFORMANCE_OUTPUT_ROOT)"; \
+	fi; \
+	./scripts/run_blackbox_performance.sh "$$@"
