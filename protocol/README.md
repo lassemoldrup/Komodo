@@ -33,6 +33,7 @@ prototype's feature scope.
 cdc                              Debezium-owned raw stream
 blackbox:client:<run_id>         BenchBase/coordinator records
 blackbox:status:<run_id>         monitor status and final result
+blackbox:monitor-owner:<run_id>  permanent one-monitor ownership claim
 ```
 
 Every black-box stream entry has exactly one field named `payload`. Its value is
@@ -45,6 +46,12 @@ transaction identifiers are not part of the join contract.
 
 The `cdc` stream retains Debezium's existing key/envelope field layout and is
 validated by the CDC assembler rather than these client-record schemas.
+
+Before consuming evidence or appending status, a monitor atomically requires
+both its owner key and status stream to be absent, then creates the owner key.
+The claim has no TTL and is never released during the run; a concurrent or
+replacement monitor is `INVALID/COMPONENT_RESTARTED`. Fresh-stack teardown is
+the only supported way to remove it.
 
 ## Validation
 

@@ -73,8 +73,12 @@ add_executable(blackbox_cdc_ingest
 add_executable(blackbox_prefix_ingest
   tools/prefix_ingest.cpp
 )
+add_executable(blackbox_run_monitor
+  tools/monitor.cpp
+)
 target_link_libraries(blackbox_cdc_ingest PRIVATE blackbox_monitor)
 target_link_libraries(blackbox_prefix_ingest PRIVATE blackbox_monitor)
+target_link_libraries(blackbox_run_monitor PRIVATE blackbox_monitor)
 target_compile_options(blackbox_cdc_ingest
   PRIVATE
     -Wall
@@ -100,8 +104,17 @@ target_compile_options(blackbox_prefix_ingest
     -Wconversion
     -Wsign-conversion
 )
+target_compile_options(blackbox_run_monitor
+  PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wsign-conversion
+)
 if(BLACKBOX_MONITOR_BUILD_TESTING)
   include(CTest)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   add_executable(blackbox_monitor_tests
     tests/test_canonical_ycsb_codec.cpp
@@ -138,6 +151,12 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
       -Wsign-conversion
   )
   add_test(NAME blackbox_monitor_tests COMMAND blackbox_monitor_tests)
+  add_test(
+    NAME blackbox_monitor_cli_fail_closed
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_monitor_cli.py
+            --monitor $<TARGET_FILE:blackbox_run_monitor>
+  )
   add_test(
     NAME blackbox_cdc_transaction_fixture_checksum
     COMMAND ${CMAKE_COMMAND} -E sha256sum
