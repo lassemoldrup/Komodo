@@ -46,6 +46,8 @@ The marker requirements are:
   `after.txn_id` for that session;
 - `txn_id` changes on every physical attempt, so a committed retry cannot become
   a no-op marker update;
+- every published record has `txn_id >= session_seq`, and the per-session
+  retry surplus `txn_id - session_seq` never decreases;
 - marker/fence writes never enter the application write set.
 
 MariaDB uses `INSERT ... ON DUPLICATE KEY UPDATE`; YugabyteDB uses

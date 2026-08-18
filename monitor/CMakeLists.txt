@@ -11,12 +11,15 @@ option(BLACKBOX_MONITOR_BUILD_TESTING "Build black-box monitor tests" ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(HIREDIS REQUIRED IMPORTED_TARGET hiredis=1.2.0)
 find_package(nlohmann_json 3.11.3 EXACT CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 add_library(blackbox_monitor
   src/canonical_ycsb_codec.cpp
   src/cdc_error.cpp
   src/cdc_types.cpp
+  src/client_txn.cpp
   src/debezium_assembler.cpp
+  src/monitor_error.cpp
   src/redis_reader.cpp
   src/strict_json.cpp
 )
@@ -36,6 +39,8 @@ target_link_libraries(blackbox_monitor
   PUBLIC
     PkgConfig::HIREDIS
     nlohmann_json::nlohmann_json
+  PRIVATE
+    OpenSSL::Crypto
 )
 
 add_executable(blackbox_cdc_replay
@@ -69,6 +74,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
 
   add_executable(blackbox_monitor_tests
     tests/test_canonical_ycsb_codec.cpp
+    tests/test_client_txn.cpp
     tests/test_debezium_assembler.cpp
     tests/test_main.cpp
     tests/test_redis_reader.cpp
@@ -85,6 +91,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   target_compile_definitions(blackbox_monitor_tests
     PRIVATE
       BLACKBOX_PROTOCOL_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/golden"
+      BLACKBOX_PROTOCOL_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/examples"
       BLACKBOX_CDC_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
   )
   target_compile_options(blackbox_monitor_tests

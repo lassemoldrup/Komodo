@@ -58,6 +58,7 @@ FINAL
 | `MULTIPLE_COMMITTED_ATTEMPTS` | More than one attempt of one logical transaction committed. |
 | `SESSION_UNKNOWN` | Evidence names a session absent from the run manifest. |
 | `SESSION_SEQUENCE_NON_INCREASING` | A retained session sequence repeats or decreases. |
+| `SESSION_ATTEMPT_PROGRESS_INVALID` | A marker attempt counter is behind logical progress or its retry surplus decreases. |
 | `SESSION_DONE_MISSING` | An expected worker never publishes `SessionDone`. |
 | `SESSION_DONE_MISMATCH` | Session counters/digest do not reconcile. |
 | `CLIENT_RECORD_AFTER_DONE` | A session publishes transaction evidence after `SessionDone`. |

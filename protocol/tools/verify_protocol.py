@@ -177,6 +177,20 @@ def correlation_entry(session_seq: int, txn_id: int) -> bytes:
     return u64(session_seq) + u64(txn_id)
 
 
+def validate_session_attempt_progress(entries: list[dict[str, int]], label: str) -> None:
+    previous_surplus: int | None = None
+    for entry in entries:
+        session_seq = entry["session_seq"]
+        txn_id = entry["txn_id"]
+        require(txn_id >= session_seq, f"{label}: marker txn_id is behind session_seq")
+        surplus = txn_id - session_seq
+        require(
+            previous_surplus is None or surplus >= previous_surplus,
+            f"{label}: marker retry surplus decreased",
+        )
+        previous_surplus = surplus
+
+
 def correlation_step(previous: bytes, entry: bytes) -> bytes:
     return hashlib.sha256(CORRELATION_STEP_DOMAIN + previous + entry).digest()
 
@@ -256,6 +270,7 @@ def verify_golden_vectors() -> None:
 
     correlations = load_json(GOLDEN_ROOT / "session_correlation_digests.json")
     for vector in correlations["vectors"]:
+        validate_session_attempt_progress(vector["entries"], f"correlation {vector['name']}")
         seed_preimage, digest = correlation_seed(vector["run_id"], vector["session_id"])
         require(seed_preimage.hex() == vector["seed_preimage_hex"], f"correlation {vector['name']}: seed")
         require(digest.hex() == vector["seed_digest"], f"correlation {vector['name']}: D0")
@@ -347,6 +362,16 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
         require(sequences == sorted(set(sequences)), "published session sequence is not increasing")
         txn_ids = [client["correlation_id"]["txn_id"] for client in session_clients]
         require(txn_ids == sorted(set(txn_ids)), "marker txn_id is not increasing")
+        validate_session_attempt_progress(
+            [
+                {
+                    "session_seq": client["session_seq"],
+                    "txn_id": client["correlation_id"]["txn_id"],
+                }
+                for client in session_clients
+            ],
+            f"session {done['session_id']}",
+        )
         require(
             not txn_ids or txn_ids[-1] <= done["physical_attempts_started"],
             "marker txn_id exceeds physical attempt count",
