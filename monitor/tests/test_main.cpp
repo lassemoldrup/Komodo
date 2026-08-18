@@ -3,12 +3,14 @@
 #include <iostream>
 
 int runCanonicalYcsbCodecTests();
+int runCheckerAdapterTests();
 int runClientTxnTests();
 int runDebeziumAssemblerTests();
 int runRedisReaderTests();
 
 int main() {
   runCanonicalYcsbCodecTests();
+  runCheckerAdapterTests();
   runClientTxnTests();
   runDebeziumAssemblerTests();
   runRedisReaderTests();

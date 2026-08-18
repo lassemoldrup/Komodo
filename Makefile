@@ -2,6 +2,7 @@
 DB ?= mariadb
 COMPOSE = docker compose --profile $(DB)
 MONITOR_BUILD_DIR ?= /tmp/db-monitoring-blackbox-monitor-build
+CO_CHECKER_ROOT ?= $(abspath ../co-checker)
 
 .PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build test-monitor test-lifecycle test-lifecycle-live
 
@@ -56,7 +57,8 @@ e2e:
 
 ## Fast protocol/lifecycle tests with controlled monitor acknowledgements
 monitor-build:
-	cmake -S monitor -B $(MONITOR_BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Debug
+	cmake -S monitor -B $(MONITOR_BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+		-DCO_CHECKER_ROOT=$(CO_CHECKER_ROOT)
 	cmake --build $(MONITOR_BUILD_DIR)
 
 test-monitor: monitor-build

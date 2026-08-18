@@ -8,6 +8,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(BLACKBOX_MONITOR_BUILD_TESTING "Build black-box monitor tests" ON)
 
+set(CO_CHECKER_ROOT "" CACHE PATH "Path to the co-checker source checkout")
+if(NOT CO_CHECKER_ROOT)
+  message(FATAL_ERROR "CO_CHECKER_ROOT must name the co-checker source checkout")
+endif()
+cmake_path(ABSOLUTE_PATH CO_CHECKER_ROOT NORMALIZE
+           OUTPUT_VARIABLE BLACKBOX_CO_CHECKER_ROOT)
+if(NOT EXISTS "${BLACKBOX_CO_CHECKER_ROOT}/online/CMakeLists.txt")
+  message(FATAL_ERROR
+          "CO_CHECKER_ROOT does not contain online/CMakeLists.txt: ${BLACKBOX_CO_CHECKER_ROOT}")
+endif()
+set(CO_CHECKER_ONLINE_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+add_subdirectory("${BLACKBOX_CO_CHECKER_ROOT}/online"
+                 "${CMAKE_CURRENT_BINARY_DIR}/co-checker-online"
+                 EXCLUDE_FROM_ALL)
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(HIREDIS REQUIRED IMPORTED_TARGET hiredis=1.2.0)
 find_package(nlohmann_json 3.11.3 EXACT CONFIG REQUIRED)
@@ -17,6 +32,7 @@ add_library(blackbox_monitor
   src/canonical_ycsb_codec.cpp
   src/cdc_error.cpp
   src/cdc_types.cpp
+  src/checker_adapter.cpp
   src/client_txn.cpp
   src/debezium_assembler.cpp
   src/monitor_error.cpp
@@ -39,6 +55,7 @@ target_link_libraries(blackbox_monitor
   PUBLIC
     PkgConfig::HIREDIS
     nlohmann_json::nlohmann_json
+    co_checker_online
   PRIVATE
     OpenSSL::Crypto
 )
@@ -68,12 +85,12 @@ target_compile_options(blackbox_cdc_replay
     -Wconversion
     -Wsign-conversion
 )
-
 if(BLACKBOX_MONITOR_BUILD_TESTING)
   include(CTest)
 
   add_executable(blackbox_monitor_tests
     tests/test_canonical_ycsb_codec.cpp
+    tests/test_checker_adapter.cpp
     tests/test_client_txn.cpp
     tests/test_debezium_assembler.cpp
     tests/test_main.cpp
