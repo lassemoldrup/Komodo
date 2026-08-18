@@ -18,11 +18,15 @@ SCAN_PATH=$(mktemp /tmp/mariadb-bootstrap-scan.XXXXXX)
 REPLAY_PATH=$(mktemp /tmp/mariadb-cdc-replay.XXXXXX.json)
 INGEST_PATH=$(mktemp /tmp/mariadb-cdc-ingest.XXXXXX.json)
 INGEST_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-ingest.XXXXXX.log)
+PREFIX_INGEST_PATH=$(mktemp /tmp/mariadb-prefix-ingest.XXXXXX.json)
+PREFIX_ERROR_PATH=$(mktemp /tmp/mariadb-prefix-ingest.XXXXXX.log)
+BAD_PREFIX_ERROR_PATH=$(mktemp /tmp/mariadb-prefix-invalid.XXXXXX.log)
 UNKNOWN_INGEST_PATH=$(mktemp /tmp/mariadb-cdc-unknown.XXXXXX.json)
 UNKNOWN_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-unknown.XXXXXX.log)
 DDL_INGEST_PATH=$(mktemp /tmp/mariadb-cdc-ddl.XXXXXX.json)
 DDL_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-ddl.XXXXXX.log)
 INGEST_PID=
+PREFIX_PID=
 
 
 compose() {
@@ -35,11 +39,18 @@ cleanup() {
     kill "$INGEST_PID" >/dev/null 2>&1 || true
     wait "$INGEST_PID" >/dev/null 2>&1 || true
   fi
+  if [[ -n $PREFIX_PID ]] && kill -0 "$PREFIX_PID" >/dev/null 2>&1; then
+    kill "$PREFIX_PID" >/dev/null 2>&1 || true
+    wait "$PREFIX_PID" >/dev/null 2>&1 || true
+  fi
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -f -- "$SCAN_PATH"
   rm -f -- "$REPLAY_PATH"
   rm -f -- "$INGEST_PATH"
   rm -f -- "$INGEST_ERROR_PATH"
+  rm -f -- "$PREFIX_INGEST_PATH"
+  rm -f -- "$PREFIX_ERROR_PATH"
+  rm -f -- "$BAD_PREFIX_ERROR_PATH"
   rm -f -- "$UNKNOWN_INGEST_PATH"
   rm -f -- "$UNKNOWN_ERROR_PATH"
   rm -f -- "$DDL_INGEST_PATH"
@@ -222,6 +233,76 @@ wait_ingest_exit() {
 }
 
 
+wait_prefix_blocked() {
+  local deadline=$(( $(date +%s) + 10 ))
+  while (( $(date +%s) <= deadline )); do
+    local blocked_readers
+    blocked_readers=$(blackbox_redis --raw CLIENT LIST | awk '
+      {
+        blocked = 0
+        xread = 0
+        for (field = 1; field <= NF; ++field) {
+          if ($field ~ /^flags=[^ ]*b/) blocked = 1
+          if ($field == "cmd=xread") xread = 1
+        }
+        if (blocked && xread) count += 1
+      }
+      END { print count + 0 }
+    ')
+    if (( blocked_readers >= 2 )); then
+      return 0
+    fi
+    if [[ -n $PREFIX_PID ]] && ! kill -0 "$PREFIX_PID" >/dev/null 2>&1; then
+      return 1
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
+
+start_live_prefix() {
+  local client_cursor=$1
+  local bootstrap_count=$2
+  local bootstrap_digest=$3
+  "$BLACKBOX_PREFIX_INGEST_BIN" \
+    --redis-host "$BLACKBOX_REDIS_HOST" \
+    --redis-port "$BLACKBOX_REDIS_PORT" \
+    --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --client-cursor "$client_cursor" \
+    --expected-session-id ycsb/worker/1 \
+    --approved-load-cdc-seq 2 \
+    --approved-bootstrap-transactions 1 \
+    --approved-bootstrap-rows "$bootstrap_count" \
+    --approved-bootstrap-digest "$bootstrap_digest" \
+    --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
+    >"$PREFIX_INGEST_PATH" 2>"$PREFIX_ERROR_PATH" &
+  PREFIX_PID=$!
+  if ! wait_prefix_blocked; then
+    cat "$PREFIX_ERROR_PATH" >&2
+    echo "live prefix ingestion did not enter blocking XREAD" >&2
+    return 1
+  fi
+}
+
+
+wait_prefix_exit() {
+  local expected_status=$1
+  local status
+  if wait "$PREFIX_PID"; then
+    status=0
+  else
+    status=$?
+  fi
+  PREFIX_PID=
+  if (( status != expected_status )); then
+    cat "$PREFIX_ERROR_PATH" >&2
+    echo "live prefix ingestion exited with $status, expected $expected_status" >&2
+    return 1
+  fi
+}
+
+
 wait_cdc_fence() {
   local phase=$1
   local deadline=$(( $(date +%s) + STACK_TIMEOUT_SECONDS ))
@@ -284,6 +365,63 @@ wait_ddl_record() {
     sleep 0.1
   done
   return 1
+}
+
+
+publish_client_txn() {
+  local session_id=$1
+  local session_seq=$2
+  local txn_id=$3
+  local read_mode=${4:-empty}
+  local logical_txn_id attempt_id payload read_digest reads
+  logical_txn_id=$(blackbox_new_uuid)
+  attempt_id=$(blackbox_new_uuid)
+  read_digest=3f251669e36904bc1a3bc472991c9ff89f7f23f6b98bad9dd33f0e66884a06ce
+  reads='[]'
+  if [[ $read_mode == mixed42 ]]; then
+    read_digest=29d6e7dd6ef4be6c23d571132831b39d8aaff04ce0e003dd4eb37940c6d64a8f
+    reads='[
+      {
+        "event_seq": 0,
+        "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAl1c2VydGFibGUAAAAq",
+        "value_state": "present",
+        "value_bytes_base64": "AAEAAAAAAQAAAAFBAQAAAALDqQEAAAAD5LitAQAAAAEwAQAAAAVoZWxsbwEAAAAE8J+ZggEAAAADYQBiAQAAAARsYXN0",
+        "source": "snapshot"
+      }
+    ]'
+  elif [[ $read_mode != empty ]]; then
+    echo "unknown client read mode: $read_mode" >&2
+    return 1
+  fi
+  payload=$(jq -cn \
+    --arg run_id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --arg session_id "$session_id" \
+    --arg logical_txn_id "$logical_txn_id" \
+    --arg attempt_id "$attempt_id" \
+    --arg read_digest "$read_digest" \
+    --argjson reads "$reads" \
+    --argjson session_seq "$session_seq" \
+    --argjson txn_id "$txn_id" '
+      {
+        kind: "client_txn",
+        run_id: $run_id,
+        session_id: $session_id,
+        session_seq: $session_seq,
+        logical_txn_id: $logical_txn_id,
+        attempt_id: $attempt_id,
+        txn_type: "ycsb_update",
+        correlation_kind: "session_txn",
+        correlation_id: {
+          run_id: $run_id,
+          session_id: $session_id,
+          txn_id: $txn_id
+        },
+        read_count: ($reads | length),
+        read_digest: $read_digest,
+        reads: $reads
+      }
+    ')
+  blackbox_publish_record "$(blackbox_client_stream)" "$payload" >/dev/null
 }
 
 
@@ -363,6 +501,10 @@ main() {
     echo "BLACKBOX_CDC_INGEST_BIN must name the built C++ CDC ingestion tool" >&2
     return 1
   fi
+  if [[ -z ${BLACKBOX_PREFIX_INGEST_BIN:-} || ! -x $BLACKBOX_PREFIX_INGEST_BIN ]]; then
+    echo "BLACKBOX_PREFIX_INGEST_BIN must name the built C++ prefix ingestion tool" >&2
+    return 1
+  fi
   BLACKBOX_ACTIVE_RUN_ID=${BLACKBOX_ACTIVE_RUN_ID:-$(blackbox_new_uuid)}
   BLACKBOX_SESSION_IDS=(ycsb/worker/1)
   export BLACKBOX_ACTIVE_RUN_ID
@@ -409,13 +551,16 @@ main() {
   " >/dev/null
 
   blackbox_capture_bootstrap_scan "$SCAN_PATH"
-  local bootstrap_manifest bootstrap_digest bootstrap_count
+  local bootstrap_manifest bootstrap_digest bootstrap_count bootstrap_client_cursor
   bootstrap_manifest=$(blackbox_build_bootstrap_manifest "$SCAN_PATH")
   bootstrap_digest=$(jq -r '.canonical_state_digest' <<<"$bootstrap_manifest")
   bootstrap_count=$(jq -r '.table_row_counts[0].row_count' <<<"$bootstrap_manifest")
   [[ $bootstrap_digest == 71749720e062cf361dbad1e139c88d7d39b10debeddf18562d35cd80ae53afa8 ]]
   [[ $bootstrap_count == 2 ]]
-  blackbox_publish_record "$(blackbox_client_stream)" "$bootstrap_manifest" >/dev/null
+  bootstrap_client_cursor=$(
+    blackbox_publish_record "$(blackbox_client_stream)" "$bootstrap_manifest"
+  )
+  start_live_prefix "$bootstrap_client_cursor" "$bootstrap_count" "$bootstrap_digest"
   blackbox_commit_fence LOAD_FINISHED
   wait_cdc_fence LOAD_FINISHED
   wait_ingest_blocked
@@ -425,11 +570,15 @@ main() {
 
   blackbox_database_query "
     START TRANSACTION;
+    SELECT ycsb_key, field1, field2, field3, field4, field5,
+           field6, field7, field8, field9, field10
+      FROM usertable WHERE ycsb_key = 42;
     UPDATE usertable SET field1 = 'changed' WHERE ycsb_key = 42;
     INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 1)
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
+  publish_client_txn ycsb/worker/1 1 1 mixed42
 
   # Marker-only commit: successful no-application-write transactions must
   # still occupy a CDC slot after marker filtering.
@@ -439,6 +588,7 @@ main() {
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
+  publish_client_txn ycsb/worker/1 2 2
 
   # Preserve touched keys even when repeated writes collapse to Absent.
   blackbox_database_query "
@@ -453,6 +603,7 @@ main() {
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
+  publish_client_txn ycsb/worker/1 3 3
 
   blackbox_database_query "
     START TRANSACTION;
@@ -463,6 +614,7 @@ main() {
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
+  publish_client_txn ycsb/worker/1 4 4
 
   # Same-key updates that return to the original value remain a touched write.
   blackbox_database_query "
@@ -473,6 +625,7 @@ main() {
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
+  publish_client_txn ycsb/worker/1 5 5
 
   blackbox_database_query "
     START TRANSACTION;
@@ -481,6 +634,7 @@ main() {
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
+  publish_client_txn ycsb/worker/1 6 6
 
   # Exercise the explicit primary-key-change normalization rule.
   blackbox_database_query "
@@ -490,13 +644,15 @@ main() {
       ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
     COMMIT;
   " >/dev/null
+  publish_client_txn ycsb/worker/1 7 7
   blackbox_commit_fence END_FENCE
 
   wait_end_fence
   wait_ingest_exit 0 "$INGEST_ERROR_PATH"
+  wait_prefix_exit 0
   jq -e '
     .completed_transactions == 11 and
-    .client_records_seen == 2 and
+    .client_records_seen == 9 and
     .xread_calls > .nonempty_xread_calls and
     .nonempty_xread_calls >= 3 and
     [.transactions[].cdc_seq] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] and
@@ -505,6 +661,49 @@ main() {
     [.transactions[3:10][].correlation_id.txn_id] == [1, 2, 3, 4, 5, 6, 7] and
     [.transactions[3:10][].write_count] == [1, 0, 1, 1, 1, 1, 2]
   ' "$INGEST_PATH" >/dev/null
+
+  jq -e '
+    .completed_cdc_transactions == 11 and
+    .accepted_cdc_transactions == 11 and
+    .accepted_client_transactions == 7 and
+    .joined_workload_transactions == 7 and
+    .checker_consumed_transactions == 9 and
+    .checker_next_commit_seq == 9 and
+    .bootstrap_checker_transactions == 1 and
+    .phase_anchor_transactions == 1 and
+    .workload_checker_transactions == 7 and
+    .bootstrap_state_rows == 2 and
+    .bootstrap_state_bytes > 0 and
+    .pending_client_records == 0 and
+    .pending_cdc_slots == 1 and
+    (.client_first_matches + .cdc_first_matches) == 7 and
+    .end_fence_observed == true and
+    .checker_observation == "PASS_SO_FAR" and
+    .head_block_reason == "END_FENCE_DEFERRED" and
+    .client_records_read == 7 and
+    .xread_calls > 1
+  ' "$PREFIX_INGEST_PATH" >/dev/null
+
+  local bad_prefix_status
+  if "$BLACKBOX_PREFIX_INGEST_BIN" \
+    --redis-host "$BLACKBOX_REDIS_HOST" \
+    --redis-port "$BLACKBOX_REDIS_PORT" \
+    --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --client-cursor "$bootstrap_client_cursor" \
+    --expected-session-id ycsb/worker/1 \
+    --approved-load-cdc-seq 2 \
+    --approved-bootstrap-transactions 1 \
+    --approved-bootstrap-rows "$bootstrap_count" \
+    --approved-bootstrap-digest "0000000000000000000000000000000000000000000000000000000000000000" \
+    --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
+    >/dev/null 2>"$BAD_PREFIX_ERROR_PATH"; then
+    bad_prefix_status=0
+  else
+    bad_prefix_status=$?
+  fi
+  [[ $bad_prefix_status == 2 ]]
+  grep -Fq BOOTSTRAP_STATE_MISMATCH "$BAD_PREFIX_ERROR_PATH"
+
   blackbox_redis --json XRANGE cdc - + >"$CAPTURE_PATH"
   python3 "$ROOT/tests/verify_lifecycle_stream.py" \
     --input "$CAPTURE_PATH" --run-id "$BLACKBOX_ACTIVE_RUN_ID" >/dev/null

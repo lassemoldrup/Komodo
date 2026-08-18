@@ -68,7 +68,11 @@ add_executable(blackbox_cdc_replay
 add_executable(blackbox_cdc_ingest
   tools/cdc_ingest.cpp
 )
+add_executable(blackbox_prefix_ingest
+  tools/prefix_ingest.cpp
+)
 target_link_libraries(blackbox_cdc_ingest PRIVATE blackbox_monitor)
+target_link_libraries(blackbox_prefix_ingest PRIVATE blackbox_monitor)
 target_compile_options(blackbox_cdc_ingest
   PRIVATE
     -Wall
@@ -79,6 +83,14 @@ target_compile_options(blackbox_cdc_ingest
 )
 target_link_libraries(blackbox_cdc_replay PRIVATE blackbox_monitor)
 target_compile_options(blackbox_cdc_replay
+  PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wsign-conversion
+)
+target_compile_options(blackbox_prefix_ingest
   PRIVATE
     -Wall
     -Wextra

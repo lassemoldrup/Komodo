@@ -174,13 +174,22 @@ while (true) {
 Do not trim `cdc`, client, or status streams during an audited run. Restart
 recovery, coordinated checkpoints, and safe trimming are later features.
 
-The Milestone 3 implementation lives in `monitor/`. `BlockingRedisReader`
-issues binary-safe blocking `XREAD` calls with one explicit cursor per stream;
+The monitor implementation lives in `monitor/`. `BlockingRedisReader` issues
+binary-safe blocking `XREAD` calls with one explicit cursor per stream;
 `DebeziumTxnAssembler` validates MariaDB transaction structure and emits a
 normalized `CdcTransaction` only after a valid `END`. Connector transaction
 IDs are kept only inside the assembler for `BEGIN`/row/`END` consistency. The
 only exposed workload correlation is the unified
 `(run_id, session_id, txn_id)` marker identity.
+
+`ClientTxnParser` strictly validates the client schema, canonical Base64 and
+YCSB bytes, and the read digest before admission. `TransactionJoiner` retains
+bounded client and CDC buffers and releases only the longest ready CDC prefix.
+It reconstructs bootstrap state, checks the independent row-count/digest proof
+at the load fence, creates the per-session phase anchors, and calls the
+unchanged `SnapshotSOWWEngine` synchronously through `CheckerAdapter`. Dense
+checker order therefore covers bootstrap transactions, anchors, and joined
+workload transactions only; controls never create a gap.
 
 Build and run the C++ codec, reader, captured-fixture, and assembler tests from
 the canonical development container with:
@@ -191,11 +200,13 @@ make test-monitor
 ```
 
 `blackbox_cdc_replay` validates an `XRANGE --json` capture, while
-`blackbox_cdc_ingest` exercises the live multi-stream reader against `cdc` and
-the run's client stream without parsing client records. `make
-test-lifecycle-live` runs both paths against fresh MariaDB/Debezium evidence.
-Joining client evidence, checker consumption, and final reconciliation remain
-intentionally absent.
+`blackbox_cdc_ingest` exercises bounded live multi-stream CDC ingestion.
+`blackbox_prefix_ingest` additionally consumes client transactions after an
+explicit client cursor and requires the exact validated bootstrap prefix,
+table count, and digest before releasing anchors. `make test-lifecycle-live`
+runs all three paths against fresh MariaDB/Debezium/Redis evidence. The prefix
+tool deliberately leaves `END_FENCE` queued: session shutdown, final
+reconciliation, and terminal-result emission remain absent.
 
 ## Constraints
 

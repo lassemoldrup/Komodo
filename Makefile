@@ -75,4 +75,5 @@ test-lifecycle: test-monitor
 test-lifecycle-live: test-monitor
 	BLACKBOX_CDC_REPLAY_BIN=$(MONITOR_BUILD_DIR)/blackbox_cdc_replay \
 	BLACKBOX_CDC_INGEST_BIN=$(MONITOR_BUILD_DIR)/blackbox_cdc_ingest \
+	BLACKBOX_PREFIX_INGEST_BIN=$(MONITOR_BUILD_DIR)/blackbox_prefix_ingest \
 		./tests/test_mariadb_lifecycle.sh
