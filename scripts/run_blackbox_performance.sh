@@ -35,6 +35,9 @@ DURATION_SECONDS=${BLACKBOX_PERFORMANCE_DURATION_SECONDS:-20}
 COOLDOWN_SECONDS=${BLACKBOX_PERFORMANCE_COOLDOWN_SECONDS:-2}
 RANDOM_SEED=${BLACKBOX_PERFORMANCE_RANDOM_SEED:-20260818}
 RESOURCE_INTERVAL_SECONDS=${BLACKBOX_PERFORMANCE_RESOURCE_INTERVAL_SECONDS:-1}
+REDIS_MAXMEMORY_BYTES=${BLACKBOX_PERFORMANCE_REDIS_MAXMEMORY_BYTES:-8589934592}
+MONITOR_MAX_RETAINED_IDENTITY_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_RETAINED_IDENTITY_BYTES:-2147483648}
+OUTPUT_MAX_BYTES=${BLACKBOX_PERFORMANCE_OUTPUT_MAX_BYTES:-107374182400}
 COMPOSE_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_COMPOSE_TIMEOUT_SECONDS:-300}
 LOADER_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_LOADER_TIMEOUT_SECONDS:-600}
 TRIAL_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_TRIAL_TIMEOUT_SECONDS:-1800}
@@ -61,6 +64,8 @@ ACTIVE_TRIAL_DIR=
 ACTIVE_TRIAL_CAPTURED=0
 STACK_MAY_BE_RUNNING=0
 LIVE_LOCK_ACQUIRED=0
+OUTPUT_GUARD_PID=
+OUTPUT_LIMIT_SENTINEL=
 
 
 usage() {
@@ -78,6 +83,10 @@ Options:
   --duration-seconds N       Requested measurement duration (default: 20).
   --cooldown-seconds N       Cooldown after a trial (default: 2).
   --seed N                   Fixed BenchBase/order seed (default: 20260818).
+  --redis-maxmemory-bytes N  Redis noeviction capacity (default: 8589934592).
+  --monitor-retained-identity-bytes N
+                             Joiner identity capacity (default: 2147483648).
+  --output-max-bytes N       Artifact budget (default: 107374182400).
   --print-stage-order        Print the deterministic rotated order and exit.
   --verify-inputs-only       Validate environment/worktrees/output safety and exit (smoke only).
 EOF
@@ -106,6 +115,17 @@ require_positive_integer() {
   local name=$1
   local value=$2
   [[ $value =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer: $value"
+}
+
+
+require_capacity_bytes() {
+  local name=$1
+  local value=$2
+  [[ $value =~ ^[1-9][0-9]*$ ]] ||
+    die "$name must be a positive decimal byte count: $value"
+  python3 -c \
+    'import sys; value = int(sys.argv[1]); raise SystemExit(0 if 0 < value <= 9223372036854775807 else 1)' \
+    "$value" || die "$name exceeds the signed 64-bit byte range: $value"
 }
 
 
@@ -156,6 +176,18 @@ parse_arguments() {
         RANDOM_SEED=${2:?missing --seed value}
         shift 2
         ;;
+      --redis-maxmemory-bytes)
+        REDIS_MAXMEMORY_BYTES=${2:?missing --redis-maxmemory-bytes value}
+        shift 2
+        ;;
+      --monitor-retained-identity-bytes)
+        MONITOR_MAX_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-retained-identity-bytes value}
+        shift 2
+        ;;
+      --output-max-bytes)
+        OUTPUT_MAX_BYTES=${2:?missing --output-max-bytes value}
+        shift 2
+        ;;
       --smoke)
         SMOKE=1
         shift
@@ -199,6 +231,12 @@ parse_arguments() {
   require_positive_integer duration-seconds "$DURATION_SECONDS"
   require_unsigned_integer cooldown-seconds "$COOLDOWN_SECONDS"
   require_unsigned_integer seed "$RANDOM_SEED"
+  require_capacity_bytes redis-maxmemory-bytes "$REDIS_MAXMEMORY_BYTES"
+  require_capacity_bytes monitor-retained-identity-bytes \
+    "$MONITOR_MAX_RETAINED_IDENTITY_BYTES"
+  require_capacity_bytes output-max-bytes "$OUTPUT_MAX_BYTES"
+  (( OUTPUT_MAX_BYTES <= 107374182400 )) ||
+    die "output-max-bytes may not exceed the canonical 107374182400-byte cap"
   require_positive_integer loader-timeout-seconds "$LOADER_TIMEOUT_SECONDS"
   require_positive_integer trial-timeout-seconds "$TRIAL_TIMEOUT_SECONDS"
   require_positive_integer compose-timeout-seconds "$COMPOSE_TIMEOUT_SECONDS"
@@ -229,6 +267,8 @@ verify_canonical_container() {
   [[ ${CONTAINER_WORKSPACE_FOLDER:-} == "$WORKSPACE_ROOT" ]] ||
     die "run inside db-monitoring-dev (workspace marker is absent or different)"
   command -v docker >/dev/null 2>&1 || die "docker is unavailable"
+  command -v du >/dev/null 2>&1 || die "du is unavailable"
+  command -v pgrep >/dev/null 2>&1 || die "pgrep is unavailable"
   local expected_id actual_hostname
   expected_id=$(docker inspect --format '{{.Id}}' db-monitoring-dev 2>/dev/null) ||
     die "cannot inspect canonical container db-monitoring-dev"
@@ -328,12 +368,92 @@ capture_stack_artifacts() {
   local trial_dir=$1
   (( STACK_MAY_BE_RUNNING == 1 )) || return 0
   compose ps --all --format json >"$trial_dir/compose_ps.json" 2>"$trial_dir/compose_ps.error" || true
-  compose logs --no-color --timestamps >"$trial_dir/compose.log" 2>&1 || true
+  capture_bounded_stdout "$trial_dir/compose.log" \
+    compose logs --no-color --timestamps 2>"$trial_dir/compose_logs.error" || true
   docker ps --no-trunc --format json >"$trial_dir/docker_ps_all_after.jsonl" 2>/dev/null || true
   docker stats --no-stream --format json >"$trial_dir/docker_stats_all_after.jsonl" 2>/dev/null || true
   docker inspect --format '{{json .}}' \
     cdc-mariadb cdc-redis cdc-debezium >"$trial_dir/container_inspect.jsonl" 2>/dev/null || true
   ACTIVE_TRIAL_CAPTURED=1
+}
+
+
+output_size_bytes() {
+  du --summarize --bytes -- "$OUTPUT_ROOT" | awk '{print $1}'
+}
+
+
+assert_output_size_within_limit() {
+  local size
+  size=$(output_size_bytes)
+  [[ $size =~ ^[0-9]+$ ]] || die "cannot determine performance artifact size"
+  if (( size > OUTPUT_MAX_BYTES )); then
+    die "performance artifacts exceed the configured ${OUTPUT_MAX_BYTES}-byte limit (found $size)"
+  fi
+}
+
+
+remaining_output_bytes() {
+  local size
+  size=$(output_size_bytes)
+  [[ $size =~ ^[0-9]+$ ]] || die "cannot determine performance artifact size"
+  (( size < OUTPUT_MAX_BYTES )) ||
+    die "performance artifact budget is exhausted at $size bytes"
+  printf '%s\n' "$(( OUTPUT_MAX_BYTES - size ))"
+}
+
+
+stop_output_guard() {
+  if [[ -n $OUTPUT_GUARD_PID ]]; then
+    kill "$OUTPUT_GUARD_PID" >/dev/null 2>&1 || true
+    wait "$OUTPUT_GUARD_PID" >/dev/null 2>&1 || true
+    OUTPUT_GUARD_PID=
+  fi
+}
+
+
+terminate_output_descendants() {
+  local parent_pid=$1
+  local excluded_pid=$2
+  local child_pid
+  local children=()
+  mapfile -t children < <(pgrep --parent "$parent_pid" 2>/dev/null || true)
+  for child_pid in "${children[@]}"; do
+    [[ $child_pid == "$excluded_pid" ]] && continue
+    # Freeze each parent before enumerating its children so the owned process
+    # tree cannot grow while the guard tears it down.
+    kill -STOP "$child_pid" >/dev/null 2>&1 || continue
+    terminate_output_descendants "$child_pid" "$excluded_pid"
+    kill -KILL "$child_pid" >/dev/null 2>&1 || true
+  done
+}
+
+
+start_output_guard() {
+  local owner_pid=$BASHPID
+  OUTPUT_LIMIT_SENTINEL="$OUTPUT_ROOT/.output-size-limit-exceeded"
+  (
+    while true; do
+      local_size=$(du --summarize --bytes -- "$OUTPUT_ROOT" 2>/dev/null | awk '{print $1}')
+      if [[ $local_size =~ ^[0-9]+$ ]] && (( local_size > OUTPUT_MAX_BYTES )); then
+        printf 'limit_bytes=%s observed_bytes=%s\n' \
+          "$OUTPUT_MAX_BYTES" "$local_size" >"$OUTPUT_LIMIT_SENTINEL"
+        # Freeze the coordinator, kill its generated-work descendants while
+        # excluding this guard, then resume it only to deliver its normal TERM
+        # cleanup path.
+        kill -STOP "$owner_pid" >/dev/null 2>&1 || true
+        terminate_output_descendants "$owner_pid" "$BASHPID"
+        # Queue TERM while the coordinator is still stopped, then resume it;
+        # this prevents a killed foreground child from reaching set -e cleanup
+        # before the coordinator has received the guard's termination signal.
+        kill -TERM "$owner_pid" >/dev/null 2>&1 || true
+        kill -CONT "$owner_pid" >/dev/null 2>&1 || true
+        exit 1
+      fi
+      sleep 1
+    done
+  ) &
+  OUTPUT_GUARD_PID=$!
 }
 
 
@@ -353,9 +473,11 @@ reset_stack() {
 
 cleanup() {
   local status=$?
-  if [[ -n $ACTIVE_TRIAL_DIR && -d $ACTIVE_TRIAL_DIR && $ACTIVE_TRIAL_CAPTURED == 0 ]]; then
+  if [[ -z $OUTPUT_LIMIT_SENTINEL || ! -e $OUTPUT_LIMIT_SENTINEL ]] &&
+      [[ -n $ACTIVE_TRIAL_DIR && -d $ACTIVE_TRIAL_DIR && $ACTIVE_TRIAL_CAPTURED == 0 ]]; then
     capture_stack_artifacts "$ACTIVE_TRIAL_DIR" || true
   fi
+  stop_output_guard
   cleanup_stack
   return "$status"
 }
@@ -391,6 +513,27 @@ write_system_provenance() {
   docker compose version >"$directory/docker-compose-version.txt" 2>&1
   docker info >"$directory/docker-info.txt" 2>&1
   compose config --images >"$directory/compose-images.txt"
+  compose config >"$directory/compose-config.yml"
+  python3 - "$directory/performance-capacities.json" \
+    "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "$OUTPUT_MAX_BYTES" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "redis_maxmemory_bytes": int(sys.argv[2]),
+            "monitor_max_retained_identity_bytes": int(sys.argv[3]),
+            "output_max_bytes": int(sys.argv[4]),
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n",
+    encoding="utf-8",
+)
+PY
   for spec in \
     "baseline:$BASELINE_ROOT" \
     "current_benchbase:$CURRENT_BENCHBASE_ROOT" \
@@ -704,7 +847,8 @@ write_trial_metadata() {
     "$DURATION_SECONDS" "$RANDOM_SEED" "$JAVA_FLAGS_TEXT" \
     "$SI_MONITORING_HEAD" "$CURRENT_BENCHBASE_HEAD" "$BASELINE_HEAD" "$CO_CHECKER_HEAD" \
     "$SI_MONITORING_DIRTY" "$CURRENT_BENCHBASE_DIRTY" "$BASELINE_DIRTY" "$CO_CHECKER_DIRTY" \
-    "$SMOKE" <<'PY'
+    "$SMOKE" "$REPETITIONS" "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "$OUTPUT_MAX_BYTES" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -742,6 +886,10 @@ document = {
     "benchbase_baseline_dirty": values[19] == "1",
     "co_checker_dirty": values[20] == "1",
     "smoke": values[21] == "1",
+    "configured_repetitions": int(values[22]),
+    "redis_maxmemory_bytes": int(values[23]),
+    "monitor_max_retained_identity_bytes": int(values[24]),
+    "output_max_bytes": int(values[25]),
 }
 path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -784,6 +932,32 @@ capture_versions() {
     [[ -n $image ]] || continue
     docker image inspect --format '{{json .}}' "$image" || true
   done <"$trial_dir/compose_images.txt" >"$trial_dir/image_inspect.jsonl"
+}
+
+
+capture_redis_configuration() {
+  local trial_dir=$1
+  blackbox_verify_redis_configuration "$REDIS_MAXMEMORY_BYTES"
+  python3 - "$trial_dir/redis_configuration.json" \
+    "$REDIS_MAXMEMORY_BYTES" "$BLACKBOX_REDIS_EFFECTIVE_MAXMEMORY_BYTES" \
+    "$BLACKBOX_REDIS_EFFECTIVE_MAXMEMORY_POLICY" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "requested_maxmemory_bytes": int(sys.argv[2]),
+            "effective_maxmemory_bytes": int(sys.argv[3]),
+            "maxmemory_policy": sys.argv[4],
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n",
+    encoding="utf-8",
+)
+PY
 }
 
 
@@ -969,6 +1143,8 @@ run_full_stage() {
     "BLACKBOX_EXPECTED_SESSION_IDS=$session_roster" \
     BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
     BLACKBOX_MEASUREMENT_MODE=audited \
+    "BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES=$REDIS_MAXMEMORY_BYTES" \
+    "BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES=$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
     BLACKBOX_REDIS_HOST=host.docker.internal BLACKBOX_REDIS_PORT=6379 \
     "BLACKBOX_LOADER_TIMEOUT_SECONDS=$LOADER_TIMEOUT_SECONDS" \
     "BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=$TRIAL_TIMEOUT_SECONDS" \
@@ -986,6 +1162,8 @@ run_full_stage() {
   BLACKBOX_EXPECTED_SESSION_IDS="$session_roster" \
   BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
   BLACKBOX_MEASUREMENT_MODE=audited \
+  BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES" \
+  BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
   BLACKBOX_REDIS_HOST=host.docker.internal \
   BLACKBOX_REDIS_PORT=6379 \
   BLACKBOX_LOADER_TIMEOUT_SECONDS="$LOADER_TIMEOUT_SECONDS" \
@@ -1008,6 +1186,17 @@ run_full_stage() {
 }
 
 
+capture_bounded_stdout() {
+  local output=$1
+  shift
+  local remaining
+  remaining=$(remaining_output_bytes)
+  "$@" | python3 "$ANALYZER" bounded-copy \
+    --output "$output" --max-bytes "$remaining"
+  assert_output_size_within_limit
+}
+
+
 capture_redis_streams() {
   local stage=$1
   local trial_dir=$2
@@ -1016,12 +1205,13 @@ capture_redis_streams() {
     read_capture_encoding_redis)
       record_command "$trial_dir/commands.txt" redis-cli -h host.docker.internal -p 6379 --json XRANGE \
         "blackbox:measurement:client:$run_id" - +
-      blackbox_redis --json XRANGE "blackbox:measurement:client:$run_id" - + \
-        >"$trial_dir/measurement_stream.json"
+      capture_bounded_stdout "$trial_dir/measurement_stream.json" \
+        blackbox_redis --json XRANGE "blackbox:measurement:client:$run_id" - +
       ;;
     cdc_capture)
       record_command "$trial_dir/commands.txt" redis-cli -h host.docker.internal -p 6379 --json XRANGE cdc - +
-      blackbox_redis --json XRANGE cdc - + >"$trial_dir/cdc_stream.json"
+      capture_bounded_stdout "$trial_dir/cdc_stream.json" \
+        blackbox_redis --json XRANGE cdc - +
       ;;
     assembly_join|assembly_join_check)
       record_command "$trial_dir/commands.txt" redis-cli -h host.docker.internal -p 6379 --json XRANGE cdc - +
@@ -1029,11 +1219,12 @@ capture_redis_streams() {
         "blackbox:client:$run_id" - +
       record_command "$trial_dir/commands.txt" redis-cli -h host.docker.internal -p 6379 --json XRANGE \
         "blackbox:status:$run_id" - +
-      blackbox_redis --json XRANGE cdc - + >"$trial_dir/cdc_stream.json"
-      blackbox_redis --json XRANGE "blackbox:client:$run_id" - + \
-        >"$trial_dir/client_stream.json"
-      blackbox_redis --json XRANGE "blackbox:status:$run_id" - + \
-        >"$trial_dir/status_stream.json"
+      capture_bounded_stdout "$trial_dir/cdc_stream.json" \
+        blackbox_redis --json XRANGE cdc - +
+      capture_bounded_stdout "$trial_dir/client_stream.json" \
+        blackbox_redis --json XRANGE "blackbox:client:$run_id" - +
+      capture_bounded_stdout "$trial_dir/status_stream.json" \
+        blackbox_redis --json XRANGE "blackbox:status:$run_id" - +
       ;;
   esac
   blackbox_redis --raw INFO all >"$trial_dir/redis_info_after.txt" 2>/dev/null || true
@@ -1256,15 +1447,20 @@ run_trial() {
   cp "$BASELINE_CONFIG" "$CURRENT_CONFIG" "$trial_dir/"
 
   log "starting repetition=$repetition position=$position stage=$stage trial_id=$trial_id"
+  assert_output_size_within_limit
   if [[ $stage == assembly_join || $stage == assembly_join_check ]]; then
     STACK_MAY_BE_RUNNING=1
     capture_host_before "$trial_dir"
     run_full_stage "$stage" "$trial_dir"
     run_id=$(tr -d '[:space:]' <"$trial_dir/run_id.txt")
+    capture_redis_configuration "$trial_dir"
   else
     start_direct_stack "$stage"
     capture_host_before "$trial_dir"
     capture_versions "$trial_dir"
+    if [[ $stage == read_capture_encoding_redis ]]; then
+      capture_redis_configuration "$trial_dir"
+    fi
     export BLACKBOX_ACTIVE_RUN_ID=$run_id
     run_loader "$trial_dir"
     capture_bootstrap "$trial_dir"
@@ -1274,6 +1470,7 @@ run_trial() {
 
   refresh_network_after "$trial_dir"
   capture_redis_streams "$stage" "$trial_dir" "$run_id"
+  assert_output_size_within_limit
   analyze_trial "$stage" "$trial_dir" "$run_id"
   capture_stack_artifacts "$trial_dir"
   capture_versions "$trial_dir"
@@ -1282,6 +1479,7 @@ run_trial() {
   uptime >>"$trial_dir/host_after.txt"
   record_command "$trial_dir/commands.txt" compose down --volumes --remove-orphans
   checksum_trial "$trial_dir"
+  assert_output_size_within_limit
   cleanup_stack
   ACTIVE_TRIAL_DIR=
   ACTIVE_TRIAL_CAPTURED=0
@@ -1313,6 +1511,7 @@ run_cdc_trial() {
   log "starting repetition=$repetition position=$position stage=$stage trial_id=$trial_id"
 
   start_direct_stack "$stage"
+  capture_redis_configuration "$trial_dir"
   capture_host_before "$trial_dir"
   capture_versions "$trial_dir"
   export BLACKBOX_ACTIVE_RUN_ID=$run_id
@@ -1332,6 +1531,7 @@ run_cdc_trial() {
 
   refresh_network_after "$trial_dir"
   capture_redis_streams "$stage" "$trial_dir" "$run_id"
+  assert_output_size_within_limit
   analyze_trial "$stage" "$trial_dir" "$run_id"
   capture_stack_artifacts "$trial_dir"
   capture_versions "$trial_dir"
@@ -1340,6 +1540,7 @@ run_cdc_trial() {
   uptime >>"$trial_dir/host_after.txt"
   record_command "$trial_dir/commands.txt" compose down --volumes --remove-orphans
   checksum_trial "$trial_dir"
+  assert_output_size_within_limit
   cleanup_stack
   ACTIVE_TRIAL_DIR=
   ACTIVE_TRIAL_CAPTURED=0
@@ -1386,18 +1587,23 @@ main() {
     print_stage_order
     return 0
   fi
+  export BLACKBOX_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES"
   verify_canonical_container
   verify_inputs
   if (( VERIFY_INPUTS_ONLY == 1 )); then
-    printf 'verified baseline=%s output=%s\n' "$BASELINE_HEAD" "$OUTPUT_ROOT"
+    printf 'verified baseline=%s output=%s redis_maxmemory_bytes=%s monitor_retained_identity_bytes=%s output_max_bytes=%s\n' \
+      "$BASELINE_HEAD" "$OUTPUT_ROOT" "$REDIS_MAXMEMORY_BYTES" \
+      "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" "$OUTPUT_MAX_BYTES"
     return 0
   fi
 
   mkdir -p "$OUTPUT_ROOT"
+  start_output_guard
   write_system_provenance "$OUTPUT_ROOT/provenance"
   generate_configs
   print_stage_order >"$OUTPUT_ROOT/stage_order.csv"
   build_artifacts
+  assert_output_size_within_limit
   # shellcheck source=scripts/blackbox_lifecycle.sh
   . "$ROOT/scripts/blackbox_lifecycle.sh"
   blackbox_acquire_live_stack_lock
@@ -1420,6 +1626,8 @@ main() {
   done
   verify_repositories_unchanged
   finalize_reports
+  assert_output_size_within_limit
+  stop_output_guard
   log "artifacts=$OUTPUT_ROOT"
 }
 

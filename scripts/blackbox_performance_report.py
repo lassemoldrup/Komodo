@@ -576,6 +576,7 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         ("capture_metrics.json", "capture"),
         ("network_metrics.json", "redis_network"),
         ("redis_usage.json", "redis_memory"),
+        ("redis_configuration.json", "redis_configuration"),
         ("bootstrap_manifest.json", "bootstrap"),
         ("analysis_window.json", "analysis_window"),
     ):
@@ -624,6 +625,34 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         flatten("monitor", monitor, monitor_flat)
         row.update(monitor_flat)
         row.update(monitor_aliases(monitor_flat))
+
+    redis_stages = {
+        "read_capture_encoding_redis",
+        "cdc_capture",
+        "assembly_join",
+        "assembly_join_check",
+    }
+    if stage in redis_stages:
+        redis_configuration = load_json(
+            trial_dir / "redis_configuration.json", required=True
+        )
+        require(
+            isinstance(redis_configuration, dict)
+            and redis_configuration.get("requested_maxmemory_bytes")
+            == metadata.get("redis_maxmemory_bytes")
+            and redis_configuration.get("effective_maxmemory_bytes")
+            == metadata.get("redis_maxmemory_bytes")
+            and redis_configuration.get("maxmemory_policy") == "noeviction",
+            "Redis capacity provenance differs from the requested noeviction configuration",
+        )
+    if stage in {"assembly_join", "assembly_join_check"}:
+        require(
+            monitor_flat.get(
+                "monitor_limits_joiner_max_retained_identity_bytes"
+            )
+            == metadata.get("monitor_max_retained_identity_bytes"),
+            "monitor retained-identity limit differs from trial metadata",
+        )
 
     status = parse_status_xrange(load_json(trial_dir / "status_stream.json"))
     row.update(status)
@@ -686,8 +715,16 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
     require(len(digests) == 1, "loaded canonical state digests differ across performance trials")
     repetitions = {int(row["repetition"]) for row in rows}
     require(repetitions, "raw trials have no repetition numbers")
-    expected_repetitions = set(range(1, max(repetitions) + 1))
-    require(repetitions == expected_repetitions, "raw trial repetitions are not dense from one")
+    configured_repetitions = {int(row["configured_repetitions"]) for row in rows}
+    require(
+        len(configured_repetitions) == 1 and next(iter(configured_repetitions)) > 0,
+        "configured repetition count differs across trials or is invalid",
+    )
+    expected_repetitions = set(range(1, next(iter(configured_repetitions)) + 1))
+    require(
+        repetitions == expected_repetitions,
+        "raw trial repetitions differ from the configured roster",
+    )
     for stage in STAGES:
         stage_rows = [row for row in rows if row["stage"] == stage]
         require(
@@ -711,6 +748,10 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
         "warmup_seconds",
         "requested_duration_seconds",
         "random_seed",
+        "configured_repetitions",
+        "redis_maxmemory_bytes",
+        "monitor_max_retained_identity_bytes",
+        "output_max_bytes",
         "isolation",
         "rate",
         "java_flags",
@@ -725,6 +766,25 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
             len({str(row.get(field, "")) for row in rows}) == 1,
             f"trial invariant differs across runs: {field}",
         )
+    random_seed = int(rows[0]["random_seed"])
+    expected_positions = set(range(1, len(STAGES) + 1))
+    for repetition in sorted(expected_repetitions):
+        repetition_rows = [
+            row for row in rows if int(row["repetition"]) == repetition
+        ]
+        positions = {int(row["stage_order_position"]) for row in repetition_rows}
+        require(
+            len(repetition_rows) == len(STAGES) and positions == expected_positions,
+            f"repetition {repetition} stage-order positions are incomplete or duplicated",
+        )
+        offset = (random_seed + repetition - 1) % len(STAGES)
+        for row in repetition_rows:
+            position = int(row["stage_order_position"])
+            expected_stage = STAGES[(offset + position - 1) % len(STAGES)]
+            require(
+                row["stage"] == expected_stage,
+                f"repetition {repetition} stage-order rotation differs at position {position}",
+            )
     smoke = bool(rows[0].get("smoke"))
     if not smoke:
         for field in (

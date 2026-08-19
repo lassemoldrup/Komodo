@@ -526,6 +526,64 @@ class TrialSummaryTest(unittest.TestCase):
         self.assertEqual(summary[0]["median"], 11.0)
         self.assertEqual(summary[1]["median"], 10.0)
 
+    def test_bounded_copy_is_limited_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            accepted = root / "accepted.bin"
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(TOOL),
+                    "bounded-copy",
+                    "--output",
+                    str(accepted),
+                    "--max-bytes",
+                    "4",
+                ],
+                input=b"abcd",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(accepted.read_bytes(), b"abcd")
+
+            rejected = root / "rejected.bin"
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(TOOL),
+                    "bounded-copy",
+                    "--output",
+                    str(rejected),
+                    "--max-bytes",
+                    "4",
+                ],
+                input=b"abcde",
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(rejected.exists())
+
+            existing = root / "existing.bin"
+            existing.write_bytes(b"keep")
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(TOOL),
+                    "bounded-copy",
+                    "--output",
+                    str(existing),
+                    "--max-bytes",
+                    "4",
+                ],
+                input=b"new",
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(existing.read_bytes(), b"keep")
+
 
 if __name__ == "__main__":
     unittest.main()

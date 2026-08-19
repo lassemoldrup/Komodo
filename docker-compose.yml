@@ -25,7 +25,7 @@ services:
       redis-server
       --save ""
       --appendonly no
-      --maxmemory 2gb
+      --maxmemory ${BLACKBOX_REDIS_MAXMEMORY_BYTES:-2147483648}
       --maxmemory-policy noeviction
     ports:
       - "6379:6379"

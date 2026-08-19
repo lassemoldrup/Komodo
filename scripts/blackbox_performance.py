@@ -1133,9 +1133,39 @@ def _add_metric_outputs(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _bounded_copy_command(args: argparse.Namespace) -> None:
+    maximum = _nonnegative_int(args.max_bytes, "bounded copy max bytes")
+    _require(maximum > 0, "bounded copy max bytes must be positive")
+    output = Path(args.output)
+    written = 0
+    created = False
+    try:
+        destination = output.open("xb")
+        created = True
+        with destination:
+            while chunk := sys.stdin.buffer.read(1024 * 1024):
+                if len(chunk) > maximum - written:
+                    raise PerformanceDataError(
+                        f"captured artifact exceeds its remaining {maximum}-byte budget"
+                    )
+                destination.write(chunk)
+                written += len(chunk)
+    except BaseException:
+        if created:
+            output.unlink(missing_ok=True)
+        raise
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    bounded_copy = subparsers.add_parser(
+        "bounded-copy", help="copy stdin to one new artifact within a byte limit"
+    )
+    bounded_copy.add_argument("--output", required=True)
+    bounded_copy.add_argument("--max-bytes", required=True)
+    bounded_copy.set_defaults(handler=_bounded_copy_command)
 
     sample = subparsers.add_parser("sample-resources", help="sample process-tree and container resources")
     sample.add_argument("--process", action="append", default=[], metavar="LABEL:PID")

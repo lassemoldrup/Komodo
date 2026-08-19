@@ -67,6 +67,8 @@ struct Options {
   std::chrono::milliseconds overall_timeout{120000};
   ProcessingMode processing_mode = ProcessingMode::Audited;
   std::optional<std::string> metrics_output;
+  std::size_t max_retained_identity_bytes =
+      blackbox::TransactionJoinerLimits{}.max_retained_identity_bytes;
 };
 
 [[nodiscard]] bool isLowerUuid(const std::string_view value) {
@@ -111,6 +113,19 @@ parseTimeout(const std::string_view value) {
   return std::chrono::milliseconds(result);
 }
 
+[[nodiscard]] std::size_t parsePositiveSize(const std::string_view value,
+                                            const std::string_view label) {
+  std::size_t result = 0;
+  const auto [end, error] =
+      std::from_chars(value.data(), value.data() + value.size(), result);
+  if (error != std::errc{} || end != value.data() + value.size() ||
+      result == 0U) {
+    throw std::invalid_argument(std::string(label) +
+                                " must be a positive decimal byte count");
+  }
+  return result;
+}
+
 [[nodiscard]] Options parseOptions(const int argc, char **argv) {
   Options options;
   for (int index = 1; index < argc; ++index) {
@@ -142,6 +157,9 @@ parseTimeout(const std::string_view value) {
         throw std::invalid_argument("metrics output path is invalid");
       }
       options.metrics_output = value;
+    } else if (argument == "--max-retained-identity-bytes") {
+      options.max_retained_identity_bytes =
+          parsePositiveSize(value, "max retained identity bytes");
     } else {
       throw std::invalid_argument("unknown argument: " + std::string(argument));
     }
@@ -781,6 +799,10 @@ public:
                           elapsedUsageNanoseconds(started_usage_.ru_stime,
                                                   finished_usage.ru_stime)},
                          {"max_rss_kib", finished_usage.ru_maxrss}}},
+        {"limits",
+         Json{{"joiner",
+               Json{{"max_retained_identity_bytes",
+                     options_.max_retained_identity_bytes}}}}},
         {"assembler", assemblerMetricsJson(assembler_metrics_)},
         {"joiner", joinerMetricsJson(joiner_metrics_)},
         {"checker", checkerMetricsJson(joiner_metrics_.checker)},
@@ -1096,6 +1118,8 @@ int run(const Options &options) {
     });
     blackbox::RunControllerConfig controller_config;
     controller_config.processing_mode = options.processing_mode;
+    controller_config.joiner_limits.max_retained_identity_bytes =
+        options.max_retained_identity_bytes;
     controller_storage.emplace(manifest, std::move(controller_config));
     controller_storage->setLastClientStreamId(manifest_evidence.stream_id);
     reader_storage = std::make_unique<BlockingRedisReader>(

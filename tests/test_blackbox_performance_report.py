@@ -91,6 +91,10 @@ class ReportTest(unittest.TestCase):
             "warmup_seconds": 1,
             "requested_duration_seconds": 2,
             "random_seed": 20260818,
+            "configured_repetitions": 1,
+            "redis_maxmemory_bytes": 8589934592,
+            "monitor_max_retained_identity_bytes": 2147483648,
+            "output_max_bytes": 107374182400,
             "isolation": "REPEATABLE_READ",
             "rate": "unlimited",
             "java_flags": "-Xms1g -Xmx1g",
@@ -134,6 +138,22 @@ class ReportTest(unittest.TestCase):
             (trial / "capture_metrics.json").write_text(
                 json.dumps({"worker_summary_count": 1}), encoding="utf-8"
             )
+        if stage in {
+            "read_capture_encoding_redis",
+            "cdc_capture",
+            "assembly_join",
+            "assembly_join_check",
+        }:
+            (trial / "redis_configuration.json").write_text(
+                json.dumps(
+                    {
+                        "requested_maxmemory_bytes": 8589934592,
+                        "effective_maxmemory_bytes": 8589934592,
+                        "maxmemory_policy": "noeviction",
+                    }
+                ),
+                encoding="utf-8",
+            )
         if stage in {"assembly_join", "assembly_join_check"}:
             audited = stage == "assembly_join_check"
             (trial / "cdc_stream.json").write_text(
@@ -148,6 +168,9 @@ class ReportTest(unittest.TestCase):
                 "completion_status": "complete",
                 "evidence_reconciled": True,
                 "finished_at_utc": "1970-01-01T00:00:03.040Z",
+                "limits": {
+                    "joiner": {"max_retained_identity_bytes": 2147483648}
+                },
                 "joiner": {
                     "missing_client_head_wait_current_nanoseconds": 2_000_000,
                     "missing_client_head_wait_max_nanoseconds": 5_000_000,
@@ -250,6 +273,59 @@ class ReportTest(unittest.TestCase):
             monitor_path.write_text(json.dumps(monitor), encoding="utf-8")
             with self.assertRaisesRegex(report.ReportError, "forbidden verdict"):
                 report.trial_row(trial)
+
+    def test_trial_rejects_capacity_provenance_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            self.write_trial(root, "assembly_join", 1)
+            trial = root / "trials" / "repetition-01" / "01-assembly_join"
+            configuration_path = trial / "redis_configuration.json"
+            configuration = json.loads(
+                configuration_path.read_text(encoding="utf-8")
+            )
+            configuration["effective_maxmemory_bytes"] = 2147483648
+            configuration_path.write_text(
+                json.dumps(configuration), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(report.ReportError, "Redis capacity"):
+                report.trial_row(trial)
+
+    def test_aggregate_rejects_truncated_configured_repetitions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            for position, stage in enumerate(report.STAGES, start=1):
+                self.write_trial(root, stage, position)
+                metadata_path = (
+                    root
+                    / "trials"
+                    / "repetition-01"
+                    / f"{position:02d}-{stage}"
+                    / "metadata.json"
+                )
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata["smoke"] = False
+                metadata["configured_repetitions"] = 3
+                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "configured roster"):
+                report.write_raw_trials(root, root / "raw_trials.csv")
+
+    def test_aggregate_rejects_stage_order_rotation_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            for position, stage in enumerate(report.STAGES, start=1):
+                self.write_trial(root, stage, position)
+            metadata_path = (
+                root
+                / "trials"
+                / "repetition-01"
+                / "01-benchbase_uninstrumented"
+                / "metadata.json"
+            )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["stage_order_position"] = 2
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "positions"):
+                report.write_raw_trials(root, root / "raw_trials.csv")
 
     def test_checksum_writer_streams_large_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

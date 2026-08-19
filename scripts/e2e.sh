@@ -22,6 +22,8 @@ BLACKBOX_PROCESSING_MODE=${BLACKBOX_PROCESSING_MODE:-audited}
 BLACKBOX_MONITOR_METRICS_PATH=${BLACKBOX_MONITOR_METRICS_PATH:-}
 BLACKBOX_RUN_ID_PATH=${BLACKBOX_RUN_ID_PATH:-}
 BLACKBOX_BOOTSTRAP_MANIFEST_PATH=${BLACKBOX_BOOTSTRAP_MANIFEST_PATH:-}
+BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES=${BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES:-}
+BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES=${BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES:-}
 BLACKBOX_MONITOR_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_TIMEOUT_SECONDS:-$((
   BLACKBOX_LOADER_TIMEOUT_SECONDS + BLACKBOX_WORKLOAD_TIMEOUT_SECONDS +
     2 * (BLACKBOX_TERMINATION_GRACE_SECONDS +
@@ -92,6 +94,16 @@ require_configuration() {
   [[ $BLACKBOX_TERMINATION_GRACE_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_COORDINATOR_MARGIN_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_MONITOR_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
+  if [[ -n $BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES &&
+        ! $BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES =~ ^[1-9][0-9]*$ ]]; then
+    blackbox_die \
+      "BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES must be a positive decimal byte count"
+  fi
+  if [[ -n $BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES &&
+        ! $BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES =~ ^[1-9][0-9]*$ ]]; then
+    blackbox_die \
+      "BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES must be a positive decimal byte count"
+  fi
 
   case "$BLACKBOX_PROCESSING_MODE" in
     audited|join-only) ;;
@@ -137,6 +149,11 @@ require_configuration() {
   fi
   if [[ -n $BLACKBOX_MONITOR_METRICS_PATH ]]; then
     monitor_measurement_arguments+=(--metrics-output "$BLACKBOX_MONITOR_METRICS_PATH")
+  fi
+  if [[ -n $BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES ]]; then
+    monitor_measurement_arguments+=(
+      --max-retained-identity-bytes "$BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES"
+    )
   fi
 
   if [[ -z ${BLACKBOX_MONITOR_COMMAND:-} ]]; then
@@ -254,6 +271,9 @@ start_fresh_database_and_schema() {
   wait_for_healthy_container cdc-redis
   wait_for_healthy_container cdc-mariadb
   verify_fresh_schema
+  if [[ -n $BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES ]]; then
+    blackbox_verify_redis_configuration "$BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES"
+  fi
 }
 
 

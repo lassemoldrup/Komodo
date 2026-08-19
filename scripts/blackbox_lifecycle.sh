@@ -91,6 +91,50 @@ blackbox_redis() {
 }
 
 
+blackbox_redis_config_value() {
+  local setting=$1
+  local reply
+  reply=$(blackbox_redis --raw CONFIG GET "$setting") || {
+    blackbox_die "cannot read Redis configuration setting: $setting"
+    return 1
+  }
+  local lines=()
+  mapfile -t lines <<<"$reply"
+  if (( ${#lines[@]} != 2 )) || [[ ${lines[0]} != "$setting" || -z ${lines[1]} ]]; then
+    blackbox_die "Redis returned malformed CONFIG GET output for: $setting"
+    return 1
+  fi
+  printf '%s\n' "${lines[1]}"
+}
+
+
+blackbox_verify_redis_configuration() {
+  local expected_maxmemory_bytes=$1
+  [[ $expected_maxmemory_bytes =~ ^[1-9][0-9]*$ ]] || {
+    blackbox_die "expected Redis maxmemory must be a positive decimal byte count"
+    return 1
+  }
+  local actual_maxmemory_bytes policy
+  actual_maxmemory_bytes=$(blackbox_redis_config_value maxmemory) || return 1
+  policy=$(blackbox_redis_config_value maxmemory-policy) || return 1
+  [[ $actual_maxmemory_bytes =~ ^[1-9][0-9]*$ ]] || {
+    blackbox_die "Redis maxmemory is not a positive decimal byte count"
+    return 1
+  }
+  if [[ $actual_maxmemory_bytes != "$expected_maxmemory_bytes" ]]; then
+    blackbox_die \
+      "Redis maxmemory differs from the requested performance capacity: expected $expected_maxmemory_bytes, found $actual_maxmemory_bytes"
+    return 1
+  fi
+  if [[ $policy != noeviction ]]; then
+    blackbox_die "Redis maxmemory-policy must be noeviction, found: $policy"
+    return 1
+  fi
+  BLACKBOX_REDIS_EFFECTIVE_MAXMEMORY_BYTES=$actual_maxmemory_bytes
+  BLACKBOX_REDIS_EFFECTIVE_MAXMEMORY_POLICY=$policy
+}
+
+
 blackbox_database() {
   "$BLACKBOX_MARIADB_CLI" \
     --skip-ssl \

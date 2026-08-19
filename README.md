@@ -289,6 +289,22 @@ runs require clean current BenchBase, monitor, and checker worktrees; `--smoke`
 is the explicit exception used to test uncommitted harness changes. The runner
 also requires that its own process is inside `db-monitoring-dev`.
 
+The performance runner explicitly starts Redis with an 8 GiB no-eviction limit
+and gives the monitor 2 GiB for retained join identities; ordinary Compose and
+monitor invocations keep their 2 GiB and 512 MiB defaults. Override the measured
+capacities with `--redis-maxmemory-bytes` and
+`--monitor-retained-identity-bytes`. Each Redis-using trial verifies Redis's
+effective `maxmemory` and policy before accepting the measurement. Trial
+metadata records both requested capacities, `redis_configuration.json` records
+the effective Redis settings, and full-stage monitor metrics record the
+effective retained-identity limit.
+
+Performance output is restricted to `/media/newhd/yifan/db-monitoring-builds`
+and defaults to a 107374182400-byte (100 GiB) run budget. The coordinator checks
+the aggregate at stage boundaries, supervises it during the run, and streams
+large Redis captures through a bounded writer. `--output-max-bytes` can lower
+the budget but should not be raised for the canonical run.
+
 Throughput, request latency, the authoritative actual elapsed time, and the
 measured epoch window come from BenchBase's raw CSV and summary JSON. Redis
 logical bytes count UTF-8 stream field and value bytes; per-stream allocation is

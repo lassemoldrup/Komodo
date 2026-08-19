@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -685,6 +686,18 @@ void testCdcAndClientEvidenceFailures() {
 }
 
 void testBoundsAreCountedWithoutDroppingEvidence() {
+  BLACKBOX_CHECK(TransactionJoinerLimits{}.max_retained_identity_bytes ==
+                 512U * 1024U * 1024U);
+  auto invalid_limits = TransactionJoinerLimits{};
+  invalid_limits.max_retained_identity_bytes = 0U;
+  bool rejected_zero_identity_capacity = false;
+  try {
+    TransactionJoiner invalid(config(invalid_limits));
+  } catch (const std::invalid_argument &) {
+    rejected_zero_identity_capacity = true;
+  }
+  BLACKBOX_CHECK(rejected_zero_identity_capacity);
+
   TransactionJoiner baseline(config());
   baseline.acceptClientPayload(clientPayload(session_one, 1U, 1U, 1U));
   const auto exact_client_bytes = baseline.metrics().pending_client_bytes;
