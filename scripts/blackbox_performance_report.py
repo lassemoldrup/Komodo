@@ -647,6 +647,11 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         )
     if stage in {"assembly_join", "assembly_join_check"}:
         require(
+            monitor_flat.get("monitor_limits_joiner_max_pending_client_bytes")
+            == metadata.get("monitor_max_pending_client_bytes"),
+            "monitor pending-client limit differs from trial metadata",
+        )
+        require(
             monitor_flat.get(
                 "monitor_limits_joiner_max_retained_identity_bytes"
             )
@@ -750,6 +755,7 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
         "random_seed",
         "configured_repetitions",
         "redis_maxmemory_bytes",
+        "monitor_max_pending_client_bytes",
         "monitor_max_retained_identity_bytes",
         "output_max_bytes",
         "isolation",

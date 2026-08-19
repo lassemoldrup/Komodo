@@ -290,14 +290,15 @@ is the explicit exception used to test uncommitted harness changes. The runner
 also requires that its own process is inside `db-monitoring-dev`.
 
 The performance runner explicitly starts Redis with an 8 GiB no-eviction limit
-and gives the monitor 2 GiB for retained join identities; ordinary Compose and
-monitor invocations keep their 2 GiB and 512 MiB defaults. Override the measured
-capacities with `--redis-maxmemory-bytes` and
+and gives the monitor 1 GiB for pending client evidence and 2 GiB for retained
+join identities. Ordinary Compose and monitor invocations keep their 2 GiB,
+256 MiB, and 512 MiB defaults, respectively. Override the measured capacities
+with `--redis-maxmemory-bytes`, `--monitor-pending-client-bytes`, and
 `--monitor-retained-identity-bytes`. Each Redis-using trial verifies Redis's
 effective `maxmemory` and policy before accepting the measurement. Trial
-metadata records both requested capacities, `redis_configuration.json` records
-the effective Redis settings, and full-stage monitor metrics record the
-effective retained-identity limit.
+metadata records all requested capacities, `redis_configuration.json` records
+the effective Redis settings, and full-stage monitor metrics record both
+effective joiner limits.
 
 Performance output is restricted to `/media/newhd/yifan/db-monitoring-builds`
 and defaults to a 107374182400-byte (100 GiB) run budget. The coordinator checks

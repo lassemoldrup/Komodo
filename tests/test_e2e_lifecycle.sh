@@ -222,17 +222,20 @@ set -euo pipefail
 trap 'echo "monitor:stop" >>"$EVENT_LOG"; exit 0' TERM INT
 processing_mode=audited
 metrics_output=
+pending_client_bytes=268435456
 retained_identity_bytes=536870912
 while (( $# > 0 )); do
   case "$1" in
     --processing-mode) processing_mode=$2; shift 2 ;;
     --metrics-output) metrics_output=$2; shift 2 ;;
+    --max-pending-client-bytes) pending_client_bytes=$2; shift 2 ;;
     --max-retained-identity-bytes) retained_identity_bytes=$2; shift 2 ;;
     *) echo "unexpected monitor argument: $1" >&2; exit 2 ;;
   esac
 done
 echo 'monitor:start' >>"$EVENT_LOG"
 echo "monitor:mode:$processing_mode" >>"$EVENT_LOG"
+echo "monitor:pending-client-bytes:$pending_client_bytes" >>"$EVENT_LOG"
 echo "monitor:retained-identity-bytes:$retained_identity_bytes" >>"$EVENT_LOG"
 while ! grep -q '^fence:END_FENCE$' "$EVENT_LOG"; do
   sleep 0.05
@@ -250,12 +253,12 @@ if [[ $processing_mode == join-only ]]; then
     exit_status=1
   fi
   python3 - "$metrics_output" "$completion_status" "$completed" "$reconciled" \
-    "$retained_identity_bytes" <<'PY'
+    "$pending_client_bytes" "$retained_identity_bytes" <<'PY'
 import json
 import os
 import sys
 
-path, completion_status, completed, reconciled, retained_identity_bytes = sys.argv[1:]
+path, completion_status, completed, reconciled, pending_client_bytes, retained_identity_bytes = sys.argv[1:]
 completed = completed == "true"
 reconciled = reconciled == "true"
 measurement = {
@@ -268,7 +271,10 @@ measurement = {
     "started_at_utc": "2026-08-18T00:00:00.000Z",
     "finished_at_utc": "2026-08-18T00:00:01.000Z",
     "monitor_wall_time_nanoseconds": 1_000_000_000,
-    "limits": {"joiner": {"max_retained_identity_bytes": int(retained_identity_bytes)}},
+    "limits": {"joiner": {
+        "max_pending_client_bytes": int(pending_client_bytes),
+        "max_retained_identity_bytes": int(retained_identity_bytes),
+    }},
     "process": {"user_cpu_nanoseconds": 1, "system_cpu_nanoseconds": 1, "max_rss_kib": 1},
     "assembler": {"completed_transactions": 3},
     "joiner": {"released_phase_anchor_transactions": 1},
@@ -300,12 +306,12 @@ if [[ -n $metrics_output ]]; then
     exit_status=4
   fi
   python3 - "$metrics_output" "$completion_status" "$completed" "$reconciled" \
-    "$outcome" "$retained_identity_bytes" <<'PY'
+    "$outcome" "$pending_client_bytes" "$retained_identity_bytes" <<'PY'
 import json
 import os
 import sys
 
-path, completion_status, completed, reconciled, outcome, retained_identity_bytes = sys.argv[1:]
+path, completion_status, completed, reconciled, outcome, pending_client_bytes, retained_identity_bytes = sys.argv[1:]
 completed = completed == "true"
 reconciled = reconciled == "true"
 measurement = {
@@ -319,7 +325,10 @@ measurement = {
     "started_at_utc": "2026-08-18T00:00:00.000Z",
     "finished_at_utc": "2026-08-18T00:00:01.000Z",
     "monitor_wall_time_nanoseconds": 1_000_000_000,
-    "limits": {"joiner": {"max_retained_identity_bytes": int(retained_identity_bytes)}},
+    "limits": {"joiner": {
+        "max_pending_client_bytes": int(pending_client_bytes),
+        "max_retained_identity_bytes": int(retained_identity_bytes),
+    }},
     "process": {"user_cpu_nanoseconds": 1, "system_cpu_nanoseconds": 1, "max_rss_kib": 1},
     "assembler": {"completed_transactions": 3},
     "joiner": {"released_phase_anchor_transactions": 1},
@@ -381,6 +390,7 @@ run_case() {
   local processing_mode=${9:-audited}
   local capture_metrics=${10:-0}
   local retained_identity_bytes=${11:-}
+  local pending_client_bytes=${12:-}
   local case_root="$TEST_ROOT/$name"
   mkdir -p "$case_root"
   write_test_programs "$case_root"
@@ -423,6 +433,7 @@ run_case() {
       BLACKBOX_MONITOR_COMMAND="$case_root/bin/monitor" \
       BLACKBOX_PROCESSING_MODE="$processing_mode" \
       BLACKBOX_MONITOR_METRICS_PATH="$metrics_path" \
+      BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$pending_client_bytes" \
       BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$retained_identity_bytes" \
       BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="${EXPECTED_REDIS_MAXMEMORY_BYTES:-}" \
       BLACKBOX_RUN_ID_PATH="$run_id_path" \
@@ -506,12 +517,17 @@ if grep -Eq 'PASS|VIOLATION|INVALID' "$CASE_ROOT/stdout" "$CASE_ROOT/stderr"; th
 fi
 
 export EXPECTED_REDIS_MAXMEMORY_BYTES=8589934592
-run_case capacity_override 0 0 0 0 0 0 '' join-only 0 2147483648
+run_case capacity_override 0 0 0 0 0 0 '' join-only 0 2147483648 1073741824
 unset EXPECTED_REDIS_MAXMEMORY_BYTES
 [[ $CASE_STATUS == 0 ]] ||
   fail "capacity override lifecycle exited $CASE_STATUS: $(cat "$CASE_ROOT/stderr")"
+grep -q '^monitor:pending-client-bytes:1073741824$' "$CASE_LOG" ||
+  fail 'coordinator did not pass the pending-client byte override'
 grep -q '^monitor:retained-identity-bytes:2147483648$' "$CASE_LOG" ||
   fail 'coordinator did not pass the retained-identity byte override'
+[[ $(jq -r '.limits.joiner.max_pending_client_bytes' \
+  "$CASE_ROOT/monitor-metrics.json") == 1073741824 ]] ||
+  fail 'pending-client capacity override is absent from monitor provenance'
 [[ $(jq -r '.limits.joiner.max_retained_identity_bytes' \
   "$CASE_ROOT/monitor-metrics.json") == 2147483648 ]] ||
   fail 'capacity override is absent from monitor provenance'

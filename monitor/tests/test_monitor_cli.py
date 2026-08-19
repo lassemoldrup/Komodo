@@ -408,28 +408,33 @@ def check_join_only_early_failure_artifact(executable):
         assert set(("assembler", "joiner", "checker", "process")) <= set(
             measurement
         )
-        assert measurement["limits"]["joiner"]["max_retained_identity_bytes"] == 536870912
+        assert (
+            measurement["limits"]["joiner"]["max_pending_client_bytes"]
+            == 268435456
+        )
+        assert (
+            measurement["limits"]["joiner"]["max_retained_identity_bytes"]
+            == 536870912
+        )
         assert_no_audited_result(measurement)
         assert "outcome=INVALID" not in output(result)
     print("join-only early failure: failed measurement written without verdict")
 
 
-def check_retained_identity_limit_option(executable):
-    for invalid in ("0", "18446744073709551616"):
-        result = subprocess.run(
-            monitor_command(
-                executable,
-                1,
-                1000,
-                ["--max-retained-identity-bytes", invalid],
-            ),
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            check=False,
-        )
-        assert result.returncode == 1, result
-        assert "must be a positive decimal byte count" in output(result), output(result)
+def check_joiner_byte_limit_options(executable):
+    for option in ("--max-pending-client-bytes", "--max-retained-identity-bytes"):
+        for invalid in ("0", "18446744073709551616"):
+            result = subprocess.run(
+                monitor_command(executable, 1, 1000, [option, invalid]),
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+            assert result.returncode == 1, result
+            assert "must be a positive decimal byte count" in output(result), output(
+                result
+            )
 
     def handler(_connection_id, command):
         assert command[0] == b"EVAL"
@@ -447,6 +452,8 @@ def check_retained_identity_limit_option(executable):
                     "join-only",
                     "--metrics-output",
                     str(metrics_path),
+                    "--max-pending-client-bytes",
+                    "1073741824",
                     "--max-retained-identity-bytes",
                     "2147483648",
                 ],
@@ -454,11 +461,15 @@ def check_retained_identity_limit_option(executable):
             assert result.returncode == 1, result
         measurement = json.loads(metrics_path.read_text(encoding="utf-8"))
         assert (
+            measurement["limits"]["joiner"]["max_pending_client_bytes"]
+            == 1073741824
+        )
+        assert (
             measurement["limits"]["joiner"]["max_retained_identity_bytes"]
             == 2147483648
         )
         assert_no_audited_result(measurement)
-    print("retained identity capacity: default, override, zero, and overflow validated")
+    print("joiner byte capacities: defaults, overrides, zero, and overflow validated")
 
 
 def main():
@@ -472,7 +483,7 @@ def main():
     check_status_timeout(args.monitor)
     check_join_only_requires_metrics(args.monitor)
     check_join_only_early_failure_artifact(args.monitor)
-    check_retained_identity_limit_option(args.monitor)
+    check_joiner_byte_limit_options(args.monitor)
 
 
 if __name__ == "__main__":

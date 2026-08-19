@@ -36,6 +36,7 @@ COOLDOWN_SECONDS=${BLACKBOX_PERFORMANCE_COOLDOWN_SECONDS:-2}
 RANDOM_SEED=${BLACKBOX_PERFORMANCE_RANDOM_SEED:-20260818}
 RESOURCE_INTERVAL_SECONDS=${BLACKBOX_PERFORMANCE_RESOURCE_INTERVAL_SECONDS:-1}
 REDIS_MAXMEMORY_BYTES=${BLACKBOX_PERFORMANCE_REDIS_MAXMEMORY_BYTES:-8589934592}
+MONITOR_MAX_PENDING_CLIENT_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_BYTES:-1073741824}
 MONITOR_MAX_RETAINED_IDENTITY_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_RETAINED_IDENTITY_BYTES:-2147483648}
 OUTPUT_MAX_BYTES=${BLACKBOX_PERFORMANCE_OUTPUT_MAX_BYTES:-107374182400}
 COMPOSE_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_COMPOSE_TIMEOUT_SECONDS:-300}
@@ -84,6 +85,8 @@ Options:
   --cooldown-seconds N       Cooldown after a trial (default: 2).
   --seed N                   Fixed BenchBase/order seed (default: 20260818).
   --redis-maxmemory-bytes N  Redis noeviction capacity (default: 8589934592).
+  --monitor-pending-client-bytes N
+                             Joiner pending-client capacity (default: 1073741824).
   --monitor-retained-identity-bytes N
                              Joiner identity capacity (default: 2147483648).
   --output-max-bytes N       Artifact budget (default: 107374182400).
@@ -180,6 +183,10 @@ parse_arguments() {
         REDIS_MAXMEMORY_BYTES=${2:?missing --redis-maxmemory-bytes value}
         shift 2
         ;;
+      --monitor-pending-client-bytes)
+        MONITOR_MAX_PENDING_CLIENT_BYTES=${2:?missing --monitor-pending-client-bytes value}
+        shift 2
+        ;;
       --monitor-retained-identity-bytes)
         MONITOR_MAX_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-retained-identity-bytes value}
         shift 2
@@ -232,6 +239,8 @@ parse_arguments() {
   require_unsigned_integer cooldown-seconds "$COOLDOWN_SECONDS"
   require_unsigned_integer seed "$RANDOM_SEED"
   require_capacity_bytes redis-maxmemory-bytes "$REDIS_MAXMEMORY_BYTES"
+  require_capacity_bytes monitor-pending-client-bytes \
+    "$MONITOR_MAX_PENDING_CLIENT_BYTES"
   require_capacity_bytes monitor-retained-identity-bytes \
     "$MONITOR_MAX_RETAINED_IDENTITY_BYTES"
   require_capacity_bytes output-max-bytes "$OUTPUT_MAX_BYTES"
@@ -515,7 +524,8 @@ write_system_provenance() {
   compose config --images >"$directory/compose-images.txt"
   compose config >"$directory/compose-config.yml"
   python3 - "$directory/performance-capacities.json" \
-    "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
+    "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
     "$OUTPUT_MAX_BYTES" <<'PY'
 import json
 import sys
@@ -525,8 +535,9 @@ Path(sys.argv[1]).write_text(
     json.dumps(
         {
             "redis_maxmemory_bytes": int(sys.argv[2]),
-            "monitor_max_retained_identity_bytes": int(sys.argv[3]),
-            "output_max_bytes": int(sys.argv[4]),
+            "monitor_max_pending_client_bytes": int(sys.argv[3]),
+            "monitor_max_retained_identity_bytes": int(sys.argv[4]),
+            "output_max_bytes": int(sys.argv[5]),
         },
         indent=2,
         sort_keys=True,
@@ -847,7 +858,8 @@ write_trial_metadata() {
     "$DURATION_SECONDS" "$RANDOM_SEED" "$JAVA_FLAGS_TEXT" \
     "$SI_MONITORING_HEAD" "$CURRENT_BENCHBASE_HEAD" "$BASELINE_HEAD" "$CO_CHECKER_HEAD" \
     "$SI_MONITORING_DIRTY" "$CURRENT_BENCHBASE_DIRTY" "$BASELINE_DIRTY" "$CO_CHECKER_DIRTY" \
-    "$SMOKE" "$REPETITIONS" "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "$SMOKE" "$REPETITIONS" "$REDIS_MAXMEMORY_BYTES" \
+    "$MONITOR_MAX_PENDING_CLIENT_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
     "$OUTPUT_MAX_BYTES" <<'PY'
 import json
 import sys
@@ -888,8 +900,9 @@ document = {
     "smoke": values[21] == "1",
     "configured_repetitions": int(values[22]),
     "redis_maxmemory_bytes": int(values[23]),
-    "monitor_max_retained_identity_bytes": int(values[24]),
-    "output_max_bytes": int(values[25]),
+    "monitor_max_pending_client_bytes": int(values[24]),
+    "monitor_max_retained_identity_bytes": int(values[25]),
+    "output_max_bytes": int(values[26]),
 }
 path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -1144,6 +1157,7 @@ run_full_stage() {
     BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
     BLACKBOX_MEASUREMENT_MODE=audited \
     "BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES=$REDIS_MAXMEMORY_BYTES" \
+    "BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES=$MONITOR_MAX_PENDING_CLIENT_BYTES" \
     "BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES=$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
     BLACKBOX_REDIS_HOST=host.docker.internal BLACKBOX_REDIS_PORT=6379 \
     "BLACKBOX_LOADER_TIMEOUT_SECONDS=$LOADER_TIMEOUT_SECONDS" \
@@ -1163,6 +1177,7 @@ run_full_stage() {
   BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
   BLACKBOX_MEASUREMENT_MODE=audited \
   BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES" \
+  BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$MONITOR_MAX_PENDING_CLIENT_BYTES" \
   BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
   BLACKBOX_REDIS_HOST=host.docker.internal \
   BLACKBOX_REDIS_PORT=6379 \
@@ -1591,9 +1606,10 @@ main() {
   verify_canonical_container
   verify_inputs
   if (( VERIFY_INPUTS_ONLY == 1 )); then
-    printf 'verified baseline=%s output=%s redis_maxmemory_bytes=%s monitor_retained_identity_bytes=%s output_max_bytes=%s\n' \
+    printf 'verified baseline=%s output=%s redis_maxmemory_bytes=%s monitor_pending_client_bytes=%s monitor_retained_identity_bytes=%s output_max_bytes=%s\n' \
       "$BASELINE_HEAD" "$OUTPUT_ROOT" "$REDIS_MAXMEMORY_BYTES" \
-      "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" "$OUTPUT_MAX_BYTES"
+      "$MONITOR_MAX_PENDING_CLIENT_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+      "$OUTPUT_MAX_BYTES"
     return 0
   fi
 

@@ -686,6 +686,8 @@ void testCdcAndClientEvidenceFailures() {
 }
 
 void testBoundsAreCountedWithoutDroppingEvidence() {
+  BLACKBOX_CHECK(TransactionJoinerLimits{}.max_pending_client_bytes ==
+                 256U * 1024U * 1024U);
   BLACKBOX_CHECK(TransactionJoinerLimits{}.max_retained_identity_bytes ==
                  512U * 1024U * 1024U);
   auto invalid_limits = TransactionJoinerLimits{};

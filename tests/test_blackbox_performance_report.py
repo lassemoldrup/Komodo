@@ -93,6 +93,7 @@ class ReportTest(unittest.TestCase):
             "random_seed": 20260818,
             "configured_repetitions": 1,
             "redis_maxmemory_bytes": 8589934592,
+            "monitor_max_pending_client_bytes": 1073741824,
             "monitor_max_retained_identity_bytes": 2147483648,
             "output_max_bytes": 107374182400,
             "isolation": "REPEATABLE_READ",
@@ -169,7 +170,10 @@ class ReportTest(unittest.TestCase):
                 "evidence_reconciled": True,
                 "finished_at_utc": "1970-01-01T00:00:03.040Z",
                 "limits": {
-                    "joiner": {"max_retained_identity_bytes": 2147483648}
+                    "joiner": {
+                        "max_pending_client_bytes": 1073741824,
+                        "max_retained_identity_bytes": 2147483648,
+                    }
                 },
                 "joiner": {
                     "missing_client_head_wait_current_nanoseconds": 2_000_000,
@@ -289,6 +293,38 @@ class ReportTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(report.ReportError, "Redis capacity"):
                 report.trial_row(trial)
+
+    def test_trial_rejects_pending_client_capacity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            self.write_trial(root, "assembly_join", 1)
+            trial = root / "trials" / "repetition-01" / "01-assembly_join"
+            monitor_path = trial / "monitor_metrics.json"
+            monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
+            monitor["limits"]["joiner"]["max_pending_client_bytes"] = 268435456
+            monitor_path.write_text(json.dumps(monitor), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "pending-client limit"):
+                report.trial_row(trial)
+
+    def test_aggregate_rejects_pending_client_capacity_invariant_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            for position, stage in enumerate(report.STAGES, start=1):
+                self.write_trial(root, stage, position)
+            metadata_path = (
+                root
+                / "trials"
+                / "repetition-01"
+                / "01-benchbase_uninstrumented"
+                / "metadata.json"
+            )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["monitor_max_pending_client_bytes"] = 536870912
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportError, "monitor_max_pending_client_bytes"
+            ):
+                report.write_raw_trials(root, root / "raw_trials.csv")
 
     def test_aggregate_rejects_truncated_configured_repetitions(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

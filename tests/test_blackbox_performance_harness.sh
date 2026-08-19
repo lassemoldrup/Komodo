@@ -79,6 +79,7 @@ verified=$(
     --baseline-root "$BASELINE" --output-root "$TEST_ROOT/empty-output"
 )
 [[ $verified == *'redis_maxmemory_bytes=8589934592'* &&
+      $verified == *'monitor_pending_client_bytes=1073741824'* &&
       $verified == *'monitor_retained_identity_bytes=2147483648'* &&
       $verified == *'output_max_bytes=107374182400'* ]] ||
   fail 'performance capacity defaults were not reported'
@@ -87,15 +88,21 @@ verified=$(
   "$RUNNER" --smoke --verify-inputs-only \
     --baseline-root "$BASELINE" --output-root "$TEST_ROOT/override-output" \
     --redis-maxmemory-bytes 4294967296 \
+    --monitor-pending-client-bytes 805306368 \
     --monitor-retained-identity-bytes 1073741824 \
     --output-max-bytes 53687091200
 )
 [[ $verified == *'redis_maxmemory_bytes=4294967296'* &&
+      $verified == *'monitor_pending_client_bytes=805306368'* &&
       $verified == *'monitor_retained_identity_bytes=1073741824'* &&
       $verified == *'output_max_bytes=53687091200'* ]] ||
   fail 'performance capacity overrides were not reported'
 
-for option in --redis-maxmemory-bytes --monitor-retained-identity-bytes --output-max-bytes; do
+for option in \
+  --redis-maxmemory-bytes \
+  --monitor-pending-client-bytes \
+  --monitor-retained-identity-bytes \
+  --output-max-bytes; do
   if "$RUNNER" --print-stage-order "$option" 0 >/dev/null 2>&1; then
     fail "$option accepted zero"
   fi

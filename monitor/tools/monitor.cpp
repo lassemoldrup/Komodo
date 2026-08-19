@@ -67,6 +67,8 @@ struct Options {
   std::chrono::milliseconds overall_timeout{120000};
   ProcessingMode processing_mode = ProcessingMode::Audited;
   std::optional<std::string> metrics_output;
+  std::size_t max_pending_client_bytes =
+      blackbox::TransactionJoinerLimits{}.max_pending_client_bytes;
   std::size_t max_retained_identity_bytes =
       blackbox::TransactionJoinerLimits{}.max_retained_identity_bytes;
 };
@@ -157,6 +159,9 @@ parseTimeout(const std::string_view value) {
         throw std::invalid_argument("metrics output path is invalid");
       }
       options.metrics_output = value;
+    } else if (argument == "--max-pending-client-bytes") {
+      options.max_pending_client_bytes =
+          parsePositiveSize(value, "max pending client bytes");
     } else if (argument == "--max-retained-identity-bytes") {
       options.max_retained_identity_bytes =
           parsePositiveSize(value, "max retained identity bytes");
@@ -801,7 +806,9 @@ public:
                          {"max_rss_kib", finished_usage.ru_maxrss}}},
         {"limits",
          Json{{"joiner",
-               Json{{"max_retained_identity_bytes",
+               Json{{"max_pending_client_bytes",
+                     options_.max_pending_client_bytes},
+                    {"max_retained_identity_bytes",
                      options_.max_retained_identity_bytes}}}}},
         {"assembler", assemblerMetricsJson(assembler_metrics_)},
         {"joiner", joinerMetricsJson(joiner_metrics_)},
@@ -1118,6 +1125,8 @@ int run(const Options &options) {
     });
     blackbox::RunControllerConfig controller_config;
     controller_config.processing_mode = options.processing_mode;
+    controller_config.joiner_limits.max_pending_client_bytes =
+        options.max_pending_client_bytes;
     controller_config.joiner_limits.max_retained_identity_bytes =
         options.max_retained_identity_bytes;
     controller_storage.emplace(manifest, std::move(controller_config));
