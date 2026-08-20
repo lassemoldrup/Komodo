@@ -610,6 +610,7 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         ("network_metrics.json", "redis_network"),
         ("redis_usage.json", "redis_memory"),
         ("redis_configuration.json", "redis_configuration"),
+        ("loader_validation.json", "loader_validation"),
         ("bootstrap_manifest.json", "bootstrap"),
         ("analysis_window.json", "analysis_window"),
     ):
@@ -633,6 +634,30 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
     )
     row["bootstrap_row_count"] = row_count
     row["bootstrap_canonical_state_digest"] = digest
+
+    loader_validation = load_json(trial_dir / "loader_validation.json", required=True)
+    require(isinstance(loader_validation, dict), "loader validation is not an object")
+    require(loader_validation.get("validated") is True, "loader validation did not pass")
+    require(
+        loader_validation.get("loader_batch_size") == metadata.get("loader_batch_size"),
+        "loader batch size differs between metadata and validation",
+    )
+    expected_counts = [{"table": "benchbase.usertable", "row_count": expected_rows}]
+    declaration_required = stage not in {"benchbase_uninstrumented", "cdc_capture"}
+    require(
+        loader_validation.get("declaration_available") is declaration_required,
+        "loader declaration availability differs from stage contract",
+    )
+    require(
+        loader_validation.get("expected_table_row_counts") == expected_counts
+        and loader_validation.get("observed_table_row_counts") == expected_counts,
+        "loader expected/observed counts differ from YCSB configuration",
+    )
+    require(
+        loader_validation.get("declared_table_row_counts")
+        == (expected_counts if declaration_required else None),
+        "loader declared counts differ from stage contract",
+    )
 
     redis_logical_total = 0
     for filename, label in (
@@ -828,6 +853,7 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
         "scale_factor",
         "field_size",
         "loader_threads",
+        "loader_batch_size",
         "warmup_seconds",
         "requested_duration_seconds",
         "random_seed",

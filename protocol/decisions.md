@@ -257,3 +257,26 @@ order/types/nullability, primary keys, engine, charset, collation, and zero row
 counts against the backend and adapter contracts. TPC-C schema validation is
 available independently, while full TPC-C run admission remains disabled until
 all adapter runtime capabilities are present.
+
+## D12: Loader declarations and independent validation
+
+Before codec-dependent bootstrap scanning, the coordinator validates one exact
+loader-declared count for every selected-adapter table. The loader publishes its
+declaration atomically with create/no-overwrite semantics only after every loader
+thread returns successfully; orchestrator-synthesized counts are not accepted as
+loader evidence. Constant and
+scale-multiplied declarations must match the adapter contract before loading.
+After loader quiescence, independent SQL counts must match every declaration.
+Adapter-owned derived queries then enforce `sum_column` and relationship rules.
+
+For TPC-C, `W` supplies the `warehouses` scale parameter. The independent SQL
+gate enforces all fixed/multiplied counts, requires `order_line` row count to
+equal `SUM(oorder.o_ol_cnt)`, and rejects every order whose `o_ol_cnt` is outside
+5 through 15 or whose `ol_number` values are not exactly contiguous from 1
+through `o_ol_cnt`.
+
+Loader batch size is a positive command-line/configuration value with default
+128. It is passed into generated BenchBase configuration and recorded in loader
+validation/performance artifacts, but it is not an acceptance constant. Typed
+canonical scans and the global bootstrap digest remain gated on the shared row
+codecs and real fixtures.

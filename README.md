@@ -306,6 +306,20 @@ leaves baseline loss unavailable when the baseline was not selected. The two
 monitor stages are intentionally excluded; whole-process monitor throughput
 must be measured separately and belongs in a monitor-specific table.
 
+The generated BenchBase configurations use loader batch size 128 by default.
+Pass `--loader-batch-size N` to select another positive value. The selection is
+written to configuration, trial metadata, and `loader_validation.json`; loader
+acceptance never assumes 128. Every current-loader trial independently compares
+the exact loader-declared table counts with SQL counts before creating the
+codec-dependent bootstrap manifest.
+
+Current BenchBase loaders atomically publish `loader_declaration` JSON only
+after successful completion. Audited/current stages require and preserve that
+file. Historical baseline-only stages cannot emit the new artifact, so their
+reports explicitly record `declaration_available=false` and perform a separate
+configured-expected-count versus independent-SQL check without synthesizing a
+loader declaration.
+
 Captured `redis-cli --json XRANGE` evidence can be restored with its original
 stream IDs through a bounded RESP producer:
 

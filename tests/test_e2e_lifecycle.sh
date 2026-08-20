@@ -109,7 +109,13 @@ METADATA
   *"COUNT(*) FROM session_txn"*)
     cat "$MARKER_ROWS_FILE"
     ;;
-  *"COUNT(*) FROM "*"usertable"*|*"COUNT(*) FROM checker_run_fence"*)
+  *"COUNT(*) FROM "*"benchbase"*"usertable"*)
+    echo "${OBSERVED_LOADER_ROWS:-0}"
+    ;;
+  *"COUNT(*) FROM "*"usertable"*)
+    echo 0
+    ;;
+  *"COUNT(*) FROM checker_run_fence"*)
     echo 0
     ;;
   *"@@innodb_snapshot_isolation"*)
@@ -406,7 +412,34 @@ fi
 if [[ ${HANG_LOADER:-0} == 1 ]]; then
   sleep 30
 fi
-exit "${LOADER_EXIT_STATUS:-0}"
+status=${LOADER_EXIT_STATUS:-0}
+if [[ $status == 0 ]]; then
+  python3 - <<'PY'
+import json
+import os
+
+path = os.environ["BLACKBOX_LOADER_DECLARED_COUNTS_FILE"]
+temporary = path + ".tmp"
+document = {
+    "kind": "loader_declaration",
+    "benchmark": "ycsb",
+    "loader_batch_size": int(os.environ["BLACKBOX_LOADER_BATCH_SIZE"]),
+    "scale_parameter": None,
+    "declared_table_row_counts": [
+        {
+            "table": "benchbase.usertable",
+            "row_count": int(os.environ["LOADER_DECLARED_ROWS"]),
+        }
+    ],
+}
+with open(temporary, "x", encoding="utf-8") as output:
+    json.dump(document, output, separators=(",", ":"))
+    output.write("\n")
+os.link(temporary, path)
+os.unlink(temporary)
+PY
+fi
+exit "$status"
 SCRIPT
 
   cat >"$case_root/bin/workload" <<'SCRIPT'
@@ -443,6 +476,9 @@ run_case() {
   local retained_identity_bytes=${11:-}
   local pending_client_bytes=${12:-}
   local benchmark=${13:-ycsb}
+  local loader_batch_size=${14:-128}
+  local observed_loader_rows=${15:-0}
+  local declared_loader_rows=${16:-0}
   local case_root="$TEST_ROOT/$name"
   mkdir -p "$case_root"
   write_test_programs "$case_root"
@@ -461,6 +497,8 @@ run_case() {
   export HANG_LOADER=$hang_loader
   export CONTAMINATE_MARKER=$contaminate_marker
   export FAIL_FENCE_PHASE=$fail_fence_phase
+  export OBSERVED_LOADER_ROWS=$observed_loader_rows
+  export LOADER_DECLARED_ROWS=$declared_loader_rows
 
   local metrics_path=
   local run_id_path=
@@ -491,6 +529,9 @@ run_case() {
       BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="${EXPECTED_REDIS_MAXMEMORY_BYTES:-}" \
       BLACKBOX_RUN_ID_PATH="$run_id_path" \
       BLACKBOX_BOOTSTRAP_MANIFEST_PATH="$bootstrap_manifest_path" \
+      BLACKBOX_LOADER_VALIDATION_PATH="$case_root/loader-validation.json" \
+      BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$case_root/loader-declaration.json" \
+      BLACKBOX_LOADER_BATCH_SIZE="$loader_batch_size" \
       BLACKBOX_LOADER_COMMAND="$case_root/bin/loader" \
       BLACKBOX_WORKLOAD_COMMAND="$case_root/bin/workload" \
       BLACKBOX_EXPECTED_SESSION_IDS=ycsb/worker/1 \
@@ -531,6 +572,27 @@ final_line=$(line_of 'status:FINAL' "$CASE_LOG")
 (( loader_line < bootstrap_line && bootstrap_line < load_fence_line )) || fail 'bootstrap manifest/fence order is wrong'
 (( load_fence_line < load_ack_line && load_ack_line < workload_line )) || fail 'workload bypassed LOAD acknowledgement'
 (( workload_line < end_fence_line && end_fence_line < final_line )) || fail 'END/final order is wrong'
+[[ $(jq -r '.loader_batch_size' "$CASE_ROOT/loader-validation.json") == 128 ]] ||
+  fail 'loader validation did not record the default batch size'
+[[ $(jq -r '.benchmark' "$CASE_ROOT/loader-declaration.json") == ycsb ]] ||
+  fail 'loader did not publish its declaration'
+[[ $(jq -r '.validated' "$CASE_ROOT/loader-validation.json") == true ]] ||
+  fail 'loader validation report is not validated'
+
+run_case custom_loader_batch 0 0 0 0 0 0 '' audited 0 '' '' ycsb 64
+[[ $CASE_STATUS == 0 ]] || fail 'custom loader batch lifecycle failed'
+[[ $(jq -r '.loader_batch_size' "$CASE_ROOT/loader-validation.json") == 64 ]] ||
+  fail 'loader validation did not record the selected batch size'
+[[ $(jq -r '.loader_batch_size' "$CASE_ROOT/loader-declaration.json") == 64 ]] ||
+  fail 'loader declaration did not record the selected batch size'
+
+run_case loader_count_mismatch 0 0 0 0 0 0 '' audited 0 '' '' ycsb 128 1 0
+[[ $CASE_STATUS == 1 ]] || fail 'loader SQL/declaration mismatch unexpectedly succeeded'
+grep -q '^publish:run_failed$' "$CASE_LOG" ||
+  fail 'loader SQL/declaration mismatch lacked a failure record'
+if grep -q '^fence:LOAD_FINISHED$' "$CASE_LOG"; then
+  fail 'loader SQL/declaration mismatch advanced to LOAD_FINISHED'
+fi
 
 run_case tpcc_runtime_gate 0 0 0 0 0 0 '' audited 0 '' '' tpcc
 [[ $CASE_STATUS != 0 ]] || fail 'incomplete TPC-C runtime unexpectedly entered the lifecycle'
@@ -662,6 +724,8 @@ grep -q '^status:FINAL$' "$CASE_LOG" || fail 'loader failure did not await final
 if grep -q '^fence:LOAD_FINISHED$\|^phase:workload$' "$CASE_LOG"; then
   fail 'loader failure advanced into LOAD_FINISHED/workload'
 fi
+[[ ! -e $CASE_ROOT/loader-declaration.json ]] ||
+  fail 'failed loader published a declaration'
 
 run_case lifecycle_regression 0 0 0 1
 [[ $CASE_STATUS == 1 ]] || fail 'lifecycle regression did not fail operationally'

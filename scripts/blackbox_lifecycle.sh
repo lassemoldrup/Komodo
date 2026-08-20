@@ -16,6 +16,9 @@ BLACKBOX_BACKEND_SOURCE_ID=${BLACKBOX_BACKEND_SOURCE_ID:-mariadb-main}
 BLACKBOX_BACKEND=${BLACKBOX_BACKEND:-mariadb}
 BLACKBOX_BENCHMARK=${BLACKBOX_BENCHMARK:-ycsb}
 BLACKBOX_DECLARED_ISOLATION=${BLACKBOX_DECLARED_ISOLATION:-REPEATABLE_READ}
+BLACKBOX_LOADER_BATCH_SIZE=${BLACKBOX_LOADER_BATCH_SIZE:-128}
+BLACKBOX_LOADER_SCALE_VALUE=${BLACKBOX_LOADER_SCALE_VALUE:-}
+BLACKBOX_LOADER_DECLARED_COUNTS_FILE=${BLACKBOX_LOADER_DECLARED_COUNTS_FILE:-}
 BLACKBOX_STATUS_TIMEOUT_SECONDS=${BLACKBOX_STATUS_TIMEOUT_SECONDS:-120}
 BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS=${BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS:-30}
 
@@ -220,6 +223,98 @@ blackbox_verify_schema_metadata() {
     python3 "$BLACKBOX_RECORD_TOOL" schema-check \
       --backend "$BLACKBOX_BACKEND" \
       --benchmark "$BLACKBOX_BENCHMARK"
+}
+
+
+blackbox_append_loader_arguments() {
+  local array_name=$1
+  local -n target_arguments=$array_name
+  target_arguments+=(
+    --benchmark "$BLACKBOX_BENCHMARK"
+    --loader-declaration-file "$BLACKBOX_LOADER_DECLARED_COUNTS_FILE"
+    --expected-loader-batch-size "$BLACKBOX_LOADER_BATCH_SIZE"
+  )
+  if [[ -n $BLACKBOX_LOADER_SCALE_VALUE ]]; then
+    target_arguments+=(--expected-scale-value "$BLACKBOX_LOADER_SCALE_VALUE")
+  fi
+}
+
+
+blackbox_build_loader_plan() {
+  local arguments=(loader-plan)
+  blackbox_append_loader_arguments arguments || return 1
+  python3 "$BLACKBOX_RECORD_TOOL" "${arguments[@]}"
+}
+
+
+blackbox_capture_loader_observations() {
+  local query_document
+  query_document=$(python3 "$BLACKBOX_RECORD_TOOL" loader-queries \
+    --benchmark "$BLACKBOX_BENCHMARK") || return 1
+  local encoded_queries
+  encoded_queries=$(jq -er '.queries[] | @base64' <<<"$query_document") || {
+    blackbox_die "adapter loader query document is malformed"
+    return 1
+  }
+  local query_specs=()
+  mapfile -t query_specs <<<"$encoded_queries"
+  local encoded_query query observation identity result
+  for encoded_query in "${query_specs[@]}"; do
+    query=$(printf '%s' "$encoded_query" | base64 --decode) || return 1
+    observation=$(jq -er '.observation' <<<"$query") || return 1
+    result=$(blackbox_database_query "$(jq -er '.sql' <<<"$query")") || return 1
+    result=${result//[[:space:]]/}
+    [[ $result =~ ^[0-9]+$ ]] || {
+      blackbox_die "loader validation query did not return a nonnegative integer: $result"
+      return 1
+    }
+    case "$observation" in
+      count)
+        identity=$(jq -er '.table' <<<"$query") || return 1
+        printf 'COUNT\t%s\t%s\n' "$identity" "$result"
+        ;;
+      sum_column)
+        identity=$(jq -er '.table' <<<"$query") || return 1
+        printf 'SUM\t%s\t%s\n' "$identity" "$result"
+        ;;
+      relationship_violations)
+        identity=$(jq -er '.relationship_index' <<<"$query") || return 1
+        printf 'RELATIONSHIP\t%s\t%s\n' "$identity" "$result"
+        ;;
+      *)
+        blackbox_die "unknown adapter loader observation: $observation"
+        return 1
+        ;;
+    esac
+  done
+}
+
+
+blackbox_validate_loader_state() {
+  local arguments=(loader-check)
+  blackbox_append_loader_arguments arguments || return 1
+  blackbox_capture_loader_observations |
+    python3 "$BLACKBOX_RECORD_TOOL" "${arguments[@]}"
+}
+
+
+blackbox_validate_historical_loader_state() {
+  local loader_batch_size=$1
+  shift
+  local arguments=(
+    loader-independent-check
+    --benchmark "$BLACKBOX_BENCHMARK"
+    --loader-batch-size "$loader_batch_size"
+  )
+  if [[ -n $BLACKBOX_LOADER_SCALE_VALUE ]]; then
+    arguments+=(--scale-value "$BLACKBOX_LOADER_SCALE_VALUE")
+  fi
+  local expected_count
+  for expected_count in "$@"; do
+    arguments+=(--expected-count "$expected_count")
+  done
+  blackbox_capture_loader_observations |
+    python3 "$BLACKBOX_RECORD_TOOL" "${arguments[@]}"
 }
 
 

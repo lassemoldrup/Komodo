@@ -22,6 +22,7 @@ BLACKBOX_PROCESSING_MODE=${BLACKBOX_PROCESSING_MODE:-audited}
 BLACKBOX_MONITOR_METRICS_PATH=${BLACKBOX_MONITOR_METRICS_PATH:-}
 BLACKBOX_RUN_ID_PATH=${BLACKBOX_RUN_ID_PATH:-}
 BLACKBOX_BOOTSTRAP_MANIFEST_PATH=${BLACKBOX_BOOTSTRAP_MANIFEST_PATH:-}
+BLACKBOX_LOADER_VALIDATION_PATH=${BLACKBOX_LOADER_VALIDATION_PATH:-}
 BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES=${BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES:-}
 BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES=${BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES:-}
 BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES=${BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES:-}
@@ -99,6 +100,7 @@ require_configuration() {
   : "${BLACKBOX_LOADER_COMMAND:?set BLACKBOX_LOADER_COMMAND to the non-DDL BenchBase loader command}"
   : "${BLACKBOX_WORKLOAD_COMMAND:?set BLACKBOX_WORKLOAD_COMMAND to the BenchBase workload command}"
   : "${BLACKBOX_EXPECTED_SESSION_IDS:?set BLACKBOX_EXPECTED_SESSION_IDS to a comma-separated worker roster}"
+  : "${BLACKBOX_LOADER_DECLARED_COUNTS_FILE:?set BLACKBOX_LOADER_DECLARED_COUNTS_FILE to the loader-owned output path}"
 
   [[ $BLACKBOX_STACK_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_STATUS_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
@@ -108,6 +110,8 @@ require_configuration() {
   [[ $BLACKBOX_TERMINATION_GRACE_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_COORDINATOR_MARGIN_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_MONITOR_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
+  [[ $BLACKBOX_LOADER_BATCH_SIZE =~ ^[1-9][0-9]*$ ]] ||
+    blackbox_die "BLACKBOX_LOADER_BATCH_SIZE must be a positive integer"
   if [[ -n $BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES &&
         ! $BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES =~ ^[1-9][0-9]*$ ]]; then
     blackbox_die \
@@ -134,6 +138,12 @@ require_configuration() {
   if [[ -n $BLACKBOX_MONITOR_METRICS_PATH && -e $BLACKBOX_MONITOR_METRICS_PATH ]]; then
     blackbox_die "monitor metrics path already exists: $BLACKBOX_MONITOR_METRICS_PATH"
   fi
+  if [[ -n $BLACKBOX_LOADER_VALIDATION_PATH && -e $BLACKBOX_LOADER_VALIDATION_PATH ]]; then
+    blackbox_die "loader validation path already exists: $BLACKBOX_LOADER_VALIDATION_PATH"
+  fi
+  if [[ -e $BLACKBOX_LOADER_DECLARED_COUNTS_FILE ]]; then
+    blackbox_die "loader declaration output path already exists: $BLACKBOX_LOADER_DECLARED_COUNTS_FILE"
+  fi
   if [[ -n $BLACKBOX_MONITOR_METRICS_PATH &&
         ( $BLACKBOX_MONITOR_METRICS_PATH == "$BLACKBOX_RUN_ID_PATH" ||
           $BLACKBOX_MONITOR_METRICS_PATH == "$BLACKBOX_BOOTSTRAP_MANIFEST_PATH" ) ]]; then
@@ -142,6 +152,18 @@ require_configuration() {
   if [[ -n $BLACKBOX_RUN_ID_PATH &&
         $BLACKBOX_RUN_ID_PATH == "$BLACKBOX_BOOTSTRAP_MANIFEST_PATH" ]]; then
     blackbox_die "run-id and BootstrapManifest provenance paths must be distinct"
+  fi
+  if [[ -n $BLACKBOX_LOADER_VALIDATION_PATH &&
+        ( $BLACKBOX_LOADER_VALIDATION_PATH == "$BLACKBOX_MONITOR_METRICS_PATH" ||
+          $BLACKBOX_LOADER_VALIDATION_PATH == "$BLACKBOX_RUN_ID_PATH" ||
+          $BLACKBOX_LOADER_VALIDATION_PATH == "$BLACKBOX_BOOTSTRAP_MANIFEST_PATH" ||
+          $BLACKBOX_LOADER_VALIDATION_PATH == "$BLACKBOX_LOADER_DECLARED_COUNTS_FILE" ) ]]; then
+    blackbox_die "loader validation and other provenance paths must be distinct"
+  fi
+  if [[ $BLACKBOX_LOADER_DECLARED_COUNTS_FILE == "$BLACKBOX_MONITOR_METRICS_PATH" ||
+        $BLACKBOX_LOADER_DECLARED_COUNTS_FILE == "$BLACKBOX_RUN_ID_PATH" ||
+        $BLACKBOX_LOADER_DECLARED_COUNTS_FILE == "$BLACKBOX_BOOTSTRAP_MANIFEST_PATH" ]]; then
+    blackbox_die "loader declaration and other provenance paths must be distinct"
   fi
 
   IFS=',' read -r -a BLACKBOX_SESSION_IDS <<<"$BLACKBOX_EXPECTED_SESSION_IDS"
@@ -158,6 +180,12 @@ require_configuration() {
   export BLACKBOX_EXPECTED_SESSION_IDS
   export BLACKBOX_PROCESSING_MODE BLACKBOX_MONITOR_METRICS_PATH
   export BLACKBOX_RUN_ID_PATH BLACKBOX_BOOTSTRAP_MANIFEST_PATH
+  export BLACKBOX_LOADER_VALIDATION_PATH BLACKBOX_LOADER_BATCH_SIZE
+  export BLACKBOX_LOADER_SCALE_VALUE BLACKBOX_LOADER_DECLARED_COUNTS_FILE
+  export BENCHBASE_MEASUREMENT_BATCH_SIZE="$BLACKBOX_LOADER_BATCH_SIZE"
+  if [[ -n $BLACKBOX_LOADER_SCALE_VALUE ]]; then
+    export BENCHBASE_MEASUREMENT_SCALE_FACTOR="$BLACKBOX_LOADER_SCALE_VALUE"
+  fi
   export BLACKBOX_CLIENT_STREAM="blackbox:client:$BLACKBOX_ACTIVE_RUN_ID"
   export BLACKBOX_STATUS_STREAM="blackbox:status:$BLACKBOX_ACTIVE_RUN_ID"
   if [[ -n $BLACKBOX_RUN_ID_PATH ]]; then
@@ -629,6 +657,28 @@ run_loader_and_close_bootstrap() {
     return 1
   fi
 
+  if [[ ! -s $BLACKBOX_LOADER_DECLARED_COUNTS_FILE ]]; then
+    close_failed_run BOOTSTRAP_STATE_MISMATCH \
+      "successful loader did not atomically publish its declaration" 1
+    return 1
+  fi
+
+  local loader_validation
+  if ! loader_validation=$(blackbox_validate_loader_state); then
+    close_failed_run BOOTSTRAP_STATE_MISMATCH \
+      "loader-declared counts or independent SQL validation failed" 1
+    return 1
+  fi
+  if [[ -n $BLACKBOX_LOADER_VALIDATION_PATH ]]; then
+    if ! write_provenance_file "$BLACKBOX_LOADER_VALIDATION_PATH" "$loader_validation"; then
+      close_failed_run RESOURCE_EXHAUSTED \
+        "could not persist loader validation provenance" 1
+      return 1
+    fi
+  fi
+  blackbox_log \
+    "loader validation passed batch_size=$(jq -er '.loader_batch_size' <<<"$loader_validation")"
+
   if ! BOOTSTRAP_SCAN_FILE=$(mktemp /tmp/blackbox-bootstrap.XXXXXX); then
     close_failed_run RESOURCE_EXHAUSTED "cannot allocate bootstrap scan file" 1
     return 1
@@ -735,6 +785,7 @@ run_workload_and_close() {
 main() {
   require_configuration
   blackbox_log "run_id=$BLACKBOX_ACTIVE_RUN_ID"
+  blackbox_log "loader_batch_size=$BLACKBOX_LOADER_BATCH_SIZE"
   start_fresh_database_and_schema
   start_cdc
   start_monitor

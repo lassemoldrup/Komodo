@@ -126,6 +126,82 @@ class BlackboxRecordTest(unittest.TestCase):
             )
         return "\n".join(lines) + "\n"
 
+    @staticmethod
+    def tpcc_loader_declaration(
+        order_line_count: int = 300000, loader_batch_size: int = 128
+    ) -> dict[str, object]:
+        counts = {
+            "benchbase.warehouse": 1,
+            "benchbase.item": 100000,
+            "benchbase.stock": 100000,
+            "benchbase.district": 10,
+            "benchbase.customer": 30000,
+            "benchbase.history": 30000,
+            "benchbase.oorder": 30000,
+            "benchbase.new_order": 9000,
+            "benchbase.order_line": order_line_count,
+        }
+        return {
+            "kind": "loader_declaration",
+            "benchmark": "tpcc",
+            "loader_batch_size": loader_batch_size,
+            "scale_parameter": {"name": "warehouses", "value": 1},
+            "declared_table_row_counts": [
+                {"table": table, "row_count": count} for table, count in counts.items()
+            ],
+        }
+
+    def run_tpcc_loader_tool(
+        self,
+        command: str,
+        *,
+        declaration: dict[str, object] | None = None,
+        input_text: str | None = None,
+        expected_status: int = 0,
+        expected_batch_size: int = 128,
+        expected_scale_value: int = 1,
+    ) -> subprocess.CompletedProcess[str]:
+        declaration = declaration or self.tpcc_loader_declaration()
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as declaration_file:
+            json.dump(declaration, declaration_file, separators=(",", ":"))
+            declaration_file.write("\n")
+            declaration_file.flush()
+            return self.run_tool(
+                command,
+                "--benchmark",
+                "tpcc",
+                "--loader-declaration-file",
+                declaration_file.name,
+                "--expected-loader-batch-size",
+                str(expected_batch_size),
+                "--expected-scale-value",
+                str(expected_scale_value),
+                input_text=input_text,
+                expected_status=expected_status,
+            )
+
+    @staticmethod
+    def tpcc_loader_observations(
+        order_line_count: int = 300000,
+        source_sum: int = 300000,
+        relationship_violations: int = 0,
+    ) -> str:
+        counts = {
+            "benchbase.warehouse": 1,
+            "benchbase.item": 100000,
+            "benchbase.stock": 100000,
+            "benchbase.district": 10,
+            "benchbase.customer": 30000,
+            "benchbase.history": 30000,
+            "benchbase.oorder": 30000,
+            "benchbase.new_order": 9000,
+            "benchbase.order_line": order_line_count,
+        }
+        lines = [f"COUNT\t{table}\t{count}" for table, count in counts.items()]
+        lines.append(f"SUM\tbenchbase.order_line\t{source_sum}")
+        lines.append(f"RELATIONSHIP\t0\t{relationship_violations}")
+        return "\n".join(lines) + "\n"
+
     def test_run_manifest_matches_frozen_example(self) -> None:
         result = self.run_tool(
             "run-manifest",
@@ -232,6 +308,104 @@ class BlackboxRecordTest(unittest.TestCase):
             expected_status=2,
         )
         self.assertIn("table roster differs", result.stderr)
+
+    def test_loader_plan_enforces_tpcc_scale_counts_and_records_batch_size(self) -> None:
+        result = self.run_tpcc_loader_tool("loader-plan")
+        plan = json.loads(result.stdout)
+        self.assertEqual(plan["loader_batch_size"], 128)
+        self.assertEqual(plan["scale_parameter"], {"name": "warehouses", "value": 1})
+
+        result = self.run_tpcc_loader_tool(
+            "loader-plan",
+            declaration=self.tpcc_loader_declaration(loader_batch_size=64),
+            expected_batch_size=64,
+        )
+        self.assertEqual(json.loads(result.stdout)["loader_batch_size"], 64)
+
+        invalid = self.tpcc_loader_declaration()
+        next(
+            item
+            for item in invalid["declared_table_row_counts"]
+            if item["table"] == "benchbase.stock"
+        )["row_count"] = 99999
+        result = self.run_tpcc_loader_tool(
+            "loader-plan", declaration=invalid, expected_status=2
+        )
+        self.assertIn("differs from contract 100000", result.stderr)
+
+    def test_loader_queries_cover_all_tpcc_counts_and_relationships(self) -> None:
+        result = self.run_tool("loader-queries", "--benchmark", "tpcc")
+        document = json.loads(result.stdout)
+        self.assertEqual(len(document["queries"]), 11)
+        relationship = document["queries"][-1]
+        self.assertEqual(relationship["observation"], "relationship_violations")
+        self.assertIn("COUNT(DISTINCT c.`ol_number`)", relationship["sql"])
+        self.assertIn("expected_count < 5", relationship["sql"])
+        self.assertIn("expected_count > 15", relationship["sql"])
+        self.assertIn("COALESCE(minimum_sequence, 0) <> 1", relationship["sql"])
+
+    def test_loader_check_accepts_exact_tpcc_declaration_and_sql_state(self) -> None:
+        result = self.run_tpcc_loader_tool(
+            "loader-check",
+            input_text=self.tpcc_loader_observations(),
+        )
+        report = json.loads(result.stdout)
+        self.assertTrue(report["validated"])
+        self.assertEqual(report["loader_batch_size"], 128)
+        self.assertEqual(report["derived_cardinality_checks"][0]["observed_source_sum"], 300000)
+        self.assertEqual(report["relationship_checks"][0]["violation_count"], 0)
+
+    def test_loader_check_rejects_count_sum_and_sequence_mismatches(self) -> None:
+        cases = (
+            (self.tpcc_loader_observations(order_line_count=299999), "independent SQL count"),
+            (self.tpcc_loader_observations(source_sum=299999), "row count differs from SUM"),
+            (self.tpcc_loader_observations(relationship_violations=1), "violating parent rows"),
+        )
+        for observations, diagnostic in cases:
+            with self.subTest(diagnostic=diagnostic):
+                result = self.run_tpcc_loader_tool(
+                    "loader-check",
+                    input_text=observations,
+                    expected_status=2,
+                )
+                self.assertIn(diagnostic, result.stderr)
+
+    def test_loader_plan_requires_exact_declared_roster(self) -> None:
+        declaration = self.tpcc_loader_declaration()
+        declaration["declared_table_row_counts"].pop()
+        result = self.run_tpcc_loader_tool(
+            "loader-plan", declaration=declaration, expected_status=2
+        )
+        self.assertIn("count roster differs", result.stderr)
+
+    def test_loader_plan_rejects_batch_and_scale_different_from_coordinator(self) -> None:
+        result = self.run_tpcc_loader_tool(
+            "loader-plan", expected_batch_size=64, expected_status=2
+        )
+        self.assertIn("batch size differs", result.stderr)
+        result = self.run_tpcc_loader_tool(
+            "loader-plan", expected_scale_value=2, expected_status=2
+        )
+        self.assertIn("scale differs", result.stderr)
+
+    def test_historical_loader_check_records_declaration_unavailable(self) -> None:
+        result = self.run_tool(
+            "loader-independent-check",
+            "--benchmark",
+            "ycsb",
+            "--loader-batch-size",
+            "128",
+            "--expected-count",
+            "benchbase.usertable=1000",
+            input_text="COUNT\tbenchbase.usertable\t1000\n",
+        )
+        report = json.loads(result.stdout)
+        self.assertFalse(report["declaration_available"])
+        self.assertIsNone(report["declared_table_row_counts"])
+        self.assertEqual(
+            report["expected_table_row_counts"],
+            [{"table": "benchbase.usertable", "row_count": 1000}],
+        )
 
     def test_adapter_contract_rejects_unknown_transaction_membership(self) -> None:
         result = self.run_tool(

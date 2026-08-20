@@ -31,6 +31,7 @@ ADAPTER_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 
 BOOTSTRAP_DOMAIN = b"db-monitoring/bootstrap-state-digest\x00"
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
+MAX_LOADER_BATCH_SIZE = 2_147_483_647
 LIFECYCLE_ORDER = (
     "STARTING",
     "START_FENCE_SEEN",
@@ -461,6 +462,439 @@ def validate_schema_metadata(
         )
 
 
+def parse_count_specs(specifications: list[str], label: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for specification in specifications:
+        table, separator, value_text = specification.partition("=")
+        require(separator == "=" and table and value_text, f"invalid {label} count: {specification}")
+        schema, dot, table_name = table.partition(".")
+        require(dot == "." and schema and table_name, f"invalid declared table: {table}")
+        validate_identifier(schema, f"{label}-count schema")
+        validate_identifier(table_name, f"{label}-count table")
+        try:
+            value = int(value_text, 10)
+        except ValueError as error:
+            raise RecordError(f"{label} count is not an integer: {specification}") from error
+        require(0 <= value <= MAX_SAFE_INTEGER, f"{label} count is out of range: {specification}")
+        require(table not in counts, f"duplicate {label} table count: {table}")
+        counts[table] = value
+    return counts
+
+
+def validate_loader_count_contract(
+    adapter: dict[str, Any], counts: dict[str, int], scale_value: int | None, label: str
+) -> dict[str, Any] | None:
+    roster = adapter["application_tables"]
+    require(
+        len(counts) == len(roster) and set(counts) == set(roster),
+        f"{label} count roster differs from adapter application tables",
+    )
+    scale_contract = adapter["loader"]["scale_parameter"]
+    if scale_contract is None:
+        require(scale_value is None, "adapter does not accept a loader scale value")
+        scale = None
+    else:
+        require(scale_value is not None, "adapter requires a loader scale value")
+        require(
+            scale_contract["minimum"] <= scale_value <= MAX_SAFE_INTEGER,
+            "loader scale value is outside the adapter contract",
+        )
+        scale = {"name": scale_contract["name"], "value": scale_value}
+    for cardinality in adapter["loader"]["cardinalities"]:
+        table = cardinality["table"]
+        expected: int | None = None
+        if cardinality["kind"] == "constant":
+            expected = cardinality["value"]
+        elif cardinality["kind"] == "scale_multiplier":
+            require(scale is not None, f"{table}: scale multiplier lacks scale value")
+            expected = cardinality["multiplier"] * scale["value"]
+            require(expected <= MAX_SAFE_INTEGER, f"{table}: expected count exceeds safe integer")
+        elif cardinality["kind"] in {"configuration", "sum_column"}:
+            pass
+        else:  # pragma: no cover - adapter schema owns this enumeration
+            raise RecordError(f"{table}: unsupported cardinality kind")
+        if expected is not None:
+            require(
+                counts[table] == expected,
+                f"{table}: {label} count {counts[table]} differs from contract {expected}",
+            )
+    return scale
+
+
+def load_loader_declaration(path: Path, adapter: dict[str, Any]) -> dict[str, Any]:
+    try:
+        declaration = json.loads(
+            path.read_text(encoding="utf-8", errors="strict"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RecordError(f"cannot read loader declaration {path}: {error}") from error
+    require(isinstance(declaration, dict), "loader declaration is not an object")
+    require(
+        set(declaration)
+        == {
+            "kind",
+            "benchmark",
+            "loader_batch_size",
+            "scale_parameter",
+            "declared_table_row_counts",
+        },
+        "loader declaration fields differ from contract",
+    )
+    require(declaration["kind"] == "loader_declaration", "loader declaration kind mismatch")
+    require(
+        declaration["benchmark"] == adapter["benchmark"],
+        "loader declaration benchmark mismatch",
+    )
+    batch_size = declaration["loader_batch_size"]
+    require(
+        isinstance(batch_size, int)
+        and not isinstance(batch_size, bool)
+        and 1 <= batch_size <= MAX_LOADER_BATCH_SIZE,
+        "loader declaration batch size is not a positive signed 32-bit integer",
+    )
+    scale_document = declaration["scale_parameter"]
+    if scale_document is None:
+        scale_value = None
+    else:
+        require(
+            isinstance(scale_document, dict) and set(scale_document) == {"name", "value"},
+            "loader declaration scale parameter is malformed",
+        )
+        require(isinstance(scale_document["name"], str), "loader scale name is not string")
+        scale_value = scale_document["value"]
+        require(
+            isinstance(scale_value, int) and not isinstance(scale_value, bool),
+            "loader scale value is not integer",
+        )
+        scale_contract = adapter["loader"]["scale_parameter"]
+        require(
+            scale_contract is not None and scale_document["name"] == scale_contract["name"],
+            "loader declaration scale name differs from adapter contract",
+        )
+    row_counts = declaration["declared_table_row_counts"]
+    require(isinstance(row_counts, list), "loader declared table counts are not an array")
+    declared: dict[str, int] = {}
+    for index, entry in enumerate(row_counts):
+        require(
+            isinstance(entry, dict) and set(entry) == {"table", "row_count"},
+            f"loader declared table count {index} is malformed",
+        )
+        table = entry["table"]
+        row_count = entry["row_count"]
+        require(isinstance(table, str), f"loader declared table {index} is not string")
+        require(
+            isinstance(row_count, int)
+            and not isinstance(row_count, bool)
+            and 0 <= row_count <= MAX_SAFE_INTEGER,
+            f"loader declared row count {index} is out of range",
+        )
+        require(table not in declared, f"duplicate loader-declared table count: {table}")
+        declared[table] = row_count
+    scale = validate_loader_count_contract(adapter, declared, scale_value, "loader-declared")
+    require(scale_document == scale, "loader declaration scale parameter differs from contract")
+    return {
+        "kind": "loader_declaration",
+        "benchmark": adapter["benchmark"],
+        "loader_batch_size": batch_size,
+        "scale_parameter": scale,
+        "declared_table_row_counts": [
+            {"table": table, "row_count": declared[table]}
+            for table in adapter["application_tables"]
+        ],
+    }
+
+
+def build_loader_plan(args: argparse.Namespace) -> dict[str, Any]:
+    adapter = select_adapter(args.benchmark)
+    plan = load_loader_declaration(Path(args.loader_declaration_file), adapter)
+    require(
+        1 <= args.expected_loader_batch_size <= MAX_LOADER_BATCH_SIZE,
+        "expected loader batch size must be a positive signed 32-bit integer",
+    )
+    require(
+        plan["loader_batch_size"] == args.expected_loader_batch_size,
+        "loader-declared batch size differs from coordinator configuration",
+    )
+    scale_contract = adapter["loader"]["scale_parameter"]
+    if scale_contract is None:
+        require(
+            args.expected_scale_value is None,
+            "adapter does not accept an expected loader scale value",
+        )
+    else:
+        require(args.expected_scale_value is not None, "adapter requires expected loader scale")
+        require(
+            plan["scale_parameter"] == {
+                "name": scale_contract["name"],
+                "value": args.expected_scale_value,
+            },
+            "loader-declared scale differs from coordinator configuration",
+        )
+    return plan
+
+
+def build_independent_loader_plan(args: argparse.Namespace) -> dict[str, Any]:
+    adapter = select_adapter(args.benchmark)
+    require(
+        1 <= args.loader_batch_size <= MAX_LOADER_BATCH_SIZE,
+        "loader batch size must be a positive signed 32-bit integer",
+    )
+    expected_counts = parse_count_specs(args.expected_count, "expected")
+    scale = validate_loader_count_contract(adapter, expected_counts, args.scale_value, "expected")
+    return {
+        "kind": "loader_expectation",
+        "benchmark": adapter["benchmark"],
+        "loader_batch_size": args.loader_batch_size,
+        "scale_parameter": scale,
+        "expected_table_row_counts": [
+            {"table": table, "row_count": expected_counts[table]}
+            for table in adapter["application_tables"]
+        ],
+    }
+
+
+def quote_qualified_table(table: str) -> str:
+    schema, dot, table_name = table.partition(".")
+    require(dot == "." and schema and table_name, f"invalid qualified table: {table}")
+    validate_identifier(schema, "query schema")
+    validate_identifier(table_name, "query table")
+    return f"`{schema}`.`{table_name}`"
+
+
+def quote_column(column: str) -> str:
+    validate_identifier(column, "query column")
+    return f"`{column}`"
+
+
+def contiguous_relationship_sql(relationship: dict[str, Any]) -> str:
+    parent_table = quote_qualified_table(relationship["parent_table"])
+    child_table = quote_qualified_table(relationship["child_table"])
+    parent_keys = relationship["parent_key_columns"]
+    child_keys = relationship["child_parent_columns"]
+    join = " AND ".join(
+        f"p.{quote_column(parent)} = c.{quote_column(child)}"
+        for parent, child in zip(parent_keys, child_keys, strict=True)
+    )
+    selected_keys = ", ".join(f"p.{quote_column(column)}" for column in parent_keys)
+    grouped_keys = ", ".join(
+        [*(f"p.{quote_column(column)}" for column in parent_keys),
+         f"p.{quote_column(relationship['expected_count_column'])}"]
+    )
+    sequence = f"c.{quote_column(relationship['child_sequence_column'])}"
+    expected = f"p.{quote_column(relationship['expected_count_column'])}"
+    return (
+        "SELECT COUNT(*) FROM ("
+        f"SELECT {selected_keys}, {expected} AS expected_count, "
+        f"COUNT({sequence}) AS line_count, "
+        f"COUNT(DISTINCT {sequence}) AS distinct_line_count, "
+        f"MIN({sequence}) AS minimum_sequence, MAX({sequence}) AS maximum_sequence "
+        f"FROM {parent_table} AS p LEFT JOIN {child_table} AS c ON {join} "
+        f"GROUP BY {grouped_keys}"
+        ") AS grouped_rows WHERE "
+        f"expected_count < {relationship['minimum_count']} OR "
+        f"expected_count > {relationship['maximum_count']} OR "
+        "line_count <> expected_count OR distinct_line_count <> expected_count OR "
+        f"COALESCE(minimum_sequence, 0) <> {relationship['first_sequence_value']} OR "
+        f"COALESCE(maximum_sequence, 0) <> "
+        f"({relationship['first_sequence_value']} + "
+        f"(expected_count - 1) * {relationship['sequence_step']})"
+    )
+
+
+def build_loader_queries(args: argparse.Namespace) -> dict[str, Any]:
+    adapter = select_adapter(args.benchmark)
+    queries: list[dict[str, Any]] = []
+    for table in adapter["application_tables"]:
+        queries.append(
+            {
+                "observation": "count",
+                "table": table,
+                "sql": f"SELECT COUNT(*) FROM {quote_qualified_table(table)}",
+            }
+        )
+    for cardinality in adapter["loader"]["cardinalities"]:
+        if cardinality["kind"] != "sum_column":
+            continue
+        queries.append(
+            {
+                "observation": "sum_column",
+                "table": cardinality["table"],
+                "source_table": cardinality["source_table"],
+                "source_column": cardinality["source_column"],
+                "sql": (
+                    f"SELECT COALESCE(SUM({quote_column(cardinality['source_column'])}), 0) "
+                    f"FROM {quote_qualified_table(cardinality['source_table'])}"
+                ),
+            }
+        )
+    for index, relationship in enumerate(adapter["loader"]["relationships"]):
+        require(
+            relationship["kind"] == "contiguous_child_sequence",
+            "unsupported loader relationship",
+        )
+        queries.append(
+            {
+                "observation": "relationship_violations",
+                "relationship_index": index,
+                "kind": relationship["kind"],
+                "parent_table": relationship["parent_table"],
+                "child_table": relationship["child_table"],
+                "sql": contiguous_relationship_sql(relationship),
+            }
+        )
+    return {"benchmark": adapter["benchmark"], "queries": queries}
+
+
+def parse_loader_observations(text: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"counts": {}, "sums": {}, "relationships": {}}
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        require(line != "", f"loader observation contains empty line {line_number}")
+        fields = line.split("\t")
+        require(len(fields) == 3, f"loader observation line {line_number} has wrong arity")
+        observation, identity, value_text = fields
+        try:
+            value = int(value_text, 10)
+        except ValueError as error:
+            raise RecordError(f"loader observation line {line_number} is not integer") from error
+        require(0 <= value <= MAX_SAFE_INTEGER, f"loader observation line {line_number} is out of range")
+        if observation == "COUNT":
+            target = result["counts"]
+        elif observation == "SUM":
+            target = result["sums"]
+        elif observation == "RELATIONSHIP":
+            try:
+                identity = int(identity, 10)
+            except ValueError as error:
+                raise RecordError(f"relationship identity on line {line_number} is not integer") from error
+            target = result["relationships"]
+        else:
+            raise RecordError(f"unknown loader observation on line {line_number}: {observation}")
+        require(identity not in target, f"duplicate loader observation: {observation} {identity}")
+        target[identity] = value
+    return result
+
+
+def validate_loader_observations(
+    adapter: dict[str, Any], reference_counts: dict[str, int], observations: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    require(
+        set(observations["counts"]) == set(adapter["application_tables"]),
+        "independent SQL count roster differs from adapter application tables",
+    )
+    for table in adapter["application_tables"]:
+        require(
+            observations["counts"][table] == reference_counts[table],
+            f"{table}: independent SQL count {observations['counts'][table]} "
+            f"differs from reference count {reference_counts[table]}",
+        )
+
+    sum_contracts = [
+        item for item in adapter["loader"]["cardinalities"] if item["kind"] == "sum_column"
+    ]
+    require(
+        set(observations["sums"]) == {item["table"] for item in sum_contracts},
+        "independent SQL sum observations differ from adapter contract",
+    )
+    derived_checks = []
+    for cardinality in sum_contracts:
+        table = cardinality["table"]
+        source_sum = observations["sums"][table]
+        require(
+            observations["counts"][table] == source_sum,
+            f"{table}: row count differs from SUM({cardinality['source_table']}."
+            f"{cardinality['source_column']})",
+        )
+        derived_checks.append(
+            {
+                "table": table,
+                "kind": "sum_column",
+                "source_table": cardinality["source_table"],
+                "source_column": cardinality["source_column"],
+                "observed_source_sum": source_sum,
+            }
+        )
+
+    relationships = adapter["loader"]["relationships"]
+    require(
+        set(observations["relationships"]) == set(range(len(relationships))),
+        "independent SQL relationship observations differ from adapter contract",
+    )
+    relationship_checks = []
+    for index, relationship in enumerate(relationships):
+        violation_count = observations["relationships"][index]
+        require(
+            violation_count == 0,
+            f"loader relationship {index} has {violation_count} violating parent rows",
+        )
+        relationship_checks.append(
+            {
+                "relationship_index": index,
+                "kind": relationship["kind"],
+                "parent_table": relationship["parent_table"],
+                "child_table": relationship["child_table"],
+                "violation_count": violation_count,
+            }
+        )
+    return derived_checks, relationship_checks
+
+
+def check_loader_state(args: argparse.Namespace) -> dict[str, Any]:
+    adapter = select_adapter(args.benchmark)
+    plan = build_loader_plan(args)
+    observations = parse_loader_observations(sys.stdin.read())
+    declared = {
+        entry["table"]: entry["row_count"] for entry in plan["declared_table_row_counts"]
+    }
+    derived_checks, relationship_checks = validate_loader_observations(
+        adapter, declared, observations
+    )
+    return {
+        "kind": "loader_validation",
+        "benchmark": adapter["benchmark"],
+        "declaration_available": True,
+        "loader_batch_size": plan["loader_batch_size"],
+        "scale_parameter": plan["scale_parameter"],
+        "declared_table_row_counts": plan["declared_table_row_counts"],
+        "expected_table_row_counts": plan["declared_table_row_counts"],
+        "observed_table_row_counts": [
+            {"table": table, "row_count": observations["counts"][table]}
+            for table in adapter["application_tables"]
+        ],
+        "derived_cardinality_checks": derived_checks,
+        "relationship_checks": relationship_checks,
+        "validated": True,
+    }
+
+
+def check_independent_loader_state(args: argparse.Namespace) -> dict[str, Any]:
+    adapter = select_adapter(args.benchmark)
+    plan = build_independent_loader_plan(args)
+    observations = parse_loader_observations(sys.stdin.read())
+    expected = {
+        entry["table"]: entry["row_count"] for entry in plan["expected_table_row_counts"]
+    }
+    derived_checks, relationship_checks = validate_loader_observations(
+        adapter, expected, observations
+    )
+    return {
+        "kind": "loader_validation",
+        "benchmark": adapter["benchmark"],
+        "declaration_available": False,
+        "loader_batch_size": plan["loader_batch_size"],
+        "scale_parameter": plan["scale_parameter"],
+        "declared_table_row_counts": None,
+        "expected_table_row_counts": plan["expected_table_row_counts"],
+        "observed_table_row_counts": [
+            {"table": table, "row_count": observations["counts"][table]}
+            for table in adapter["application_tables"]
+        ],
+        "derived_cardinality_checks": derived_checks,
+        "relationship_checks": relationship_checks,
+        "validated": True,
+    }
+
+
 def length_prefix(value: bytes) -> bytes:
     require(len(value) <= 0xFFFFFFFF, "length-prefixed value exceeds U32")
     return struct.pack(">I", len(value)) + value
@@ -758,6 +1192,20 @@ def classify_status(args: argparse.Namespace) -> tuple[str, str]:
     return "continue", current_lifecycle
 
 
+def add_loader_declaration_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--benchmark", required=True)
+    parser.add_argument("--loader-declaration-file", required=True)
+    parser.add_argument("--expected-loader-batch-size", type=int, required=True)
+    parser.add_argument("--expected-scale-value", type=int)
+
+
+def add_independent_loader_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--benchmark", required=True)
+    parser.add_argument("--scale-value", type=int)
+    parser.add_argument("--loader-batch-size", type=int, default=128)
+    parser.add_argument("--expected-count", action="append", default=[])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -796,6 +1244,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     schema_check.add_argument("--backend", default="mariadb")
     schema_check.add_argument("--benchmark", required=True)
+
+    loader_plan = subparsers.add_parser(
+        "loader-plan", help="validate and normalize loader declarations"
+    )
+    add_loader_declaration_argument(loader_plan)
+
+    loader_queries = subparsers.add_parser(
+        "loader-queries", help="emit adapter-owned independent SQL validation queries"
+    )
+    loader_queries.add_argument("--benchmark", required=True)
+
+    loader_check = subparsers.add_parser(
+        "loader-check", help="validate independent SQL loader observations"
+    )
+    add_loader_declaration_argument(loader_check)
+
+    independent_loader_check = subparsers.add_parser(
+        "loader-independent-check",
+        help="validate SQL state when a historical loader cannot declare counts",
+    )
+    add_independent_loader_arguments(independent_loader_check)
 
     failed = subparsers.add_parser("run-failed", help="emit a coordinator RunFailed record")
     failed.add_argument("--run-id", required=True)
@@ -852,6 +1321,14 @@ def main() -> int:
             dump_record(inspect_backend_contract(args))
         elif args.command == "schema-check":
             check_schema_contract(args)
+        elif args.command == "loader-plan":
+            dump_record(build_loader_plan(args))
+        elif args.command == "loader-queries":
+            dump_record(build_loader_queries(args))
+        elif args.command == "loader-check":
+            dump_record(check_loader_state(args))
+        elif args.command == "loader-independent-check":
+            dump_record(check_independent_loader_state(args))
         elif args.command == "run-failed":
             dump_record(build_run_failed(args))
         elif args.command == "status-action":

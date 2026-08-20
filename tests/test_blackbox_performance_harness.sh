@@ -128,6 +128,7 @@ verified=$(
     --baseline-root "$BASELINE" --output-root "$TEST_ROOT/empty-output"
 )
 [[ $verified == *'redis_maxmemory_bytes=8589934592'* &&
+      $verified == *'loader_batch_size=128'* &&
       $verified == *'monitor_pending_client_bytes=1073741824'* &&
       $verified == *'monitor_retained_identity_bytes=2147483648'* &&
       $verified == *'output_max_bytes=107374182400'* ]] ||
@@ -157,6 +158,21 @@ verified=$(
       $verified == *'monitor_retained_identity_bytes=1073741824'* &&
       $verified == *'output_max_bytes=53687091200'* ]] ||
   fail 'performance capacity overrides were not reported'
+
+verified=$(
+  "$RUNNER" --smoke --verify-inputs-only \
+    --baseline-root "$BASELINE" --output-root "$TEST_ROOT/batch-output" \
+    --loader-batch-size 64
+)
+[[ $verified == *'loader_batch_size=64'* ]] ||
+  fail 'selected loader batch size was not reported'
+
+if "$RUNNER" --print-stage-order --loader-batch-size 0 >/dev/null 2>&1; then
+  fail '--loader-batch-size accepted zero'
+fi
+if "$RUNNER" --print-stage-order --loader-batch-size 2147483648 >/dev/null 2>&1; then
+  fail '--loader-batch-size accepted signed 32-bit overflow'
+fi
 
 for option in \
   --redis-maxmemory-bytes \

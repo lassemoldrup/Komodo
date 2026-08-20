@@ -35,6 +35,7 @@ TERMINALS=${BLACKBOX_PERFORMANCE_TERMINALS:-4}
 SCALE_FACTOR=${BLACKBOX_PERFORMANCE_SCALE_FACTOR:-10}
 FIELD_SIZE=${BLACKBOX_PERFORMANCE_FIELD_SIZE:-32}
 LOADER_THREADS=${BLACKBOX_PERFORMANCE_LOADER_THREADS:-1}
+LOADER_BATCH_SIZE=${BLACKBOX_PERFORMANCE_LOADER_BATCH_SIZE:-128}
 WARMUP_SECONDS=${BLACKBOX_PERFORMANCE_WARMUP_SECONDS:-5}
 DURATION_SECONDS=${BLACKBOX_PERFORMANCE_DURATION_SECONDS:-20}
 COOLDOWN_SECONDS=${BLACKBOX_PERFORMANCE_COOLDOWN_SECONDS:-2}
@@ -90,6 +91,7 @@ Options:
   --scale-factor N           YCSB scale factor (default: 10).
   --field-size N             Bytes per YCSB field (default: 32).
   --loader-threads N         Fixed BenchBase loader concurrency (must be 1).
+  --loader-batch-size N      Rows committed per loader batch (default: 128).
   --warmup-seconds N         Warmup duration (default: 5).
   --duration-seconds N       Requested measurement duration (default: 20).
   --cooldown-seconds N       Cooldown after a trial (default: 2).
@@ -222,6 +224,10 @@ parse_arguments() {
         LOADER_THREADS=${2:?missing --loader-threads value}
         shift 2
         ;;
+      --loader-batch-size)
+        LOADER_BATCH_SIZE=${2:?missing --loader-batch-size value}
+        shift 2
+        ;;
       --warmup-seconds)
         WARMUP_SECONDS=${2:?missing --warmup-seconds value}
         shift 2
@@ -294,6 +300,9 @@ parse_arguments() {
   require_positive_integer field-size "$FIELD_SIZE"
   require_positive_integer loader-threads "$LOADER_THREADS"
   (( LOADER_THREADS == 1 )) || die "loader-threads must be 1 for deterministic loaded bytes"
+  require_positive_integer loader-batch-size "$LOADER_BATCH_SIZE"
+  (( LOADER_BATCH_SIZE <= 2147483647 )) ||
+    die "loader-batch-size exceeds the BenchBase signed 32-bit range"
   require_unsigned_integer warmup-seconds "$WARMUP_SECONDS"
   require_positive_integer duration-seconds "$DURATION_SECONDS"
   require_unsigned_integer cooldown-seconds "$COOLDOWN_SECONDS"
@@ -628,14 +637,17 @@ generate_configs() {
   mkdir -p "$OUTPUT_ROOT/config"
   python3 - \
     "$BASELINE_CONFIG" "$CURRENT_CONFIG" "$TERMINALS" "$SCALE_FACTOR" \
-    "$FIELD_SIZE" "$LOADER_THREADS" "$WARMUP_SECONDS" "$DURATION_SECONDS" "$RANDOM_SEED" <<'PY'
+    "$FIELD_SIZE" "$LOADER_THREADS" "$LOADER_BATCH_SIZE" "$WARMUP_SECONDS" \
+    "$DURATION_SECONDS" "$RANDOM_SEED" <<'PY'
 import sys
 from pathlib import Path
 
 baseline, current = (Path(sys.argv[1]), Path(sys.argv[2]))
-terminals, scale, field_size, loader_threads, warmup, duration, seed = sys.argv[3:]
+terminals, scale, field_size, loader_threads, loader_batch_size, warmup, duration, seed = sys.argv[3:]
 
 def document(instrumented: bool) -> str:
+    loader_declaration = "" if not instrumented else """
+    <loaderDeclaredCountsFile>${env:BLACKBOX_LOADER_DECLARED_COUNTS_FILE}</loaderDeclaredCountsFile>"""
     blackbox = "" if not instrumented else """
     <blackbox>
         <mode>${env:BLACKBOX_MEASUREMENT_MODE}</mode>
@@ -657,7 +669,8 @@ def document(instrumented: bool) -> str:
     <username>app</username>
     <password>app_pw</password>
     <isolation>TRANSACTION_REPEATABLE_READ</isolation>
-    <batchsize>128</batchsize>
+    <batchsize>{loader_batch_size}</batchsize>
+{loader_declaration}
     <retries>3</retries>
     <randomSeed>{seed}</randomSeed>
 {blackbox}
@@ -923,8 +936,8 @@ write_trial_metadata() {
   local trial_id=$6
   python3 - "$trial_dir/metadata.json" \
     "$stage" "$repetition" "$position" "$trial_id" "$run_id" \
-    "$TERMINALS" "$SCALE_FACTOR" "$FIELD_SIZE" "$LOADER_THREADS" "$WARMUP_SECONDS" \
-    "$DURATION_SECONDS" "$RANDOM_SEED" "$JAVA_FLAGS_TEXT" \
+    "$TERMINALS" "$SCALE_FACTOR" "$FIELD_SIZE" "$LOADER_THREADS" "$LOADER_BATCH_SIZE" \
+    "$WARMUP_SECONDS" "$DURATION_SECONDS" "$RANDOM_SEED" "$JAVA_FLAGS_TEXT" \
     "$SI_MONITORING_HEAD" "$CURRENT_BENCHBASE_HEAD" "$BASELINE_HEAD" "$CO_CHECKER_HEAD" \
     "$SI_MONITORING_DIRTY" "$CURRENT_BENCHBASE_DIRTY" "$BASELINE_DIRTY" "$CO_CHECKER_DIRTY" \
     "$SMOKE" "$REPETITIONS" "$REDIS_MAXMEMORY_BYTES" \
@@ -946,9 +959,10 @@ document = {
     "scale_factor": int(values[6]),
     "field_size": int(values[7]),
     "loader_threads": int(values[8]),
-    "warmup_seconds": int(values[9]),
-    "requested_duration_seconds": int(values[10]),
-    "random_seed": int(values[11]),
+    "loader_batch_size": int(values[9]),
+    "warmup_seconds": int(values[10]),
+    "requested_duration_seconds": int(values[11]),
+    "random_seed": int(values[12]),
     "isolation": "REPEATABLE_READ",
     "rate": "unlimited",
     "redis_host": "host.docker.internal",
@@ -957,22 +971,22 @@ document = {
     "database_port": 3306,
     "resource_sample_window": "workload_process_window",
     "monitor_resource_window": "full_monitor_lifecycle",
-    "java_flags": values[12],
-    "si_monitoring_head": values[13],
-    "benchbase_current_head": values[14],
-    "benchbase_baseline_head": values[15],
-    "co_checker_head": values[16],
-    "si_monitoring_dirty": values[17] == "1",
-    "benchbase_current_dirty": values[18] == "1",
-    "benchbase_baseline_dirty": values[19] == "1",
-    "co_checker_dirty": values[20] == "1",
-    "smoke": values[21] == "1",
-    "configured_repetitions": int(values[22]),
-    "redis_maxmemory_bytes": int(values[23]),
-    "monitor_max_pending_client_bytes": int(values[24]),
-    "monitor_max_retained_identity_bytes": int(values[25]),
-    "output_max_bytes": int(values[26]),
-    "configured_stages": values[27].split(","),
+    "java_flags": values[13],
+    "si_monitoring_head": values[14],
+    "benchbase_current_head": values[15],
+    "benchbase_baseline_head": values[16],
+    "co_checker_head": values[17],
+    "si_monitoring_dirty": values[18] == "1",
+    "benchbase_current_dirty": values[19] == "1",
+    "benchbase_baseline_dirty": values[20] == "1",
+    "co_checker_dirty": values[21] == "1",
+    "smoke": values[22] == "1",
+    "configured_repetitions": int(values[23]),
+    "redis_maxmemory_bytes": int(values[24]),
+    "monitor_max_pending_client_bytes": int(values[25]),
+    "monitor_max_retained_identity_bytes": int(values[26]),
+    "output_max_bytes": int(values[27]),
+    "configured_stages": values[28].split(","),
 }
 path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -1046,21 +1060,61 @@ PY
 
 run_loader() {
   local trial_dir=$1
+  local distribution=$2
+  local config=$3
+  local measurement_mode=$4
   local commands="$trial_dir/commands.txt"
   local command=(
-    java "${JAVA_FLAGS[@]}" -jar "$BASELINE_DIST/benchbase.jar"
-    -b ycsb -c "$BASELINE_CONFIG"
+    java "${JAVA_FLAGS[@]}" -jar "$distribution/benchbase.jar"
+    -b ycsb -c "$config"
     --create=false --load=true --execute=false
     --directory "$trial_dir/loader_results"
   )
   mkdir -p "$trial_dir/loader_results"
-  record_command "$commands" timeout --foreground --signal=TERM --kill-after=10 \
+  record_command "$commands" env \
+    "BLACKBOX_MEASUREMENT_MODE=$measurement_mode" \
+    "BLACKBOX_LOADER_DECLARED_COUNTS_FILE=${BLACKBOX_LOADER_DECLARED_COUNTS_FILE:-}" \
+    timeout --foreground --signal=TERM --kill-after=10 \
     "$LOADER_TIMEOUT_SECONDS" "${command[@]}"
   (
-    cd "$BASELINE_DIST"
-    timeout --foreground --signal=TERM --kill-after=10 \
+    cd "$distribution"
+    BLACKBOX_MEASUREMENT_MODE=$measurement_mode \
+      timeout --foreground --signal=TERM --kill-after=10 \
       "$LOADER_TIMEOUT_SECONDS" "${command[@]}"
   ) >"$trial_dir/loader.log" 2>&1
+}
+
+
+validate_independent_loader_state() {
+  local trial_dir=$1
+  local declaration_available=$2
+  if (( declaration_available == 1 )); then
+    blackbox_validate_loader_state >"$trial_dir/loader_validation.json"
+  else
+    blackbox_validate_historical_loader_state \
+      "$LOADER_BATCH_SIZE" "benchbase.usertable=$(( SCALE_FACTOR * 1000 ))" \
+      >"$trial_dir/loader_validation.json"
+  fi ||
+    die "loader declarations and independent SQL validation disagree"
+  validate_loader_report "$trial_dir/loader_validation.json"
+}
+
+
+validate_loader_report() {
+  local report=$1
+  local expected_rows=$(( SCALE_FACTOR * 1000 ))
+  jq -e --argjson batch_size "$LOADER_BATCH_SIZE" --argjson rows "$expected_rows" '
+    .kind == "loader_validation" and
+    .benchmark == "ycsb" and
+    .loader_batch_size == $batch_size and
+    .scale_parameter == null and
+    .validated == true and
+    ((.declaration_available == true and
+      .declared_table_row_counts == [{"table":"benchbase.usertable","row_count":$rows}]) or
+     (.declaration_available == false and .declared_table_row_counts == null)) and
+    .expected_table_row_counts == [{"table":"benchbase.usertable","row_count":$rows}] and
+    .observed_table_row_counts == [{"table":"benchbase.usertable","row_count":$rows}]
+  ' "$report" >/dev/null || die "loader validation report is malformed"
 }
 
 
@@ -1190,8 +1244,8 @@ run_full_stage() {
   workload_container_arguments 1 1
   local sample_duration=$(( WARMUP_SECONDS + DURATION_SECONDS + 120 ))
   local loader_args=(
-    java "${JAVA_FLAGS[@]}" -jar "$BASELINE_DIST/benchbase.jar"
-    -b ycsb -c "$BASELINE_CONFIG"
+    java "${JAVA_FLAGS[@]}" -jar "$CURRENT_DIST/benchbase.jar"
+    -b ycsb -c "$CURRENT_CONFIG"
     --create=false --load=true --execute=false
     --directory "$trial_dir/loader_results"
   )
@@ -1209,7 +1263,7 @@ run_full_stage() {
   )
   mkdir -p "$trial_dir/loader_results" "$trial_dir/benchbase_results"
   local loader_command workload_command
-  loader_command="cd $(printf '%q' "$BASELINE_DIST") && exec $(shell_command "${loader_args[@]}")"
+  loader_command="cd $(printf '%q' "$CURRENT_DIST") && exec $(shell_command "${loader_args[@]}")"
   workload_command="cd $(printf '%q' "$CURRENT_DIST") && exec $(shell_command "${workload_args[@]}")"
   printf '%s\n' "$loader_command" >"$trial_dir/loader-command.txt"
   printf '%s\n' "$workload_command" >"$trial_dir/workload-command.txt"
@@ -1220,6 +1274,9 @@ run_full_stage() {
     "BLACKBOX_MONITOR_METRICS_PATH=$trial_dir/monitor_metrics.json" \
     "BLACKBOX_RUN_ID_PATH=$trial_dir/run_id.txt" \
     "BLACKBOX_BOOTSTRAP_MANIFEST_PATH=$trial_dir/bootstrap_manifest.json" \
+    "BLACKBOX_LOADER_VALIDATION_PATH=$trial_dir/loader_validation.json" \
+    "BLACKBOX_LOADER_DECLARED_COUNTS_FILE=$trial_dir/loader_declaration.json" \
+    "BLACKBOX_LOADER_BATCH_SIZE=$LOADER_BATCH_SIZE" \
     "BLACKBOX_MONITOR_BIN=$MONITOR_BIN" \
     "BLACKBOX_LOADER_COMMAND=$loader_command" \
     "BLACKBOX_WORKLOAD_COMMAND=$workload_command" \
@@ -1240,6 +1297,9 @@ run_full_stage() {
   BLACKBOX_MONITOR_METRICS_PATH="$trial_dir/monitor_metrics.json" \
   BLACKBOX_RUN_ID_PATH="$trial_dir/run_id.txt" \
   BLACKBOX_BOOTSTRAP_MANIFEST_PATH="$trial_dir/bootstrap_manifest.json" \
+  BLACKBOX_LOADER_VALIDATION_PATH="$trial_dir/loader_validation.json" \
+  BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json" \
+  BLACKBOX_LOADER_BATCH_SIZE="$LOADER_BATCH_SIZE" \
   BLACKBOX_MONITOR_BIN="$MONITOR_BIN" \
   BLACKBOX_LOADER_COMMAND="$loader_command" \
   BLACKBOX_WORKLOAD_COMMAND="$workload_command" \
@@ -1264,6 +1324,8 @@ run_full_stage() {
   fi
   [[ -s $trial_dir/run_id.txt ]] || die "e2e did not record its run ID"
   [[ -s $trial_dir/bootstrap_manifest.json ]] || die "e2e did not record its bootstrap manifest"
+  [[ -s $trial_dir/loader_validation.json ]] || die "e2e did not record loader validation"
+  validate_loader_report "$trial_dir/loader_validation.json"
   validate_bootstrap "$trial_dir/bootstrap_manifest.json"
   local run_id
   run_id=$(tr -d '[:space:]' <"$trial_dir/run_id.txt")
@@ -1547,7 +1609,21 @@ run_trial() {
       capture_redis_configuration "$trial_dir"
     fi
     export BLACKBOX_ACTIVE_RUN_ID=$run_id
-    run_loader "$trial_dir"
+    local loader_distribution=$BASELINE_DIST
+    local loader_config=$BASELINE_CONFIG
+    local loader_declaration_available=0
+    local loader_mode=disabled
+    if [[ $stage == read_capture_encoding || $stage == read_capture_encoding_redis ]]; then
+      loader_distribution=$CURRENT_DIST
+      loader_config=$CURRENT_CONFIG
+      loader_declaration_available=1
+      loader_mode=capture_encoding
+      export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
+    else
+      unset BLACKBOX_LOADER_DECLARED_COUNTS_FILE
+    fi
+    run_loader "$trial_dir" "$loader_distribution" "$loader_config" "$loader_mode"
+    validate_independent_loader_state "$trial_dir" "$loader_declaration_available"
     capture_bootstrap "$trial_dir"
     run_direct_workload "$stage" "$trial_dir" "$run_id"
     assert_no_transaction_markers "$trial_dir"
@@ -1600,10 +1676,12 @@ run_cdc_trial() {
   capture_host_before "$trial_dir"
   capture_versions "$trial_dir"
   export BLACKBOX_ACTIVE_RUN_ID=$run_id
+  unset BLACKBOX_LOADER_DECLARED_COUNTS_FILE
   record_command "$trial_dir/commands.txt" blackbox_commit_fence RUN_START
   blackbox_commit_fence RUN_START
   wait_for_cdc_fence RUN_START "$trial_dir"
-  run_loader "$trial_dir"
+  run_loader "$trial_dir" "$BASELINE_DIST" "$BASELINE_CONFIG" disabled
+  validate_independent_loader_state "$trial_dir" 0
   capture_bootstrap "$trial_dir"
   record_command "$trial_dir/commands.txt" blackbox_commit_fence LOAD_FINISHED
   blackbox_commit_fence LOAD_FINISHED
@@ -1689,11 +1767,13 @@ main() {
     return 0
   fi
   export BLACKBOX_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES"
+  export BLACKBOX_LOADER_BATCH_SIZE="$LOADER_BATCH_SIZE"
   verify_canonical_container
   verify_inputs
   if (( VERIFY_INPUTS_ONLY == 1 )); then
-    printf 'verified baseline=%s output=%s stages=%s redis_maxmemory_bytes=%s monitor_pending_client_bytes=%s monitor_retained_identity_bytes=%s output_max_bytes=%s\n' \
+    printf 'verified baseline=%s output=%s stages=%s loader_batch_size=%s redis_maxmemory_bytes=%s monitor_pending_client_bytes=%s monitor_retained_identity_bytes=%s output_max_bytes=%s\n' \
       "$BASELINE_HEAD" "$OUTPUT_ROOT" "$STAGE_ROSTER" \
+      "$LOADER_BATCH_SIZE" \
       "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
       "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" "$OUTPUT_MAX_BYTES"
     return 0

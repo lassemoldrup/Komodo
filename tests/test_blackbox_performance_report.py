@@ -94,6 +94,7 @@ class ReportTest(unittest.TestCase):
             "scale_factor": 1,
             "field_size": 32,
             "loader_threads": 1,
+            "loader_batch_size": 128,
             "warmup_seconds": 1,
             "requested_duration_seconds": 2,
             "random_seed": 20260818,
@@ -136,12 +137,36 @@ class ReportTest(unittest.TestCase):
             "table_row_counts": [{"table": "benchbase.usertable", "row_count": 1000}],
             "canonical_state_digest": "a" * 64,
         }
+        loader_validation = {
+            "kind": "loader_validation",
+            "benchmark": "ycsb",
+            "declaration_available": stage not in {"benchbase_uninstrumented", "cdc_capture"},
+            "loader_batch_size": 128,
+            "scale_parameter": None,
+            "declared_table_row_counts": (
+                [{"table": "benchbase.usertable", "row_count": 1000}]
+                if stage not in {"benchbase_uninstrumented", "cdc_capture"}
+                else None
+            ),
+            "expected_table_row_counts": [
+                {"table": "benchbase.usertable", "row_count": 1000}
+            ],
+            "observed_table_row_counts": [
+                {"table": "benchbase.usertable", "row_count": 1000}
+            ],
+            "derived_cardinality_checks": [],
+            "relationship_checks": [],
+            "validated": True,
+        }
         (trial / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
         (trial / "benchbase_metrics.json").write_text(
             json.dumps(benchbase), encoding="utf-8"
         )
         (trial / "bootstrap_manifest.json").write_text(
             json.dumps(bootstrap), encoding="utf-8"
+        )
+        (trial / "loader_validation.json").write_text(
+            json.dumps(loader_validation), encoding="utf-8"
         )
         if stage in {"read_capture_encoding", "read_capture_encoding_redis"}:
             (trial / "capture_metrics.json").write_text(

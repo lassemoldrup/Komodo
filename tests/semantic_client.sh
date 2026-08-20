@@ -18,6 +18,27 @@ load_rows() {
       (2, 'old', 'stable', NULL, '', 'é', '中', '0', 'hello', '🙂', 'last');
     COMMIT;
   " >/dev/null
+  python3 - <<'PY'
+import json
+import os
+
+path = os.environ["BLACKBOX_LOADER_DECLARED_COUNTS_FILE"]
+temporary = path + ".tmp"
+document = {
+    "kind": "loader_declaration",
+    "benchmark": "ycsb",
+    "loader_batch_size": int(os.environ["BLACKBOX_LOADER_BATCH_SIZE"]),
+    "scale_parameter": None,
+    "declared_table_row_counts": [
+        {"table": "benchbase.usertable", "row_count": 2}
+    ],
+}
+with open(temporary, "x", encoding="utf-8") as output:
+    json.dump(document, output, separators=(",", ":"))
+    output.write("\n")
+os.link(temporary, path)
+os.unlink(temporary)
+PY
 }
 
 

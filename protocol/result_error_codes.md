@@ -112,7 +112,7 @@ FINAL
 | `FENCE_DUPLICATE` | A phase fence is repeated. |
 | `FENCE_ORDER_INVALID` | Fences occur in an illegal database order. |
 | `BOOTSTRAP_MANIFEST_MISSING` | `LOAD_FINISHED` has no independent state manifest. |
-| `BOOTSTRAP_STATE_MISMATCH` | Reconstructed state/counts differ from the manifest. |
+| `BOOTSTRAP_STATE_MISMATCH` | Loader declarations, independent SQL validation, reconstructed state, counts, or the bootstrap manifest disagree. |
 | `PHASE_ANCHOR_FAILED` | A required per-session load anchor cannot be consumed. |
 | `QUIESCENCE_UNPROVEN` | The coordinator cannot prove all clients stopped before closure. |
 | `COMPONENT_RESTARTED` | A forbidden database/CDC/Redis/client/monitor restart occurred. |
