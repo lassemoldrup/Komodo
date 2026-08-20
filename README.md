@@ -255,6 +255,24 @@ run retains its raw CDC, client, and status streams plus Compose state and
 container logs before teardown. These runs generate fresh run IDs and do not
 replace or modify the checked-in captured CDC fixtures.
 
+Run the focused audited TPC-C OrderStatus acceptance against a fresh stack with:
+
+```bash
+./tests/run_tpcc_order_status_acceptance.sh \
+  --benchbase-dist /path/to/benchbase-mariadb \
+  --monitor-bin /path/to/blackbox_run_monitor \
+  --output-dir /path/to/new-output-directory
+```
+
+The default run uses one warehouse, one terminal, RR, seed 3, and weights
+`0,0,100,0,0`. It retains a machine-readable run configuration, independent
+customer last-name cardinalities, client/status stream captures, the CDC tail
+strictly after `LOAD_FINISHED_SEEN`, monitor metrics, and an acceptance report.
+Every control has a command-line or `BLACKBOX_TPCC_ORDER_STATUS_*` environment
+form; `--print-config` validates and prints the resolved non-destructive run
+configuration. The live driver is destructive to the repository Compose stack
+and tears that stack down unless `--keep-stack` is explicitly selected.
+
 ## Performance measurement
 
 Create the required detached, clean pre-instrumentation worktree once, from the

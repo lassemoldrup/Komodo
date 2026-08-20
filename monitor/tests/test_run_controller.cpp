@@ -1072,6 +1072,9 @@ void testCapturedTpccControllerReconciliation() {
   const auto metrics = controller.joinerMetrics();
   BLACKBOX_CHECK(metrics.accepted_cdc_transactions == 12U);
   BLACKBOX_CHECK(metrics.joined_workload_transactions == 8U);
+  BLACKBOX_CHECK(metrics.marker_only_workload_transactions == 2U);
+  BLACKBOX_CHECK(metrics.client_first_matches == 4U);
+  BLACKBOX_CHECK(metrics.cdc_first_matches == 4U);
   BLACKBOX_CHECK(metrics.released_bootstrap_transactions == 1U);
   BLACKBOX_CHECK(metrics.released_phase_anchor_transactions == 1U);
   BLACKBOX_CHECK(metrics.unmatched_client_records == 0U);

@@ -734,6 +734,74 @@ void testTpccClientFixtureAndFailures() {
               MonitorErrorCode::ClientReadDigestMismatch);
 }
 
+void testOrderStatusFixtureProjection() {
+  const auto fixture = loadTpccClientFixture();
+  const auto tpcc_parser = tpccParser(fixture);
+  const auto &transactions = fixture.at("semantic_transactions");
+  const auto found = std::find_if(
+      transactions.begin(), transactions.end(), [](const Json &entry) {
+        return entry.at("client_txn").at("txn_type") == "OrderStatus";
+      });
+  BLACKBOX_REQUIRE(found != transactions.end());
+  const auto parsed = tpcc_parser.parse(found->at("client_txn").dump());
+  BLACKBOX_CHECK(parsed.txn_type == "OrderStatus");
+  BLACKBOX_CHECK(parsed.session_seq == 4U);
+  BLACKBOX_CHECK(parsed.correlation_id.txn_id == 4U);
+  BLACKBOX_CHECK(
+      parsed.read_digest ==
+      "a7445d293e9a689255d1c45d9fde52fc7d1d1a6d076d655ccf5e19499c09b19a");
+  BLACKBOX_REQUIRE(parsed.reads.size() == 4U);
+  for (std::size_t index = 0; index < parsed.reads.size(); ++index) {
+    BLACKBOX_CHECK(parsed.reads[index].event_seq == index);
+    BLACKBOX_CHECK(parsed.reads[index].state == ClientValueState::Present);
+    BLACKBOX_CHECK(parsed.reads[index].source == ClientReadSource::Snapshot);
+    BLACKBOX_REQUIRE(parsed.reads[index].value.has_value());
+  }
+  BLACKBOX_REQUIRE(parsed.reads[1].value->size() > 4U);
+  BLACKBOX_CHECK(std::to_integer<unsigned int>(parsed.reads[1].value->at(4U)) ==
+                 0U); // nullable o_carrier_id
+  for (const auto index : {2U, 3U}) {
+    BLACKBOX_REQUIRE(parsed.reads[index].value->size() > 4U);
+    BLACKBOX_CHECK(std::to_integer<unsigned int>(parsed.reads[index].value->at(
+                       4U)) == 0U); // nullable ol_delivery_d
+  }
+  BLACKBOX_CHECK(parsed.reads[2].key != parsed.reads[3].key);
+
+  const auto &provenance = found->at("read_provenance");
+  BLACKBOX_REQUIRE(provenance.size() == 4U);
+  BLACKBOX_CHECK(provenance[0].at("table") == "benchbase.customer");
+  BLACKBOX_CHECK(provenance[1].at("table") == "benchbase.oorder");
+  BLACKBOX_CHECK(provenance[2].at("table") == "benchbase.order_line");
+  BLACKBOX_CHECK(provenance[3].at("table") == "benchbase.order_line");
+  BLACKBOX_CHECK(provenance[1].at("trace_statement_id") ==
+                 "ordStatGetNewestOrdFullSQL");
+  BLACKBOX_CHECK(provenance[2].at("trace_statement_id") ==
+                 "ordStatGetOrderLinesFullSQL");
+  BLACKBOX_CHECK(provenance[3].at("trace_statement_id") ==
+                 "ordStatGetOrderLinesFullSQL");
+
+  auto duplicate_sequence = found->at("client_txn");
+  duplicate_sequence["reads"][3]["event_seq"] = 2;
+  expectError(tpcc_parser, duplicate_sequence.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto truncated_nullable = found->at("client_txn");
+  truncated_nullable["reads"][3]["value_bytes_base64"] = "AA==";
+  expectError(tpcc_parser, truncated_nullable.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+
+  auto locking_source = found->at("client_txn");
+  locking_source["reads"][1]["source"] = "locking";
+  expectError(tpcc_parser, locking_source.dump(),
+              MonitorErrorCode::UnsupportedReadSource);
+
+  const auto &done = fixture.at("session_done");
+  BLACKBOX_CHECK(done.at("retry_attempts") == 0);
+  BLACKBOX_CHECK(done.at("ambiguous_attempts") == 0);
+  BLACKBOX_CHECK(done.at("physical_attempts_started") == 8);
+  BLACKBOX_CHECK(done.at("published_transactions") == 8);
+}
+
 } // namespace
 
 int runClientTxnTests() {
@@ -747,5 +815,6 @@ int runClientTxnTests() {
   testLimitsAndConfiguration();
   testAdapterOwnedTransactionMembership();
   testTpccClientFixtureAndFailures();
+  testOrderStatusFixtureProjection();
   return 0;
 }

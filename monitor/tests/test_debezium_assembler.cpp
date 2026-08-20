@@ -1077,6 +1077,21 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_CHECK(
       tables.size() ==
       blackbox::BenchmarkAdapterRegistry::require("tpcc").tables().size());
+  const auto order_status = std::find_if(
+      fixture.at("transactions").begin(), fixture.at("transactions").end(),
+      [](const Json &transaction) {
+        return transaction.at("name") == "order_status_marker_only";
+      });
+  BLACKBOX_REQUIRE(order_status != fixture.at("transactions").end());
+  const auto order_status_index = static_cast<std::size_t>(
+      std::distance(fixture.at("transactions").begin(), order_status));
+  BLACKBOX_REQUIRE(order_status_index < actual.size());
+  BLACKBOX_CHECK(actual[order_status_index].kind ==
+                 CdcTransactionKind::WorkloadMarked);
+  BLACKBOX_REQUIRE(actual[order_status_index].correlation_id.has_value());
+  BLACKBOX_CHECK(actual[order_status_index].correlation_id->txn_id == 4U);
+  BLACKBOX_CHECK(actual[order_status_index].writes.empty());
+  BLACKBOX_CHECK(order_status->at("raw_entries").size() == 3U);
 
   {
     auto invalid = fixture;
