@@ -8,8 +8,10 @@ PROBE_BUILD_DIR ?= /tmp/db-monitoring-fractured-read-probe-build
 MAVEN ?= mvn
 PERFORMANCE_BASELINE_ROOT ?= /media/newhd/yifan/db-monitoring-builds/blackbox-performance/worktrees/benchbase-2224eec
 PERFORMANCE_OUTPUT_ROOT ?=
+MONITOR_PERFORMANCE_CORPUS_DIR ?= /media/newhd/yifan/db-monitoring-builds/blackbox-performance/measurements/final-120s-20260819T143836Z/trials/repetition-01/06-assembly_join_check
+MONITOR_PERFORMANCE_OUTPUT_ROOT ?=
 
-.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live performance-smoke performance-measure
+.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live performance-smoke performance-measure monitor-performance-measure
 
 ## Start the stack for $(DB)
 up:
@@ -85,6 +87,7 @@ test-lifecycle: test-monitor
 	./tests/test_live_lock.sh
 	./tests/test_e2e_lifecycle.sh
 	./tests/test_blackbox_performance_harness.sh
+	./tests/test_blackbox_monitor_performance_harness.sh
 
 ## Destructive integration against the pinned MariaDB/Debezium/Redis stack
 test-lifecycle-live: test-monitor
@@ -117,3 +120,12 @@ performance-measure:
 		set -- "$$@" --output-root "$(PERFORMANCE_OUTPUT_ROOT)"; \
 	fi; \
 	./scripts/run_blackbox_performance.sh "$$@"
+
+## Replay one captured 120-second corpus through join-only and checked monitors
+monitor-performance-measure:
+	@test -n "$(MONITOR_PERFORMANCE_OUTPUT_ROOT)" || { \
+		echo 'MONITOR_PERFORMANCE_OUTPUT_ROOT is required' >&2; exit 2; \
+	}
+	./scripts/run_blackbox_monitor_performance.sh \
+		--corpus-dir "$(MONITOR_PERFORMANCE_CORPUS_DIR)" \
+		--output-root "$(MONITOR_PERFORMANCE_OUTPUT_ROOT)"

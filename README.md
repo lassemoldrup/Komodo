@@ -322,6 +322,33 @@ flat-array field order and writes RESP one argument at a time, so output memory
 is bounded by the largest field. It uses standard-library `json.load`, so the
 parsed input document itself must fit in memory.
 
+Measure whole-process monitor capacity by replaying one complete captured
+client/CDC corpus into a fresh Redis before starting the monitor:
+
+```bash
+./scripts/run_blackbox_monitor_performance.sh \
+  --corpus-dir /media/newhd/yifan/db-monitoring-builds/blackbox-performance/measurements/final-120s-20260819T143836Z/trials/repetition-01/06-assembly_join_check \
+  --output-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/monitor-throughput-120s \
+  --stage assembly_join \
+  --stage assembly_join_check
+```
+
+`--stage` is repeatable; omit it to run both modes, or select only one. The
+runner verifies the source trial checksum and clean audited PASS, restores the
+same stream IDs and bytes for every trial, and rotates only the selected modes.
+The default source-duration contract is 120 seconds. That describes how long
+the captured workload ran: the preloaded monitor must drain the corpus as fast
+as possible and is not delayed to fill 120 seconds.
+
+Monitor throughput is workload transactions divided by the monitor's monotonic
+full-lifecycle wall time. It includes Redis reading, protocol parsing, CDC
+assembly, joining, optional checking, and terminal reconciliation; it excludes
+corpus preload. The reports are `raw_monitor_trials.csv`,
+`monitor_summary_statistics.csv/json`, and the concise
+`monitor_headline_results.csv/md`. Join-only and checked trials use the exact
+same numerator corpus, while checker core consume time remains diagnostic and
+is not reported as whole-process throughput.
+
 `PERFORMANCE_BASELINE_ROOT` overrides the worktree path. An output root must be
 below `/media/newhd/yifan/db-monitoring-builds` and must not already contain files. Normal measured
 runs require clean current BenchBase, monitor, and checker worktrees; `--smoke`
