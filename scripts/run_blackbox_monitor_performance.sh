@@ -26,6 +26,8 @@ RESOURCE_INTERVAL_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_RESOURCE_INTERVAL_SECON
 REDIS_MAXMEMORY_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_REDIS_MAXMEMORY_BYTES:-8589934592}
 MONITOR_MAX_PENDING_CLIENT_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_BYTES:-3221225472}
 MONITOR_MAX_RETAINED_IDENTITY_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_RETAINED_IDENTITY_BYTES:-2147483648}
+MONITOR_MAX_BOOTSTRAP_STATE_ROWS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_ROWS:-10000000}
+MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_BYTES:-268435456}
 OUTPUT_MAX_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_OUTPUT_MAX_BYTES:-107374182400}
 COMPOSE_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_COMPOSE_TIMEOUT_SECONDS:-300}
 DOCKER_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_DOCKER_TIMEOUT_SECONDS:-30}
@@ -70,6 +72,10 @@ Options:
                              Joiner pending-client capacity (default: 3221225472).
   --monitor-retained-identity-bytes N
                              Joiner retained-identity capacity (default: 2147483648).
+  --monitor-bootstrap-state-rows N
+                             Joiner bootstrap row capacity (default: 10000000).
+  --monitor-bootstrap-state-bytes N
+                             Joiner bootstrap byte capacity (default: 268435456).
   --output-max-bytes N       Artifact limit, at most 100 GiB (default: 100 GiB).
   --replay-timeout-seconds N Per-stream replay limit (default: 1800).
   --docker-timeout-seconds N Bounded Docker daemon operation limit (default: 30).
@@ -116,6 +122,16 @@ require_capacity_bytes() {
   python3 -c \
     'import sys; value = int(sys.argv[1]); raise SystemExit(0 if value <= 9223372036854775807 else 1)' \
     "$value" || die "$name exceeds the signed 64-bit byte range: $value"
+}
+
+
+require_capacity_count() {
+  local name=$1
+  local value=$2
+  require_positive_integer "$name" "$value"
+  python3 -c \
+    'import sys; value = int(sys.argv[1]); raise SystemExit(0 if value <= 9223372036854775807 else 1)' \
+    "$value" || die "$name exceeds the signed 64-bit count range: $value"
 }
 
 
@@ -194,6 +210,14 @@ parse_arguments() {
         MONITOR_MAX_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-retained-identity-bytes value}
         shift 2
         ;;
+      --monitor-bootstrap-state-rows)
+        MONITOR_MAX_BOOTSTRAP_STATE_ROWS=${2:?missing --monitor-bootstrap-state-rows value}
+        shift 2
+        ;;
+      --monitor-bootstrap-state-bytes)
+        MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${2:?missing --monitor-bootstrap-state-bytes value}
+        shift 2
+        ;;
       --output-max-bytes)
         OUTPUT_MAX_BYTES=${2:?missing --output-max-bytes value}
         shift 2
@@ -232,6 +256,8 @@ parse_arguments() {
   require_capacity_bytes redis-maxmemory-bytes "$REDIS_MAXMEMORY_BYTES"
   require_capacity_bytes monitor-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES"
   require_capacity_bytes monitor-retained-identity-bytes "$MONITOR_MAX_RETAINED_IDENTITY_BYTES"
+  require_capacity_count monitor-bootstrap-state-rows "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS"
+  require_capacity_bytes monitor-bootstrap-state-bytes "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES"
   require_capacity_bytes output-max-bytes "$OUTPUT_MAX_BYTES"
   (( OUTPUT_MAX_BYTES <= 107374182400 )) ||
     die "output-max-bytes may not exceed 107374182400"
@@ -788,7 +814,8 @@ write_trial_metadata() {
     "$CDC_SHA256" "$CLIENT_SHA256" "$CDC_ENTRIES" "$CLIENT_ENTRIES" \
     "$WORKLOAD_TRANSACTIONS" "$SI_MONITORING_HEAD" "$CO_CHECKER_HEAD" \
     "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
-    "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" <<'PY'
+    "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -819,6 +846,8 @@ document = {
     "redis_maxmemory_bytes": int(values[18]),
     "monitor_max_pending_client_bytes": int(values[19]),
     "monitor_max_retained_identity_bytes": int(values[20]),
+    "monitor_max_bootstrap_state_rows": int(values[21]),
+    "monitor_max_bootstrap_state_bytes": int(values[22]),
 }
 Path(values[0]).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -858,7 +887,9 @@ run_monitor() {
     --processing-mode "$processing_mode" \
     --metrics-output "$trial_dir/monitor_metrics.json" \
     --max-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
-    --max-retained-identity-bytes "$MONITOR_MAX_RETAINED_IDENTITY_BYTES"
+    --max-retained-identity-bytes "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    --max-bootstrap-state-rows "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" \
+    --max-bootstrap-state-bytes "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES"
   local status=0
   set +e
   timeout --foreground --signal=TERM --kill-after=10 "$measurement_timeout" \
@@ -875,6 +906,8 @@ run_monitor() {
     --metrics-output "$trial_dir/monitor_metrics.json" \
     --max-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
     --max-retained-identity-bytes "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    --max-bootstrap-state-rows "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" \
+    --max-bootstrap-state-bytes "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
     >"$trial_dir/monitor.stdout.log" 2>"$trial_dir/monitor.stderr.log"
   status=$?
   set -e
@@ -958,7 +991,9 @@ integer(at(metrics, "process", "max_rss_kib"), "max RSS", 1)
 if at(metrics, "process", "user_cpu_nanoseconds") + at(metrics, "process", "system_cpu_nanoseconds") <= 0:
     fail("monitor consumed no CPU")
 if at(metrics, "limits", "joiner", "max_pending_client_bytes") != metadata.get("monitor_max_pending_client_bytes") or \
-        at(metrics, "limits", "joiner", "max_retained_identity_bytes") != metadata.get("monitor_max_retained_identity_bytes"):
+        at(metrics, "limits", "joiner", "max_retained_identity_bytes") != metadata.get("monitor_max_retained_identity_bytes") or \
+        at(metrics, "limits", "joiner", "max_bootstrap_state_rows") != metadata.get("monitor_max_bootstrap_state_rows") or \
+        at(metrics, "limits", "joiner", "max_bootstrap_state_bytes") != metadata.get("monitor_max_bootstrap_state_bytes"):
     fail("monitor resource limits differ from metadata")
 if at(metrics, "assembler", "accepted_raw_records") != raw_cdc:
     fail("monitor did not consume the exact raw CDC corpus")

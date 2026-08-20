@@ -102,6 +102,8 @@ class ReportTest(unittest.TestCase):
             "redis_maxmemory_bytes": 8589934592,
             "monitor_max_pending_client_bytes": 1073741824,
             "monitor_max_retained_identity_bytes": 2147483648,
+            "monitor_max_bootstrap_state_rows": 10000000,
+            "monitor_max_bootstrap_state_bytes": 268435456,
             "output_max_bytes": 107374182400,
             "isolation": "REPEATABLE_READ",
             "rate": "unlimited",
@@ -206,6 +208,8 @@ class ReportTest(unittest.TestCase):
                     "joiner": {
                         "max_pending_client_bytes": 1073741824,
                         "max_retained_identity_bytes": 2147483648,
+                        "max_bootstrap_state_rows": 10000000,
+                        "max_bootstrap_state_bytes": 268435456,
                     }
                 },
                 "joiner": {
@@ -545,6 +549,18 @@ class ReportTest(unittest.TestCase):
                 report.ReportError, "monitor_max_pending_client_bytes"
             ):
                 report.write_raw_trials(root, root / "raw_trials.csv")
+
+    def test_trial_rejects_bootstrap_state_capacity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            self.write_trial(root, "assembly_join", 1)
+            trial = root / "trials" / "repetition-01" / "01-assembly_join"
+            monitor_path = trial / "monitor_metrics.json"
+            monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
+            monitor["limits"]["joiner"]["max_bootstrap_state_bytes"] = 1
+            monitor_path.write_text(json.dumps(monitor), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "bootstrap-state byte"):
+                report.trial_row(trial)
 
     def test_aggregate_rejects_truncated_configured_repetitions(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

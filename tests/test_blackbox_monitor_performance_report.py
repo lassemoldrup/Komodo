@@ -62,6 +62,8 @@ class MonitorPerformanceReportTest(unittest.TestCase):
             "redis_maxmemory_bytes": 8 * 1024**3,
             "monitor_max_pending_client_bytes": 3 * 1024**3,
             "monitor_max_retained_identity_bytes": 2 * 1024**3,
+            "monitor_max_bootstrap_state_rows": 10_000_000,
+            "monitor_max_bootstrap_state_bytes": 256 * 1024**2,
             "si_monitoring_head": "d" * 40,
             "co_checker_head": "e" * 40,
             "si_monitoring_dirty": False,
@@ -85,6 +87,8 @@ class MonitorPerformanceReportTest(unittest.TestCase):
                 "joiner": {
                     "max_pending_client_bytes": 3 * 1024**3,
                     "max_retained_identity_bytes": 2 * 1024**3,
+                    "max_bootstrap_state_rows": 10_000_000,
+                    "max_bootstrap_state_bytes": 256 * 1024**2,
                 }
             },
             "joiner": {"joined_workload_transactions": self.source_transactions},
@@ -308,6 +312,8 @@ class MonitorPerformanceReportTest(unittest.TestCase):
             ("redis_maxmemory_bytes", 16 * 1024**3),
             ("monitor_max_pending_client_bytes", 4 * 1024**3),
             ("monitor_max_retained_identity_bytes", 3 * 1024**3),
+            ("monitor_max_bootstrap_state_rows", 20_000_000),
+            ("monitor_max_bootstrap_state_bytes", 1024**3),
             ("si_monitoring_head", "f" * 40),
             ("co_checker_head", "f" * 40),
         ):
@@ -464,6 +470,20 @@ class MonitorPerformanceReportTest(unittest.TestCase):
                 "limit mismatch",
                 lambda value: value["limits"]["joiner"].__setitem__(
                     "max_pending_client_bytes", 1
+                ),
+                "differs from trial metadata",
+            ),
+            (
+                "bootstrap row limit mismatch",
+                lambda value: value["limits"]["joiner"].__setitem__(
+                    "max_bootstrap_state_rows", 1
+                ),
+                "differs from trial metadata",
+            ),
+            (
+                "bootstrap byte limit mismatch",
+                lambda value: value["limits"]["joiner"].__setitem__(
+                    "max_bootstrap_state_bytes", 1
                 ),
                 "differs from trial metadata",
             ),

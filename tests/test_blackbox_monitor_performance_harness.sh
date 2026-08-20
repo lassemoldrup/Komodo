@@ -63,9 +63,21 @@ if "$RUNNER" --corpus-dir "$PLACEHOLDER_CORPUS" --output-root "$PLACEHOLDER_OUTP
   --output-max-bytes 107374182401 --print-stage-order >/dev/null 2>&1; then
   fail "output limit above 100 GiB was accepted"
 fi
+for option in --monitor-bootstrap-state-rows --monitor-bootstrap-state-bytes; do
+  for invalid in 0 9223372036854775808; do
+    if "$RUNNER" --corpus-dir "$PLACEHOLDER_CORPUS" --output-root "$PLACEHOLDER_OUTPUT" \
+        "$option" "$invalid" --print-stage-order >/dev/null 2>&1; then
+      fail "$option accepted $invalid"
+    fi
+  done
+done
 
 "$RUNNER" --help 2>&1 | grep -q -- '--expected-duration-seconds' ||
   fail "help omits the source-duration contract"
+"$RUNNER" --help 2>&1 | grep -q -- '--monitor-bootstrap-state-rows' ||
+  fail "help omits the monitor bootstrap-state row limit"
+"$RUNNER" --help 2>&1 | grep -q -- '--monitor-bootstrap-state-bytes' ||
+  fail "help omits the monitor bootstrap-state byte limit"
 
 # shellcheck source=scripts/run_blackbox_monitor_performance.sh
 . "$RUNNER"

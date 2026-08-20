@@ -131,6 +131,8 @@ verified=$(
       $verified == *'loader_batch_size=128'* &&
       $verified == *'monitor_pending_client_bytes=1073741824'* &&
       $verified == *'monitor_retained_identity_bytes=2147483648'* &&
+      $verified == *'monitor_bootstrap_state_rows=10000000'* &&
+      $verified == *'monitor_bootstrap_state_bytes=268435456'* &&
       $verified == *'output_max_bytes=107374182400'* ]] ||
   fail 'performance capacity defaults were not reported'
 [[ $verified == *'stages=benchbase_uninstrumented,read_capture_encoding,read_capture_encoding_redis,cdc_capture,assembly_join,assembly_join_check'* ]] ||
@@ -151,11 +153,15 @@ verified=$(
     --redis-maxmemory-bytes 4294967296 \
     --monitor-pending-client-bytes 805306368 \
     --monitor-retained-identity-bytes 1073741824 \
+    --monitor-bootstrap-state-rows 20000000 \
+    --monitor-bootstrap-state-bytes 1073741824 \
     --output-max-bytes 53687091200
 )
 [[ $verified == *'redis_maxmemory_bytes=4294967296'* &&
       $verified == *'monitor_pending_client_bytes=805306368'* &&
       $verified == *'monitor_retained_identity_bytes=1073741824'* &&
+      $verified == *'monitor_bootstrap_state_rows=20000000'* &&
+      $verified == *'monitor_bootstrap_state_bytes=1073741824'* &&
       $verified == *'output_max_bytes=53687091200'* ]] ||
   fail 'performance capacity overrides were not reported'
 
@@ -178,6 +184,8 @@ for option in \
   --redis-maxmemory-bytes \
   --monitor-pending-client-bytes \
   --monitor-retained-identity-bytes \
+  --monitor-bootstrap-state-rows \
+  --monitor-bootstrap-state-bytes \
   --output-max-bytes; do
   if "$RUNNER" --print-stage-order "$option" 0 >/dev/null 2>&1; then
     fail "$option accepted zero"

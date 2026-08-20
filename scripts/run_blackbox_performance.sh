@@ -44,6 +44,8 @@ RESOURCE_INTERVAL_SECONDS=${BLACKBOX_PERFORMANCE_RESOURCE_INTERVAL_SECONDS:-1}
 REDIS_MAXMEMORY_BYTES=${BLACKBOX_PERFORMANCE_REDIS_MAXMEMORY_BYTES:-8589934592}
 MONITOR_MAX_PENDING_CLIENT_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_BYTES:-1073741824}
 MONITOR_MAX_RETAINED_IDENTITY_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_RETAINED_IDENTITY_BYTES:-2147483648}
+MONITOR_MAX_BOOTSTRAP_STATE_ROWS=${BLACKBOX_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_ROWS:-10000000}
+MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_BYTES:-268435456}
 OUTPUT_MAX_BYTES=${BLACKBOX_PERFORMANCE_OUTPUT_MAX_BYTES:-107374182400}
 COMPOSE_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_COMPOSE_TIMEOUT_SECONDS:-300}
 LOADER_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_LOADER_TIMEOUT_SECONDS:-600}
@@ -101,6 +103,10 @@ Options:
                              Joiner pending-client capacity (default: 1073741824).
   --monitor-retained-identity-bytes N
                              Joiner identity capacity (default: 2147483648).
+  --monitor-bootstrap-state-rows N
+                             Joiner bootstrap row capacity (default: 10000000).
+  --monitor-bootstrap-state-bytes N
+                             Joiner bootstrap byte capacity (default: 268435456).
   --output-max-bytes N       Artifact budget (default: 107374182400).
   --print-stage-order        Print the deterministic rotated order and exit.
   --verify-inputs-only       Validate environment/worktrees/output safety and exit (smoke only).
@@ -141,6 +147,16 @@ require_capacity_bytes() {
   python3 -c \
     'import sys; value = int(sys.argv[1]); raise SystemExit(0 if 0 < value <= 9223372036854775807 else 1)' \
     "$value" || die "$name exceeds the signed 64-bit byte range: $value"
+}
+
+
+require_capacity_count() {
+  local name=$1
+  local value=$2
+  require_positive_integer "$name" "$value"
+  python3 -c \
+    'import sys; value = int(sys.argv[1]); raise SystemExit(0 if value <= 9223372036854775807 else 1)' \
+    "$value" || die "$name exceeds the signed 64-bit count range: $value"
 }
 
 
@@ -256,6 +272,14 @@ parse_arguments() {
         MONITOR_MAX_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-retained-identity-bytes value}
         shift 2
         ;;
+      --monitor-bootstrap-state-rows)
+        MONITOR_MAX_BOOTSTRAP_STATE_ROWS=${2:?missing --monitor-bootstrap-state-rows value}
+        shift 2
+        ;;
+      --monitor-bootstrap-state-bytes)
+        MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${2:?missing --monitor-bootstrap-state-bytes value}
+        shift 2
+        ;;
       --output-max-bytes)
         OUTPUT_MAX_BYTES=${2:?missing --output-max-bytes value}
         shift 2
@@ -312,6 +336,10 @@ parse_arguments() {
     "$MONITOR_MAX_PENDING_CLIENT_BYTES"
   require_capacity_bytes monitor-retained-identity-bytes \
     "$MONITOR_MAX_RETAINED_IDENTITY_BYTES"
+  require_capacity_count monitor-bootstrap-state-rows \
+    "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS"
+  require_capacity_bytes monitor-bootstrap-state-bytes \
+    "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES"
   require_capacity_bytes output-max-bytes "$OUTPUT_MAX_BYTES"
   (( OUTPUT_MAX_BYTES <= 107374182400 )) ||
     die "output-max-bytes may not exceed the canonical 107374182400-byte cap"
@@ -595,6 +623,7 @@ write_system_provenance() {
   python3 - "$directory/performance-capacities.json" \
     "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
     "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
     "$OUTPUT_MAX_BYTES" <<'PY'
 import json
 import sys
@@ -606,7 +635,9 @@ Path(sys.argv[1]).write_text(
             "redis_maxmemory_bytes": int(sys.argv[2]),
             "monitor_max_pending_client_bytes": int(sys.argv[3]),
             "monitor_max_retained_identity_bytes": int(sys.argv[4]),
-            "output_max_bytes": int(sys.argv[5]),
+            "monitor_max_bootstrap_state_rows": int(sys.argv[5]),
+            "monitor_max_bootstrap_state_bytes": int(sys.argv[6]),
+            "output_max_bytes": int(sys.argv[7]),
         },
         indent=2,
         sort_keys=True,
@@ -942,6 +973,7 @@ write_trial_metadata() {
     "$SI_MONITORING_DIRTY" "$CURRENT_BENCHBASE_DIRTY" "$BASELINE_DIRTY" "$CO_CHECKER_DIRTY" \
     "$SMOKE" "$REPETITIONS" "$REDIS_MAXMEMORY_BYTES" \
     "$MONITOR_MAX_PENDING_CLIENT_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
     "$OUTPUT_MAX_BYTES" "$STAGE_ROSTER" <<'PY'
 import json
 import sys
@@ -985,8 +1017,10 @@ document = {
     "redis_maxmemory_bytes": int(values[24]),
     "monitor_max_pending_client_bytes": int(values[25]),
     "monitor_max_retained_identity_bytes": int(values[26]),
-    "output_max_bytes": int(values[27]),
-    "configured_stages": values[28].split(","),
+    "monitor_max_bootstrap_state_rows": int(values[27]),
+    "monitor_max_bootstrap_state_bytes": int(values[28]),
+    "output_max_bytes": int(values[29]),
+    "configured_stages": values[30].split(","),
 }
 path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -1286,6 +1320,8 @@ run_full_stage() {
     "BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES=$REDIS_MAXMEMORY_BYTES" \
     "BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES=$MONITOR_MAX_PENDING_CLIENT_BYTES" \
     "BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES=$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_ROWS=$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" \
+    "BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_BYTES=$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
     BLACKBOX_REDIS_HOST=host.docker.internal BLACKBOX_REDIS_PORT=6379 \
     "BLACKBOX_LOADER_TIMEOUT_SECONDS=$LOADER_TIMEOUT_SECONDS" \
     "BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=$TRIAL_TIMEOUT_SECONDS" \
@@ -1309,6 +1345,8 @@ run_full_stage() {
   BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES" \
   BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$MONITOR_MAX_PENDING_CLIENT_BYTES" \
   BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+  BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_ROWS="$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" \
+  BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_BYTES="$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
   BLACKBOX_REDIS_HOST=host.docker.internal \
   BLACKBOX_REDIS_PORT=6379 \
   BLACKBOX_LOADER_TIMEOUT_SECONDS="$LOADER_TIMEOUT_SECONDS" \
@@ -1771,11 +1809,13 @@ main() {
   verify_canonical_container
   verify_inputs
   if (( VERIFY_INPUTS_ONLY == 1 )); then
-    printf 'verified baseline=%s output=%s stages=%s loader_batch_size=%s redis_maxmemory_bytes=%s monitor_pending_client_bytes=%s monitor_retained_identity_bytes=%s output_max_bytes=%s\n' \
+    printf 'verified baseline=%s output=%s stages=%s loader_batch_size=%s redis_maxmemory_bytes=%s monitor_pending_client_bytes=%s monitor_retained_identity_bytes=%s monitor_bootstrap_state_rows=%s monitor_bootstrap_state_bytes=%s output_max_bytes=%s\n' \
       "$BASELINE_HEAD" "$OUTPUT_ROOT" "$STAGE_ROSTER" \
       "$LOADER_BATCH_SIZE" \
       "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
-      "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" "$OUTPUT_MAX_BYTES"
+      "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+      "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
+      "$OUTPUT_MAX_BYTES"
     return 0
   fi
 

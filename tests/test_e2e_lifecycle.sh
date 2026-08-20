@@ -281,12 +281,16 @@ processing_mode=audited
 metrics_output=
 pending_client_bytes=268435456
 retained_identity_bytes=536870912
+bootstrap_state_rows=10000000
+bootstrap_state_bytes=268435456
 while (( $# > 0 )); do
   case "$1" in
     --processing-mode) processing_mode=$2; shift 2 ;;
     --metrics-output) metrics_output=$2; shift 2 ;;
     --max-pending-client-bytes) pending_client_bytes=$2; shift 2 ;;
     --max-retained-identity-bytes) retained_identity_bytes=$2; shift 2 ;;
+    --max-bootstrap-state-rows) bootstrap_state_rows=$2; shift 2 ;;
+    --max-bootstrap-state-bytes) bootstrap_state_bytes=$2; shift 2 ;;
     *) echo "unexpected monitor argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -294,6 +298,8 @@ echo 'monitor:start' >>"$EVENT_LOG"
 echo "monitor:mode:$processing_mode" >>"$EVENT_LOG"
 echo "monitor:pending-client-bytes:$pending_client_bytes" >>"$EVENT_LOG"
 echo "monitor:retained-identity-bytes:$retained_identity_bytes" >>"$EVENT_LOG"
+echo "monitor:bootstrap-state-rows:$bootstrap_state_rows" >>"$EVENT_LOG"
+echo "monitor:bootstrap-state-bytes:$bootstrap_state_bytes" >>"$EVENT_LOG"
 while ! grep -q '^fence:END_FENCE$' "$EVENT_LOG"; do
   sleep 0.05
 done
@@ -310,12 +316,22 @@ if [[ $processing_mode == join-only ]]; then
     exit_status=1
   fi
   python3 - "$metrics_output" "$completion_status" "$completed" "$reconciled" \
-    "$pending_client_bytes" "$retained_identity_bytes" <<'PY'
+    "$pending_client_bytes" "$retained_identity_bytes" \
+    "$bootstrap_state_rows" "$bootstrap_state_bytes" <<'PY'
 import json
 import os
 import sys
 
-path, completion_status, completed, reconciled, pending_client_bytes, retained_identity_bytes = sys.argv[1:]
+(
+    path,
+    completion_status,
+    completed,
+    reconciled,
+    pending_client_bytes,
+    retained_identity_bytes,
+    bootstrap_state_rows,
+    bootstrap_state_bytes,
+) = sys.argv[1:]
 completed = completed == "true"
 reconciled = reconciled == "true"
 measurement = {
@@ -331,6 +347,8 @@ measurement = {
     "limits": {"joiner": {
         "max_pending_client_bytes": int(pending_client_bytes),
         "max_retained_identity_bytes": int(retained_identity_bytes),
+        "max_bootstrap_state_rows": int(bootstrap_state_rows),
+        "max_bootstrap_state_bytes": int(bootstrap_state_bytes),
     }},
     "process": {"user_cpu_nanoseconds": 1, "system_cpu_nanoseconds": 1, "max_rss_kib": 1},
     "assembler": {"completed_transactions": 3},
@@ -363,12 +381,23 @@ if [[ -n $metrics_output ]]; then
     exit_status=4
   fi
   python3 - "$metrics_output" "$completion_status" "$completed" "$reconciled" \
-    "$outcome" "$pending_client_bytes" "$retained_identity_bytes" <<'PY'
+    "$outcome" "$pending_client_bytes" "$retained_identity_bytes" \
+    "$bootstrap_state_rows" "$bootstrap_state_bytes" <<'PY'
 import json
 import os
 import sys
 
-path, completion_status, completed, reconciled, outcome, pending_client_bytes, retained_identity_bytes = sys.argv[1:]
+(
+    path,
+    completion_status,
+    completed,
+    reconciled,
+    outcome,
+    pending_client_bytes,
+    retained_identity_bytes,
+    bootstrap_state_rows,
+    bootstrap_state_bytes,
+) = sys.argv[1:]
 completed = completed == "true"
 reconciled = reconciled == "true"
 measurement = {
@@ -385,6 +414,8 @@ measurement = {
     "limits": {"joiner": {
         "max_pending_client_bytes": int(pending_client_bytes),
         "max_retained_identity_bytes": int(retained_identity_bytes),
+        "max_bootstrap_state_rows": int(bootstrap_state_rows),
+        "max_bootstrap_state_bytes": int(bootstrap_state_bytes),
     }},
     "process": {"user_cpu_nanoseconds": 1, "system_cpu_nanoseconds": 1, "max_rss_kib": 1},
     "assembler": {"completed_transactions": 3},
@@ -479,6 +510,8 @@ run_case() {
   local loader_batch_size=${14:-128}
   local observed_loader_rows=${15:-0}
   local declared_loader_rows=${16:-0}
+  local bootstrap_state_rows=${17:-}
+  local bootstrap_state_bytes=${18:-}
   local case_root="$TEST_ROOT/$name"
   mkdir -p "$case_root"
   write_test_programs "$case_root"
@@ -525,6 +558,8 @@ run_case() {
       BLACKBOX_MONITOR_METRICS_PATH="$metrics_path" \
       BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$pending_client_bytes" \
       BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$retained_identity_bytes" \
+      BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_ROWS="${bootstrap_state_rows:-10000000}" \
+      BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_BYTES="${bootstrap_state_bytes:-268435456}" \
       BLACKBOX_BENCHMARK="$benchmark" \
       BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="${EXPECTED_REDIS_MAXMEMORY_BYTES:-}" \
       BLACKBOX_RUN_ID_PATH="$run_id_path" \
@@ -640,7 +675,8 @@ if grep -Eq 'PASS|VIOLATION|INVALID' "$CASE_ROOT/stdout" "$CASE_ROOT/stderr"; th
 fi
 
 export EXPECTED_REDIS_MAXMEMORY_BYTES=8589934592
-run_case capacity_override 0 0 0 0 0 0 '' join-only 0 2147483648 1073741824
+run_case capacity_override 0 0 0 0 0 0 '' join-only 0 2147483648 1073741824 \
+  ycsb 128 0 0 1000000 1073741824
 unset EXPECTED_REDIS_MAXMEMORY_BYTES
 [[ $CASE_STATUS == 0 ]] ||
   fail "capacity override lifecycle exited $CASE_STATUS: $(cat "$CASE_ROOT/stderr")"
@@ -648,12 +684,22 @@ grep -q '^monitor:pending-client-bytes:1073741824$' "$CASE_LOG" ||
   fail 'coordinator did not pass the pending-client byte override'
 grep -q '^monitor:retained-identity-bytes:2147483648$' "$CASE_LOG" ||
   fail 'coordinator did not pass the retained-identity byte override'
+grep -q '^monitor:bootstrap-state-rows:1000000$' "$CASE_LOG" ||
+  fail 'coordinator did not pass the bootstrap-state row override'
+grep -q '^monitor:bootstrap-state-bytes:1073741824$' "$CASE_LOG" ||
+  fail 'coordinator did not pass the bootstrap-state byte override'
 [[ $(jq -r '.limits.joiner.max_pending_client_bytes' \
   "$CASE_ROOT/monitor-metrics.json") == 1073741824 ]] ||
   fail 'pending-client capacity override is absent from monitor provenance'
 [[ $(jq -r '.limits.joiner.max_retained_identity_bytes' \
   "$CASE_ROOT/monitor-metrics.json") == 2147483648 ]] ||
   fail 'capacity override is absent from monitor provenance'
+[[ $(jq -r '.limits.joiner.max_bootstrap_state_rows' \
+  "$CASE_ROOT/monitor-metrics.json") == 1000000 ]] ||
+  fail 'bootstrap-state row override is absent from monitor provenance'
+[[ $(jq -r '.limits.joiner.max_bootstrap_state_bytes' \
+  "$CASE_ROOT/monitor-metrics.json") == 1073741824 ]] ||
+  fail 'bootstrap-state byte override is absent from monitor provenance'
 
 run_case join_only_loader_failure 0 0 9 0 0 0 '' join-only
 [[ $CASE_STATUS == 1 ]] ||

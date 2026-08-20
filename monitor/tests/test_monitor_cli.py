@@ -461,13 +461,26 @@ def check_join_only_early_failure_artifact(executable):
             measurement["limits"]["joiner"]["max_retained_identity_bytes"]
             == 536870912
         )
+        assert (
+            measurement["limits"]["joiner"]["max_bootstrap_state_rows"]
+            == 10000000
+        )
+        assert (
+            measurement["limits"]["joiner"]["max_bootstrap_state_bytes"]
+            == 268435456
+        )
         assert_no_audited_result(measurement)
         assert "outcome=INVALID" not in output(result)
     print("join-only early failure: failed measurement written without verdict")
 
 
-def check_joiner_byte_limit_options(executable):
-    for option in ("--max-pending-client-bytes", "--max-retained-identity-bytes"):
+def check_joiner_limit_options(executable):
+    for option in (
+        "--max-pending-client-bytes",
+        "--max-retained-identity-bytes",
+        "--max-bootstrap-state-rows",
+        "--max-bootstrap-state-bytes",
+    ):
         for invalid in ("0", "18446744073709551616"):
             result = subprocess.run(
                 monitor_command(executable, 1, 1000, [option, invalid]),
@@ -477,9 +490,7 @@ def check_joiner_byte_limit_options(executable):
                 check=False,
             )
             assert result.returncode == 1, result
-            assert "must be a positive decimal byte count" in output(result), output(
-                result
-            )
+            assert "must be a positive decimal count" in output(result), output(result)
 
     def handler(_connection_id, command):
         assert command[0] == b"EVAL"
@@ -501,6 +512,10 @@ def check_joiner_byte_limit_options(executable):
                     "1073741824",
                     "--max-retained-identity-bytes",
                     "2147483648",
+                    "--max-bootstrap-state-rows",
+                    "20000000",
+                    "--max-bootstrap-state-bytes",
+                    "1073741824",
                 ],
             )
             assert result.returncode == 1, result
@@ -513,8 +528,16 @@ def check_joiner_byte_limit_options(executable):
             measurement["limits"]["joiner"]["max_retained_identity_bytes"]
             == 2147483648
         )
+        assert (
+            measurement["limits"]["joiner"]["max_bootstrap_state_rows"]
+            == 20000000
+        )
+        assert (
+            measurement["limits"]["joiner"]["max_bootstrap_state_bytes"]
+            == 1073741824
+        )
         assert_no_audited_result(measurement)
-    print("joiner byte capacities: defaults, overrides, zero, and overflow validated")
+    print("joiner capacities: defaults, overrides, zero, and overflow validated")
 
 
 def main():
@@ -529,7 +552,7 @@ def main():
     check_tpcc_adapter_enters_main_read(args.monitor)
     check_join_only_requires_metrics(args.monitor)
     check_join_only_early_failure_artifact(args.monitor)
-    check_joiner_byte_limit_options(args.monitor)
+    check_joiner_limit_options(args.monitor)
 
 
 if __name__ == "__main__":

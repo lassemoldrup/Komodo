@@ -63,6 +63,8 @@ RAW_FIELDS = (
     "redis_maxmemory_bytes",
     "monitor_max_pending_client_bytes",
     "monitor_max_retained_identity_bytes",
+    "monitor_max_bootstrap_state_rows",
+    "monitor_max_bootstrap_state_bytes",
     "si_monitoring_head",
     "co_checker_head",
     "si_monitoring_dirty",
@@ -126,6 +128,8 @@ METADATA_FIELDS = (
     "redis_maxmemory_bytes",
     "monitor_max_pending_client_bytes",
     "monitor_max_retained_identity_bytes",
+    "monitor_max_bootstrap_state_rows",
+    "monitor_max_bootstrap_state_bytes",
     "si_monitoring_head",
     "co_checker_head",
     "si_monitoring_dirty",
@@ -148,6 +152,8 @@ INVARIANT_FIELDS = (
     "redis_maxmemory_bytes",
     "monitor_max_pending_client_bytes",
     "monitor_max_retained_identity_bytes",
+    "monitor_max_bootstrap_state_rows",
+    "monitor_max_bootstrap_state_bytes",
     "si_monitoring_head",
     "co_checker_head",
     "si_monitoring_dirty",
@@ -270,6 +276,8 @@ def validate_metadata(metadata: Mapping[str, Any], trial_dir: Path) -> dict[str,
         "redis_maxmemory_bytes",
         "monitor_max_pending_client_bytes",
         "monitor_max_retained_identity_bytes",
+        "monitor_max_bootstrap_state_rows",
+        "monitor_max_bootstrap_state_bytes",
     ):
         result[field] = integer(metadata[field], f"{label}.{field}", minimum=1)
     for field in (
@@ -325,6 +333,8 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     for metric_field, metadata_field in (
         ("max_pending_client_bytes", "monitor_max_pending_client_bytes"),
         ("max_retained_identity_bytes", "monitor_max_retained_identity_bytes"),
+        ("max_bootstrap_state_rows", "monitor_max_bootstrap_state_rows"),
+        ("max_bootstrap_state_bytes", "monitor_max_bootstrap_state_bytes"),
     ):
         observed = metric_integer(joiner_limits, metric_field, f"{label}.limits.joiner", minimum=1)
         require(
@@ -402,6 +412,12 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         ],
         "monitor_max_retained_identity_bytes": metadata[
             "monitor_max_retained_identity_bytes"
+        ],
+        "monitor_max_bootstrap_state_rows": metadata[
+            "monitor_max_bootstrap_state_rows"
+        ],
+        "monitor_max_bootstrap_state_bytes": metadata[
+            "monitor_max_bootstrap_state_bytes"
         ],
         "si_monitoring_head": metadata["si_monitoring_head"],
         "co_checker_head": metadata["co_checker_head"],
@@ -582,6 +598,12 @@ def write_summary_json(
             ],
             "monitor_max_retained_identity_bytes": metadata[
                 "monitor_max_retained_identity_bytes"
+            ],
+            "monitor_max_bootstrap_state_rows": metadata[
+                "monitor_max_bootstrap_state_rows"
+            ],
+            "monitor_max_bootstrap_state_bytes": metadata[
+                "monitor_max_bootstrap_state_bytes"
             ],
             "si_monitoring_head": metadata["si_monitoring_head"],
             "co_checker_head": metadata["co_checker_head"],

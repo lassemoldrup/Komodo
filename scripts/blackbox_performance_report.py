@@ -716,6 +716,16 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
             == metadata.get("monitor_max_retained_identity_bytes"),
             "monitor retained-identity limit differs from trial metadata",
         )
+        require(
+            monitor_flat.get("monitor_limits_joiner_max_bootstrap_state_rows")
+            == metadata.get("monitor_max_bootstrap_state_rows"),
+            "monitor bootstrap-state row limit differs from trial metadata",
+        )
+        require(
+            monitor_flat.get("monitor_limits_joiner_max_bootstrap_state_bytes")
+            == metadata.get("monitor_max_bootstrap_state_bytes"),
+            "monitor bootstrap-state byte limit differs from trial metadata",
+        )
 
     status = parse_status_xrange(load_json(trial_dir / "status_stream.json"))
     row.update(status)
@@ -861,6 +871,8 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
         "redis_maxmemory_bytes",
         "monitor_max_pending_client_bytes",
         "monitor_max_retained_identity_bytes",
+        "monitor_max_bootstrap_state_rows",
+        "monitor_max_bootstrap_state_bytes",
         "output_max_bytes",
         "isolation",
         "rate",

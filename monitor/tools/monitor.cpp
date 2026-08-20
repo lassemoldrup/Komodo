@@ -71,6 +71,10 @@ struct Options {
       blackbox::TransactionJoinerLimits{}.max_pending_client_bytes;
   std::size_t max_retained_identity_bytes =
       blackbox::TransactionJoinerLimits{}.max_retained_identity_bytes;
+  std::size_t max_bootstrap_state_rows =
+      blackbox::TransactionJoinerLimits{}.max_bootstrap_state_rows;
+  std::size_t max_bootstrap_state_bytes =
+      blackbox::TransactionJoinerLimits{}.max_bootstrap_state_bytes;
 };
 
 [[nodiscard]] bool isLowerUuid(const std::string_view value) {
@@ -123,7 +127,7 @@ parseTimeout(const std::string_view value) {
   if (error != std::errc{} || end != value.data() + value.size() ||
       result == 0U) {
     throw std::invalid_argument(std::string(label) +
-                                " must be a positive decimal byte count");
+                                " must be a positive decimal count");
   }
   return result;
 }
@@ -165,6 +169,12 @@ parseTimeout(const std::string_view value) {
     } else if (argument == "--max-retained-identity-bytes") {
       options.max_retained_identity_bytes =
           parsePositiveSize(value, "max retained identity bytes");
+    } else if (argument == "--max-bootstrap-state-rows") {
+      options.max_bootstrap_state_rows =
+          parsePositiveSize(value, "max bootstrap state rows");
+    } else if (argument == "--max-bootstrap-state-bytes") {
+      options.max_bootstrap_state_bytes =
+          parsePositiveSize(value, "max bootstrap state bytes");
     } else {
       throw std::invalid_argument("unknown argument: " + std::string(argument));
     }
@@ -808,7 +818,11 @@ public:
          Json{{"joiner", Json{{"max_pending_client_bytes",
                                options_.max_pending_client_bytes},
                               {"max_retained_identity_bytes",
-                               options_.max_retained_identity_bytes}}}}},
+                               options_.max_retained_identity_bytes},
+                              {"max_bootstrap_state_rows",
+                               options_.max_bootstrap_state_rows},
+                              {"max_bootstrap_state_bytes",
+                               options_.max_bootstrap_state_bytes}}}}},
         {"assembler", assemblerMetricsJson(assembler_metrics_)},
         {"joiner", joinerMetricsJson(joiner_metrics_)},
         {"checker", checkerMetricsJson(joiner_metrics_.checker)},
@@ -1107,6 +1121,10 @@ int run(const Options &options) {
         options.max_pending_client_bytes;
     controller_config.joiner_limits.max_retained_identity_bytes =
         options.max_retained_identity_bytes;
+    controller_config.joiner_limits.max_bootstrap_state_rows =
+        options.max_bootstrap_state_rows;
+    controller_config.joiner_limits.max_bootstrap_state_bytes =
+        options.max_bootstrap_state_bytes;
     controller_storage.emplace(manifest, std::move(controller_config));
     controller_storage->setLastClientStreamId(manifest_evidence.stream_id);
     assembler_storage.emplace(DebeziumAssemblerConfig{
