@@ -306,6 +306,22 @@ leaves baseline loss unavailable when the baseline was not selected. The two
 monitor stages are intentionally excluded; whole-process monitor throughput
 must be measured separately and belongs in a monitor-specific table.
 
+Captured `redis-cli --json XRANGE` evidence can be restored with its original
+stream IDs through a bounded RESP producer:
+
+```bash
+set -o pipefail
+python3 scripts/xrange_to_redis_pipe.py \
+  --input-json /media/newhd/yifan/db-monitoring-builds/path/to/cdc_stream.json \
+  --stream cdc | redis-cli --pipe
+```
+
+The converter validates the complete capture, including canonical increasing
+IDs and every UTF-8 field/value pair, before writing any command. It preserves
+flat-array field order and writes RESP one argument at a time, so output memory
+is bounded by the largest field. It uses standard-library `json.load`, so the
+parsed input document itself must fit in memory.
+
 `PERFORMANCE_BASELINE_ROOT` overrides the worktree path. An output root must be
 below `/media/newhd/yifan/db-monitoring-builds` and must not already contain files. Normal measured
 runs require clean current BenchBase, monitor, and checker worktrees; `--smoke`
