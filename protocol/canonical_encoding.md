@@ -170,6 +170,13 @@ Debezium 3.6.1 row images for all nine tables, including numeric `FLOAT`,
 trimmed `CHAR`, nullable present/NULL, timestamps, decimals, UTF-8, and the empty
 `new_order` value. Its encoded bytes must match the executable goldens' codec.
 
+`protocol/fixtures/mariadb_tpcc_transactions.json` pins the raw startup-schema
+prefix and 11 BEGIN/row/END transactions covering bootstrap, fences, marker-only
+work, Payment/NewOrder/Delivery write shapes, primary-key changes,
+insert-then-delete, and net-no-change writes. The protocol verifier independently
+parses and normalizes those raw envelopes before comparing their expected
+classification, correlation, fences, final writes, and bootstrap manifest.
+
 ## Read digest
 
 Binary tags:

@@ -192,6 +192,16 @@ class ProtocolArtifactAlignmentTest(unittest.TestCase):
             2,
         )
 
+    def test_monitor_readiness_is_weaker_than_end_to_end_readiness(self) -> None:
+        ycsb = VERIFY_PROTOCOL.adapter_runtime_readiness(self.contracts["ycsb"])
+        self.assertTrue(ycsb["monitor_ready"])
+        self.assertTrue(ycsb["end_to_end_ready"])
+        tpcc = VERIFY_PROTOCOL.adapter_runtime_readiness(self.contracts["tpcc"])
+        self.assertTrue(tpcc["bootstrap_ready"])
+        self.assertTrue(tpcc["monitor_ready"])
+        self.assertFalse(tpcc["client_ready"])
+        self.assertFalse(tpcc["end_to_end_ready"])
+
     def test_mariadb_backend_contract_freezes_session_and_schema_defaults(self) -> None:
         contract = self.backends["mariadb"]
         self.assertEqual(contract["server_defaults"]["sql_mode"], VERIFY_PROTOCOL.MARIADB_SQL_MODE)

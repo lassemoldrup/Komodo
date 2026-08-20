@@ -212,8 +212,8 @@ the standard eight history columns are its canonical value.
 column/key/value roster, all 19 result-producing BenchBase statement IDs and
 their snapshot/local/omit classification, and loader counts/relationships. The
 TPC-C adapter accepts only declared repeatable-read runs. Its bootstrap scanner
-capability is enabled with the executable typed codec; client tracing and CDC
-normalization remain disabled until their corresponding integrations land.
+and monitor-side CDC normalization capabilities are enabled with the executable
+typed codec; client tracing remains disabled until that integration lands.
 
 No post-run TPC-C application-invariant suite is part of this protocol or its
 result claim. Bootstrap loader cardinality and relationship validation remains
@@ -285,3 +285,25 @@ Loader batch size is a positive command-line/configuration value with default
 validation/performance artifacts, but it is not an acceptance constant.
 Canonical scans use the same shared row contract and globally byte-sort encoded
 keys before computing the bootstrap digest.
+
+## D13: Adapter readiness is boundary-specific
+
+Runtime capability flags are interpreted by boundary rather than collapsed into
+one ambiguous ready bit. `monitor_ready` requires both CDC normalization and
+bootstrap scanning. `end_to_end_ready` additionally requires client tracing.
+Consequently, the TPC-C monitor path may admit captured normalization fixtures
+while the live workload remains fail-closed until the BenchBase trace adapter is
+also enabled.
+
+Before `LOAD_FINISHED` can be acknowledged, the monitor's final normalized
+bootstrap map is independently counted, globally key-sorted, and hashed with the
+same bootstrap framing as the coordinator scan. Its exact table roster, counts,
+and digest must equal `BootstrapManifest`; a count or byte mismatch is
+`BOOTSTRAP_STATE_MISMATCH`.
+
+The monitor-ready boundary is pinned by
+`protocol/fixtures/mariadb_tpcc_transactions.json`. Its raw startup schema and
+BEGIN/row/END entries retain workload markers; independent reference and C++
+normalizers must agree on control/bootstrap/workload classification, marker
+filtering, correlation, repeated-write collapse, primary-key splits, touched
+net-no-change keys, deletes, and the final bootstrap digest.

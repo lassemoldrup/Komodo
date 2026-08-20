@@ -69,3 +69,7 @@ and this verifier agree, and Java/C++/bootstrap tests consume the same shared
 adapter contracts and vectors. A false adapter runtime-capability flag means the
 contract is available for tests but the corresponding live path must fail
 closed.
+
+Readiness is boundary-specific: CDC normalization plus bootstrap scanning makes
+an adapter monitor-ready, while end-to-end readiness additionally requires
+client tracing.

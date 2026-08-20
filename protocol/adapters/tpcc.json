@@ -3,7 +3,7 @@
   "canonical_schema": "benchbase",
   "runtime_capabilities": {
     "client_trace": false,
-    "cdc_normalization": false,
+    "cdc_normalization": true,
     "bootstrap_scan": true
   },
   "declared_isolations": ["REPEATABLE_READ"],

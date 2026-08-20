@@ -23,6 +23,10 @@ except ImportError as error:  # pragma: no cover - exercised by environment setu
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tpcc_codec import CodecError, TpccCodec, materialize_invalid_vector  # noqa: E402
+from tpcc_transaction_fixture import (  # noqa: E402
+    TransactionFixtureError,
+    verify_transaction_fixture,
+)
 
 
 PROTOCOL_ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +72,9 @@ TPCC_TABLE_CONTRACT_SHA256 = (
 )
 TPCC_LIVE_FIXTURE_SHA256 = (
     "fa4f72247f42eb5062082a964b118acdbd54a99c991c7ae4aeda99bcc267bb82"
+)
+TPCC_TRANSACTION_FIXTURE_SHA256 = (
+    "dce6938991d7cb9b088b079c9ef3bcc03fe9dffe5ed63a92aa2c33777e797044"
 )
 MARIADB_SQL_MODE = (
     "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,"
@@ -623,6 +630,17 @@ def validate_adapter_contract(contract: dict[str, Any], label: str) -> None:
         )
 
 
+def adapter_runtime_readiness(contract: dict[str, Any]) -> dict[str, bool]:
+    capabilities = contract["runtime_capabilities"]
+    monitor_ready = capabilities["cdc_normalization"] and capabilities["bootstrap_scan"]
+    return {
+        "bootstrap_ready": capabilities["bootstrap_scan"],
+        "monitor_ready": monitor_ready,
+        "client_ready": capabilities["client_trace"],
+        "end_to_end_ready": monitor_ready and capabilities["client_trace"],
+    }
+
+
 def verify_tpcc_contract(contract: dict[str, Any]) -> None:
     require(
         tuple(contract["transaction_types"]) == TPCC_TRANSACTION_TYPES,
@@ -637,14 +655,14 @@ def verify_tpcc_contract(contract: dict[str, Any]) -> None:
         "TPC-C isolation contract is not repeatable read only",
     )
     require(
-        contract["runtime_capabilities"]
-        == {
-            "client_trace": False,
-            "cdc_normalization": False,
-            "bootstrap_scan": True,
-        },
+        contract["runtime_capabilities"]["client_trace"] is False
+        and contract["runtime_capabilities"]["bootstrap_scan"] is True,
         "TPC-C runtime capabilities differ from implemented boundaries",
     )
+    readiness = adapter_runtime_readiness(contract)
+    require(readiness["bootstrap_ready"], "TPC-C bootstrap scanner is not ready")
+    require(readiness["monitor_ready"], "TPC-C monitor normalization is not ready")
+    require(not readiness["end_to_end_ready"], "TPC-C must remain end-to-end gated")
     table_contract_bytes = json.dumps(
         contract["tables"],
         ensure_ascii=False,
@@ -1064,6 +1082,73 @@ def verify_tpcc_live_fixture(contracts: dict[str, dict[str, Any]]) -> None:
     )
 
 
+def verify_tpcc_transaction_fixture(contracts: dict[str, dict[str, Any]]) -> None:
+    path = PROTOCOL_ROOT / "fixtures" / "mariadb_tpcc_transactions.json"
+    require(
+        sha256_hex(path.read_bytes()) == TPCC_TRANSACTION_FIXTURE_SHA256,
+        "TPC-C transaction fixture checksum drift",
+    )
+    fixture = load_json(path)
+    require(
+        isinstance(fixture, dict)
+        and set(fixture)
+        == {
+            "adapter_contract",
+            "backend",
+            "backend_contract",
+            "bootstrap_manifest",
+            "debezium_version",
+            "mariadb_image",
+            "run_id",
+            "startup_schema",
+            "transactions",
+        },
+        "TPC-C transaction fixture has wrong root fields",
+    )
+    require(fixture["backend"] == "mariadb", "TPC-C transaction fixture backend")
+    require(
+        fixture["mariadb_image"] == "mariadb:12.3"
+        and fixture["debezium_version"] == "3.6.1.Final",
+        "TPC-C transaction fixture source version drift",
+    )
+    require(
+        fixture["adapter_contract"] == "protocol/adapters/tpcc.json"
+        and fixture["backend_contract"] == "protocol/backends/mariadb.json",
+        "TPC-C transaction fixture contract references drift",
+    )
+    require(
+        (PROTOCOL_ROOT.parent / fixture["adapter_contract"]).is_file()
+        and (PROTOCOL_ROOT.parent / fixture["backend_contract"]).is_file(),
+        "TPC-C transaction fixture contract reference is missing",
+    )
+    require(
+        fixture["run_id"] == "87654321-4321-4321-8321-cba987654321",
+        "TPC-C transaction fixture run ID drift",
+    )
+    try:
+        normalized = verify_transaction_fixture(fixture, TpccCodec(contracts["tpcc"]))
+    except (TransactionFixtureError, CodecError) as error:
+        raise VerificationError(f"TPC-C transaction fixture failed: {error}") from error
+    require(len(normalized) == 11, "TPC-C transaction normalization count differs")
+    require(
+        [transaction["kind"] for transaction in normalized]
+        == [
+            "RUN_CONTROL",
+            "BOOTSTRAP_APP",
+            "RUN_CONTROL",
+            "WORKLOAD_MARKED",
+            "WORKLOAD_MARKED",
+            "WORKLOAD_MARKED",
+            "WORKLOAD_MARKED",
+            "WORKLOAD_MARKED",
+            "WORKLOAD_MARKED",
+            "WORKLOAD_MARKED",
+            "RUN_CONTROL",
+        ],
+        "TPC-C transaction classifications differ",
+    )
+
+
 def load_schema_validator() -> tuple[Draft202012Validator, list[dict[str, Any]]]:
     schemas = load_schema_documents()
 
@@ -1459,6 +1544,7 @@ def main() -> int:
         backends = load_backend_contracts(schemas)
         verify_tpcc_executable_vectors(contracts, schemas)
         verify_tpcc_live_fixture(contracts)
+        verify_tpcc_transaction_fixture(contracts)
         records = verify_schemas_and_examples()
         adapter_example_count = verify_adapter_record_examples(contracts, schemas)
         verify_golden_vectors()

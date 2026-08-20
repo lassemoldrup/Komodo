@@ -244,6 +244,103 @@ class TpccCodecTest(unittest.TestCase):
             )
             self.assertIn("canonical byte limit", result.stderr)
 
+    def test_synthetic_monitor_state_reconciles_before_load_finished(self) -> None:
+        chosen: dict[str, dict[str, object]] = {}
+        for vector in self.golden["vectors"]:
+            chosen.setdefault(vector["table"], vector)
+        source_records = [
+            {"table": table, "row": vector["row"]} for table, vector in chosen.items()
+        ]
+        normalized_records = [
+            {
+                "table": table,
+                "key_hex": vector["expected_key_hex"],
+                "value_hex": vector["expected_value_hex"],
+            }
+            for table, vector in reversed(list(chosen.items()))
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.jsonl"
+            normalized_path = root / "normalized.jsonl"
+            manifest_path = root / "manifest.json"
+            source_path.write_text(
+                "".join(
+                    json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+                    for record in source_records
+                ),
+                encoding="utf-8",
+            )
+            normalized_path.write_text(
+                "".join(
+                    json.dumps(record, separators=(",", ":")) + "\n"
+                    for record in normalized_records
+                ),
+                encoding="utf-8",
+            )
+            manifest = self.run_record_tool(
+                "bootstrap-manifest",
+                "--run-id",
+                RUN_ID,
+                "--benchmark",
+                "tpcc",
+                "--scan-file",
+                str(source_path),
+            ).stdout
+            manifest_path.write_text(manifest, encoding="utf-8")
+            result = self.run_record_tool(
+                "bootstrap-reconcile",
+                "--benchmark",
+                "tpcc",
+                "--manifest-file",
+                str(manifest_path),
+                "--normalized-state-file",
+                str(normalized_path),
+            )
+            report = json.loads(result.stdout)
+            self.assertTrue(report["reconciled"])
+            self.assertEqual(report["run_id"], RUN_ID)
+
+            normalized_path.write_text(
+                "".join(
+                    json.dumps(record, separators=(",", ":")) + "\n"
+                    for record in normalized_records[:-1]
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_record_tool(
+                "bootstrap-reconcile",
+                "--benchmark",
+                "tpcc",
+                "--manifest-file",
+                str(manifest_path),
+                "--normalized-state-file",
+                str(normalized_path),
+                expected_status=2,
+            )
+            self.assertIn("table counts differ", result.stderr)
+
+            wrong_value = [dict(record) for record in normalized_records]
+            wrong_value[0]["value_hex"] += "00"
+            normalized_path.write_text(
+                "".join(
+                    json.dumps(record, separators=(",", ":")) + "\n"
+                    for record in wrong_value
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_record_tool(
+                "bootstrap-reconcile",
+                "--benchmark",
+                "tpcc",
+                "--manifest-file",
+                str(manifest_path),
+                "--normalized-state-file",
+                str(normalized_path),
+                expected_status=2,
+            )
+            self.assertIn("digest differs", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

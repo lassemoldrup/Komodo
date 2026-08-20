@@ -180,6 +180,23 @@ def select_backend(backend: str) -> dict[str, Any]:
     return contract
 
 
+def adapter_runtime_readiness(adapter: dict[str, Any]) -> dict[str, Any]:
+    capabilities = adapter["runtime_capabilities"]
+    monitor_requirements = ("cdc_normalization", "bootstrap_scan")
+    end_to_end_requirements = ("client_trace", *monitor_requirements)
+    missing_for_monitor = [name for name in monitor_requirements if not capabilities[name]]
+    missing_for_end_to_end = [name for name in end_to_end_requirements if not capabilities[name]]
+    return {
+        "benchmark": adapter["benchmark"],
+        "bootstrap_ready": capabilities["bootstrap_scan"],
+        "monitor_ready": not missing_for_monitor,
+        "client_ready": capabilities["client_trace"],
+        "end_to_end_ready": not missing_for_end_to_end,
+        "missing_for_monitor": missing_for_monitor,
+        "missing_for_end_to_end": missing_for_end_to_end,
+    }
+
+
 def validate_application_roster(
     adapter: dict[str, Any], supplied_tables: list[str] | None
 ) -> list[str]:
@@ -938,14 +955,11 @@ def dump_record(record: dict[str, Any]) -> None:
 def build_run_manifest(args: argparse.Namespace) -> dict[str, Any]:
     run_id = validate_uuid(args.run_id)
     adapter = select_adapter(args.benchmark)
-    missing_capabilities = sorted(
-        name
-        for name, available in adapter["runtime_capabilities"].items()
-        if not available
-    )
+    readiness = adapter_runtime_readiness(adapter)
     require(
-        not missing_capabilities,
-        f"adapter {args.benchmark} runtime is incomplete: {','.join(missing_capabilities)}",
+        readiness["end_to_end_ready"],
+        f"adapter {args.benchmark} runtime is incomplete:"
+        f"{','.join(readiness['missing_for_end_to_end'])}",
     )
     require(
         args.declared_isolation in adapter["declared_isolations"],
@@ -1010,12 +1024,134 @@ def build_bootstrap_manifest(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def canonical_table_prefix(table: str) -> bytes:
+    schema, separator, table_name = table.partition(".")
+    require(separator == ".", f"normalized state table is not qualified: {table}")
+    validate_identifier(schema, "normalized-state schema")
+    validate_identifier(table_name, "normalized-state table")
+    return length_prefix(schema.encode("ascii")) + length_prefix(table_name.encode("ascii"))
+
+
+def decode_canonical_hex(value: Any, label: str, allow_empty: bool) -> bytes:
+    require(isinstance(value, str), f"{label} is not a hex string")
+    require(
+        re.fullmatch(r"(?:[0-9a-f]{2})*", value) is not None,
+        f"{label} is not canonical lowercase hex",
+    )
+    require(allow_empty or value != "", f"{label} must not be empty")
+    return bytes.fromhex(value)
+
+
+def load_normalized_bootstrap_state(
+    path: Path,
+    adapter: dict[str, Any],
+    max_rows: int,
+    max_input_bytes: int,
+    max_canonical_bytes: int,
+) -> tuple[list[tuple[bytes, bytes]], dict[str, int]]:
+    require(max_rows > 0, "normalized-state max rows must be positive")
+    require(max_input_bytes > 0, "normalized-state max input bytes must be positive")
+    require(max_canonical_bytes > 0, "normalized-state max canonical bytes must be positive")
+    try:
+        require(path.stat().st_size <= max_input_bytes, "normalized state exceeds input byte limit")
+    except OSError as error:
+        raise RecordError(f"cannot stat normalized state {path}: {error}") from error
+    counts = {table: 0 for table in adapter["application_tables"]}
+    rows: list[tuple[bytes, bytes]] = []
+    canonical_bytes = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="strict") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                line = line.rstrip("\r\n")
+                require(line != "", f"normalized state has empty line {line_number}")
+                try:
+                    record = json.loads(line, object_pairs_hook=reject_duplicate_keys)
+                except json.JSONDecodeError as error:
+                    raise RecordError(
+                        f"normalized state line {line_number} is invalid JSON: {error}"
+                    ) from error
+                require(
+                    isinstance(record, dict)
+                    and set(record) == {"table", "key_hex", "value_hex"},
+                    f"normalized state line {line_number} has wrong fields",
+                )
+                table = record["table"]
+                require(
+                    isinstance(table, str) and table in counts,
+                    f"normalized state line {line_number} names unknown table",
+                )
+                key = decode_canonical_hex(record["key_hex"], "normalized key", False)
+                value = decode_canonical_hex(record["value_hex"], "normalized value", True)
+                require(
+                    key.startswith(canonical_table_prefix(table)),
+                    f"normalized state line {line_number} key/table prefix mismatch",
+                )
+                rows.append((key, value))
+                counts[table] += 1
+                canonical_bytes += len(key) + len(value)
+                require(len(rows) <= max_rows, "normalized state exceeds row limit")
+                require(
+                    canonical_bytes <= max_canonical_bytes,
+                    "normalized state exceeds canonical byte limit",
+                )
+    except (OSError, UnicodeError) as error:
+        raise RecordError(f"cannot read normalized state {path}: {error}") from error
+    return rows, counts
+
+
+def reconcile_bootstrap_state(args: argparse.Namespace) -> dict[str, Any]:
+    adapter = select_adapter(args.benchmark)
+    try:
+        manifest = json.loads(
+            Path(args.manifest_file).read_text(encoding="utf-8", errors="strict"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RecordError(f"cannot read BootstrapManifest: {error}") from error
+    validate_document(
+        document_validator("bootstrap-manifest.schema.json"),
+        manifest,
+        "BootstrapManifest",
+    )
+    rows, counts = load_normalized_bootstrap_state(
+        Path(args.normalized_state_file),
+        adapter,
+        args.max_rows,
+        args.max_input_bytes,
+        args.max_canonical_bytes,
+    )
+    _, digest = bootstrap_digest(rows)
+    observed_counts = [
+        {"table": table, "row_count": counts[table]} for table in sorted(counts)
+    ]
+    require(
+        observed_counts == manifest["table_row_counts"],
+        "normalized state table counts differ from BootstrapManifest",
+    )
+    require(
+        digest == manifest["canonical_state_digest"],
+        "normalized state digest differs from BootstrapManifest",
+    )
+    return {
+        "kind": "bootstrap_reconciliation",
+        "benchmark": adapter["benchmark"],
+        "run_id": manifest["run_id"],
+        "table_row_counts": observed_counts,
+        "canonical_state_digest": digest,
+        "reconciled": True,
+    }
+
+
 def inspect_adapter_contract(args: argparse.Namespace) -> dict[str, Any]:
     adapter = select_adapter(args.benchmark)
     if args.transaction_type is not None:
         validate_transaction_membership(adapter, args.transaction_type)
     validate_application_roster(adapter, args.application_table)
     return adapter
+
+
+def inspect_adapter_readiness(args: argparse.Namespace) -> dict[str, Any]:
+    return adapter_runtime_readiness(select_adapter(args.benchmark))
 
 
 def inspect_backend_contract(args: argparse.Namespace) -> dict[str, Any]:
@@ -1200,12 +1336,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_queries.add_argument("--benchmark", required=True)
 
+    bootstrap_reconcile = subparsers.add_parser(
+        "bootstrap-reconcile",
+        help="compare monitor-normalized bootstrap state with BootstrapManifest",
+    )
+    bootstrap_reconcile.add_argument("--benchmark", required=True)
+    bootstrap_reconcile.add_argument("--manifest-file", required=True)
+    bootstrap_reconcile.add_argument("--normalized-state-file", required=True)
+    bootstrap_reconcile.add_argument("--max-rows", type=int, default=1000000)
+    bootstrap_reconcile.add_argument("--max-input-bytes", type=int, default=4294967296)
+    bootstrap_reconcile.add_argument("--max-canonical-bytes", type=int, default=2147483648)
+
     adapter = subparsers.add_parser(
         "adapter-contract", help="validate and emit one shared adapter contract"
     )
     adapter.add_argument("--benchmark", required=True)
     adapter.add_argument("--transaction-type")
     adapter.add_argument("--application-table", action="append", default=[])
+
+    readiness = subparsers.add_parser(
+        "adapter-readiness", help="report monitor and end-to-end adapter readiness"
+    )
+    readiness.add_argument("--benchmark", required=True)
 
     backend = subparsers.add_parser(
         "backend-contract", help="validate and emit one shared backend contract"
@@ -1290,8 +1442,12 @@ def main() -> int:
             dump_record(build_bootstrap_manifest(args))
         elif args.command == "bootstrap-queries":
             dump_record(build_bootstrap_queries(args))
+        elif args.command == "bootstrap-reconcile":
+            dump_record(reconcile_bootstrap_state(args))
         elif args.command == "adapter-contract":
             dump_record(inspect_adapter_contract(args))
+        elif args.command == "adapter-readiness":
+            dump_record(inspect_adapter_readiness(args))
         elif args.command == "backend-contract":
             dump_record(inspect_backend_contract(args))
         elif args.command == "schema-check":
