@@ -301,6 +301,8 @@ Selected-stage runs record their roster in each trial's metadata and in
 `stage_order.csv`. Their aggregate statistics remain available without the
 uninstrumented baseline; baseline-relative summary cells are blank, and
 `overhead.csv` includes only comparisons for which both stages were selected.
+`headline_results.md` contains the selected stages only and leaves baseline
+loss unavailable when the baseline was not selected.
 
 `PERFORMANCE_BASELINE_ROOT` overrides the worktree path. An output root must be
 below `/media/newhd/yifan/db-monitoring-builds` and must not already contain files. Normal measured
@@ -343,11 +345,34 @@ evidence reconciliation but deliberately leaves audited outcome fields empty.
 Each output root contains generated input configurations, build logs and exact
 commands, host/JVM/container/image provenance, `stage_order.csv`, and one
 checksummed directory per raw trial. The aggregate deliverables are
+`headline_results.md`, its machine-readable `headline_results.csv`,
 `raw_trials.csv`, `summary_statistics.csv` (median, min, max, and MAD without
 outlier removal), `overhead.csv`, `artifact_index.csv`, and the root
-`SHA256SUMS`. Large distributions, Redis captures, BenchBase result sets,
-Compose logs, and resource samples remain under that output root on the artifact
-volume.
+`SHA256SUMS`. The headline table reports stage medians: throughput in requests
+per second, mean and p95 latency in microseconds, and throughput loss relative
+to the uninstrumented baseline in percent. Every throughput value is BenchBase
+application throughput, including the assembly/join and full-checking rows; it
+is not monitor processing throughput. The CSV retains unrounded numeric values
+and canonical stage identifiers; the Markdown applies concise display rounding
+and human stage labels. Existing output roots can be backfilled without
+rereading captured streams:
+
+```bash
+python3 scripts/blackbox_performance_report.py headline \
+  --input-csv OUTPUT_ROOT/raw_trials.csv \
+  --csv-output OUTPUT_ROOT/headline_results.csv \
+  --markdown-output OUTPUT_ROOT/headline_results.md
+python3 scripts/blackbox_performance_report.py checksums \
+  --root OUTPUT_ROOT --output OUTPUT_ROOT/SHA256SUMS
+(cd OUTPUT_ROOT && sha256sum --check SHA256SUMS)
+```
+
+When backfilling a preserved result, also record the headline command and the
+reporter commit in that result's derivation/provenance before regenerating its
+root manifest. Trial artifacts and their manifests remain unchanged.
+
+Large distributions, Redis captures, BenchBase result sets, Compose logs, and
+resource samples remain under that output root on the artifact volume.
 
 ## Constraints
 

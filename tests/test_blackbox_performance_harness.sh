@@ -224,4 +224,23 @@ jq -e \
   "$TEST_ROOT/network.json" >/dev/null ||
   fail "absent Redis was represented as a zero-byte measurement"
 
+printf '%s\n' \
+  'stage,throughput_requests_per_second,latency_mean_microseconds,latency_p95_microseconds' \
+  'benchbase_uninstrumented,1000,100,150' \
+  'cdc_capture,900,110,160' \
+  >"$TEST_ROOT/headline-input.csv"
+python3 "$ROOT/scripts/blackbox_performance_report.py" headline \
+  --input-csv "$TEST_ROOT/headline-input.csv" \
+  --csv-output "$TEST_ROOT/headline_results.csv" \
+  --markdown-output "$TEST_ROOT/headline_results.md"
+grep -Fx 'cdc_capture,900,110,160,10.0' \
+  "$TEST_ROOT/headline_results.csv" >/dev/null ||
+  fail 'headline CSV is missing exact CDC medians and baseline loss'
+grep -Fx '| CDC only | 900.0 req/s | 110.0 µs | 160 µs | 10.00% |' \
+  "$TEST_ROOT/headline_results.md" >/dev/null ||
+  fail 'headline Markdown is missing the readable CDC row'
+grep -Fx '| Stage | BenchBase throughput | Mean latency | p95 | Loss vs baseline |' \
+  "$TEST_ROOT/headline_results.md" >/dev/null ||
+  fail 'headline Markdown does not identify BenchBase throughput'
+
 printf 'performance harness validation tests passed\n'

@@ -11,6 +11,7 @@ import json
 import math
 import re
 import statistics
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -44,6 +45,23 @@ OVERHEAD_METRICS = (
     ("latency_p95_microseconds", "latency_increase_percent"),
     ("latency_p99_microseconds", "latency_increase_percent"),
 )
+
+HEADLINE_CSV_FIELDS = (
+    "stage",
+    "throughput_requests_per_second_median",
+    "latency_mean_microseconds_median",
+    "latency_p95_microseconds_median",
+    "throughput_loss_vs_baseline_percent",
+)
+
+HEADLINE_STAGE_LABELS = {
+    "benchbase_uninstrumented": "Uninstrumented baseline",
+    "read_capture_encoding": "Capture/encoding",
+    "read_capture_encoding_redis": "Capture + Redis",
+    "cdc_capture": "CDC only",
+    "assembly_join": "Assembly/join",
+    "assembly_join_check": "Full checking",
+}
 
 
 class ReportError(ValueError):
@@ -906,6 +924,181 @@ def median_for(rows: Sequence[Mapping[str, Any]], stage: str, metric: str) -> fl
     return statistics.median(values) if values else None
 
 
+def _headline_decimal(value: Any, label: str) -> Decimal:
+    require(not isinstance(value, bool), f"{label} is not numeric")
+    try:
+        result = Decimal(str(value).strip())
+    except InvalidOperation as error:
+        raise ReportError(f"{label} is not numeric") from error
+    require(result.is_finite(), f"{label} is not finite")
+    require(result >= 0, f"{label} is negative")
+    return result
+
+
+def _decimal_median(values: Sequence[Decimal]) -> Decimal:
+    require(bool(values), "cannot calculate a median without values")
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal(2)
+
+
+def read_headline_input(path: Path) -> list[dict[str, Any]]:
+    required_fields = {
+        "stage",
+        "throughput_requests_per_second",
+        "latency_mean_microseconds",
+        "latency_p95_microseconds",
+    }
+    with path.open("r", encoding="utf-8", newline="") as stream:
+        reader = csv.DictReader(stream)
+        require(reader.fieldnames is not None, f"raw trial CSV has no header: {path}")
+        require(
+            len(reader.fieldnames) == len(set(reader.fieldnames)),
+            f"raw trial CSV has duplicate columns: {path}",
+        )
+        missing = required_fields - set(reader.fieldnames)
+        require(
+            not missing,
+            "raw trial CSV is missing headline columns: " + ", ".join(sorted(missing)),
+        )
+        rows = [dict(row) for row in reader]
+    require(bool(rows), f"raw trial CSV has no rows: {path}")
+    return rows
+
+
+def headline_rows(raw_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    metric_fields = (
+        "throughput_requests_per_second",
+        "latency_mean_microseconds",
+        "latency_p95_microseconds",
+    )
+    values_by_stage: dict[str, dict[str, list[Decimal]]] = {}
+    trial_counts: dict[str, int] = {}
+    for row_number, row in enumerate(raw_rows, start=2):
+        stage = row.get("stage")
+        require(
+            isinstance(stage, str) and stage in STAGES,
+            f"raw trial CSV row {row_number} has an unknown stage: {stage!r}",
+        )
+        stage_values = values_by_stage.setdefault(
+            stage, {metric: [] for metric in metric_fields}
+        )
+        trial_counts[stage] = trial_counts.get(stage, 0) + 1
+        for metric in metric_fields:
+            stage_values[metric].append(
+                _headline_decimal(row.get(metric), f"raw trial CSV row {row_number} {metric}")
+            )
+
+    require(
+        len(set(trial_counts.values())) == 1,
+        "headline stages do not have equal repetition counts",
+    )
+    medians = {
+        stage: {
+            metric: _decimal_median(stage_values[metric])
+            for metric in metric_fields
+        }
+        for stage, stage_values in values_by_stage.items()
+    }
+    baseline = medians.get("benchbase_uninstrumented")
+    baseline_throughput = (
+        baseline["throughput_requests_per_second"] if baseline is not None else None
+    )
+
+    result: list[dict[str, Any]] = []
+    for stage in STAGES:
+        if stage not in medians:
+            continue
+        stage_medians = medians[stage]
+        loss: Decimal | str = ""
+        if stage != "benchbase_uninstrumented" and baseline_throughput not in (None, 0):
+            throughput = stage_medians["throughput_requests_per_second"]
+            loss = (baseline_throughput - throughput) / baseline_throughput * Decimal(100)
+        result.append(
+            {
+                "stage": stage,
+                "Stage": HEADLINE_STAGE_LABELS[stage],
+                "Throughput": stage_medians["throughput_requests_per_second"],
+                "Mean latency": stage_medians["latency_mean_microseconds"],
+                "p95": stage_medians["latency_p95_microseconds"],
+                "Loss vs baseline": loss,
+            }
+        )
+    return result
+
+
+def _decimal_text(value: Any) -> str:
+    if value == "":
+        return ""
+    require(isinstance(value, Decimal), "headline numeric value is not a decimal")
+    return "0" if value == 0 else format(value, "f")
+
+
+def write_headline_csv(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream, fieldnames=HEADLINE_CSV_FIELDS, lineterminator="\n"
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "stage": row["stage"],
+                    "throughput_requests_per_second_median": _decimal_text(
+                        row["Throughput"]
+                    ),
+                    "latency_mean_microseconds_median": _decimal_text(
+                        row["Mean latency"]
+                    ),
+                    "latency_p95_microseconds_median": _decimal_text(row["p95"]),
+                    "throughput_loss_vs_baseline_percent": _decimal_text(
+                        row["Loss vs baseline"]
+                    ),
+                }
+            )
+
+
+def _human_decimal(value: Decimal, places: int, *, trim_fraction: bool = False) -> str:
+    formatted = f"{value:,.{places}f}"
+    if trim_fraction and "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted
+
+
+def write_headline_markdown(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
+    lines = [
+        "| Stage | BenchBase throughput | Mean latency | p95 | Loss vs baseline |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        loss = row["Loss vs baseline"]
+        loss_text = "—" if loss == "" else f"{_human_decimal(loss, 2)}%"
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    str(row["Stage"]),
+                    f"{_human_decimal(row['Throughput'], 1)} req/s",
+                    f"{_human_decimal(row['Mean latency'], 1)} µs",
+                    f"{_human_decimal(row['p95'], 1, trim_fraction=True)} µs",
+                    loss_text,
+                )
+            )
+            + " |"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_headline(input_csv: Path, csv_output: Path, markdown_output: Path) -> None:
+    rows = headline_rows(read_headline_input(input_csv))
+    write_headline_csv(rows, csv_output)
+    write_headline_markdown(rows, markdown_output)
+
+
 def comparison_rows(
     rows: Sequence[Mapping[str, Any]],
     comparison_stage: str,
@@ -1060,6 +1253,14 @@ def command_aggregate(args: argparse.Namespace) -> None:
     write_artifact_index(root, Path(args.artifact_index_output))
 
 
+def command_headline(args: argparse.Namespace) -> None:
+    write_headline(
+        Path(args.input_csv),
+        Path(args.csv_output),
+        Path(args.markdown_output),
+    )
+
+
 def command_checksums(args: argparse.Namespace) -> None:
     write_checksums(Path(args.root), Path(args.output))
 
@@ -1094,6 +1295,14 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--overhead-output", required=True)
     aggregate.add_argument("--artifact-index-output", required=True)
     aggregate.set_defaults(handler=command_aggregate)
+
+    headline = subparsers.add_parser(
+        "headline", help="write concise CSV and Markdown tables from raw trial CSV"
+    )
+    headline.add_argument("--input-csv", required=True)
+    headline.add_argument("--csv-output", required=True)
+    headline.add_argument("--markdown-output", required=True)
+    headline.set_defaults(handler=command_headline)
 
     checksums = subparsers.add_parser("checksums", help="write a sorted SHA-256 manifest")
     checksums.add_argument("--root", required=True)

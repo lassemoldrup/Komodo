@@ -276,6 +276,132 @@ class ReportTest(unittest.TestCase):
                 {"checking_boundary_increment"},
             )
 
+    def test_headline_backfills_legacy_all_stage_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            for position, stage in enumerate(report.STAGES, start=1):
+                # Omitting configured_stages models artifacts written before
+                # selectable stage rosters were introduced.
+                self.write_trial(root, stage, position)
+            raw = root / "raw_trials.csv"
+            report.write_raw_trials(root, raw)
+            csv_output = root / "headline_results.csv"
+            markdown_output = root / "headline_results.md"
+            report.write_headline(raw, csv_output, markdown_output)
+
+            with csv_output.open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(
+                list(rows[0]),
+                [
+                    "stage",
+                    "throughput_requests_per_second_median",
+                    "latency_mean_microseconds_median",
+                    "latency_p95_microseconds_median",
+                    "throughput_loss_vs_baseline_percent",
+                ],
+            )
+            self.assertEqual([row["stage"] for row in rows], list(report.STAGES))
+            self.assertEqual(rows[0]["throughput_requests_per_second_median"], "990")
+            self.assertEqual(rows[0]["throughput_loss_vs_baseline_percent"], "")
+            self.assertEqual(
+                rows[1]["throughput_loss_vs_baseline_percent"],
+                "1.010101010101010101010101010",
+            )
+
+            markdown = markdown_output.read_text(encoding="utf-8")
+            self.assertIn(
+                "| Uninstrumented baseline | 990.0 req/s | 101.0 µs | 151 µs | — |",
+                markdown,
+            )
+            self.assertIn(
+                "| Capture/encoding | 980.0 req/s | 102.0 µs | 152 µs | 1.01% |",
+                markdown,
+            )
+            self.assertIn(
+                "| Full checking | 940.0 req/s | 106.0 µs | 156 µs | 5.05% |",
+                markdown,
+            )
+
+    def test_headline_selected_stages_without_baseline_leave_loss_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            roster = ("assembly_join", "assembly_join_check")
+            for position, stage in enumerate(roster, start=1):
+                self.write_trial(root, stage, position, roster)
+            raw = root / "raw_trials.csv"
+            report.write_raw_trials(root, raw)
+            csv_output = root / "headline_results.csv"
+            markdown_output = root / "headline_results.md"
+            report.write_headline(raw, csv_output, markdown_output)
+
+            with csv_output.open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual([row["stage"] for row in rows], list(roster))
+            self.assertEqual(
+                [row["throughput_loss_vs_baseline_percent"] for row in rows],
+                ["", ""],
+            )
+            markdown = markdown_output.read_text(encoding="utf-8")
+            self.assertIn(
+                "| Assembly/join | 990.0 req/s | 101.0 µs | 151 µs | — |",
+                markdown,
+            )
+            self.assertIn(
+                "| Full checking | 980.0 req/s | 102.0 µs | 152 µs | — |",
+                markdown,
+            )
+
+    def test_headline_uses_exact_medians_across_repetitions(self) -> None:
+        rows = report.headline_rows(
+            [
+                {
+                    "stage": "benchbase_uninstrumented",
+                    "throughput_requests_per_second": value,
+                    "latency_mean_microseconds": latency,
+                    "latency_p95_microseconds": p95,
+                }
+                for value, latency, p95 in (
+                    ("100.1", "10.1", "20"),
+                    ("300.3", "30.3", "40"),
+                )
+            ]
+            + [
+                {
+                    "stage": "cdc_capture",
+                    "throughput_requests_per_second": value,
+                    "latency_mean_microseconds": latency,
+                    "latency_p95_microseconds": p95,
+                }
+                for value, latency, p95 in (
+                    ("80.08", "12.2", "22"),
+                    ("240.24", "32.4", "42"),
+                )
+            ]
+        )
+        self.assertEqual(str(rows[0]["Throughput"]), "200.2")
+        self.assertEqual(str(rows[0]["Mean latency"]), "20.2")
+        self.assertEqual(str(rows[1]["Throughput"]), "160.16")
+        self.assertEqual(str(rows[1]["Loss vs baseline"]), "20.0")
+
+        faster = report.headline_rows(
+            [
+                {
+                    "stage": "benchbase_uninstrumented",
+                    "throughput_requests_per_second": "100",
+                    "latency_mean_microseconds": "10",
+                    "latency_p95_microseconds": "20",
+                },
+                {
+                    "stage": "assembly_join_check",
+                    "throughput_requests_per_second": "110",
+                    "latency_mean_microseconds": "11",
+                    "latency_p95_microseconds": "21",
+                },
+            ]
+        )
+        self.assertEqual(str(faster[1]["Loss vs baseline"]), "-10.0")
+
     def test_aggregate_rejects_invalid_selected_stage_rosters(self) -> None:
         for roster, message in (
             (("cdc_capture", "cdc_capture"), "duplicates"),

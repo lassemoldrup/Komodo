@@ -1640,6 +1640,8 @@ finalize_reports() {
   local raw="$OUTPUT_ROOT/raw_trials.csv"
   local summary="$OUTPUT_ROOT/summary_statistics.csv"
   local overhead="$OUTPUT_ROOT/overhead.csv"
+  local headline_csv="$OUTPUT_ROOT/headline_results.csv"
+  local headline_markdown="$OUTPUT_ROOT/headline_results.md"
   local artifact_index="$OUTPUT_ROOT/artifact_index.csv"
   local commands="$OUTPUT_ROOT/report-commands.txt"
   record_command "$commands" python3 "$REPORTER" aggregate \
@@ -1650,6 +1652,13 @@ finalize_reports() {
     --raw-output "$raw" \
     --overhead-output "$overhead" \
     --artifact-index-output "$artifact_index"
+  record_command "$commands" python3 "$REPORTER" headline \
+    --input-csv "$raw" --csv-output "$headline_csv" \
+    --markdown-output "$headline_markdown"
+  python3 "$REPORTER" headline \
+    --input-csv "$raw" \
+    --csv-output "$headline_csv" \
+    --markdown-output "$headline_markdown"
   local summarize_arguments=(
     summarize-trials
     --input-csv "$raw"
