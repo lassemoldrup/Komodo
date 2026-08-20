@@ -18,6 +18,8 @@ from jsonschema import Draft202012Validator, RefResolver
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = ROOT / "protocol" / "schema"
+ADAPTER_ROOT = ROOT / "protocol" / "adapters"
+BACKEND_ROOT = ROOT / "protocol" / "backends"
 
 UUID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
@@ -25,6 +27,7 @@ UUID_PATTERN = re.compile(
 SESSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
 CANONICAL_IDENTIFIER_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 ERROR_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,95}\Z")
+ADAPTER_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 
 BOOTSTRAP_DOMAIN = b"db-monitoring/bootstrap-state-digest\x00"
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
@@ -75,6 +78,387 @@ def validate_identifier(value: str, label: str) -> str:
         f"{label} is not a canonical lowercase identifier: {value}",
     )
     return value
+
+
+def validate_adapter_name(value: str, label: str) -> str:
+    require(
+        ADAPTER_NAME_PATTERN.fullmatch(value) is not None,
+        f"{label} must match [A-Za-z][A-Za-z0-9_]{{0,63}}: {value}",
+    )
+    return value
+
+
+def load_schema_documents() -> list[dict[str, Any]]:
+    return [
+        json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys)
+        for path in sorted(SCHEMA_ROOT.glob("*.schema.json"))
+    ]
+
+
+def document_validator(schema_name: str) -> Draft202012Validator:
+    schemas = load_schema_documents()
+    schema = next(
+        candidate
+        for candidate in schemas
+        if candidate["$id"].endswith(f"/{schema_name}")
+    )
+    resolver = RefResolver.from_schema(
+        schema, store={candidate["$id"]: candidate for candidate in schemas}
+    )
+    return Draft202012Validator(schema, resolver=resolver)
+
+
+def validate_document(
+    validator: Draft202012Validator, document: dict[str, Any], label: str
+) -> None:
+    errors = sorted(
+        validator.iter_errors(document), key=lambda error: list(error.absolute_path)
+    )
+    if errors:
+        rendered = "; ".join(
+            f"{'/'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
+            for error in errors
+        )
+        raise RecordError(f"{label} fails schema validation: {rendered}")
+
+
+def load_adapter_registry() -> dict[str, dict[str, Any]]:
+    validator = document_validator("adapter-contract.schema.json")
+    registry: dict[str, dict[str, Any]] = {}
+    for path in sorted(ADAPTER_ROOT.glob("*.json")):
+        contract = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+        validate_document(validator, contract, f"adapter contract {path.name}")
+        benchmark = validate_adapter_name(contract["benchmark"], "benchmark")
+        require(path.stem == benchmark, f"adapter filename does not match benchmark: {path.name}")
+        require(benchmark not in registry, f"duplicate adapter contract: {benchmark}")
+        table_names = [table["name"] for table in contract["tables"]]
+        require(
+            table_names == contract["application_tables"],
+            f"adapter {benchmark} table definitions disagree with its roster",
+        )
+        require(
+            len(table_names) == len(set(table_names)),
+            f"adapter {benchmark} has duplicate application tables",
+        )
+        registry[benchmark] = contract
+    return registry
+
+
+def load_backend_registry() -> dict[str, dict[str, Any]]:
+    validator = document_validator("backend-contract.schema.json")
+    registry: dict[str, dict[str, Any]] = {}
+    for path in sorted(BACKEND_ROOT.glob("*.json")):
+        contract = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+        validate_document(validator, contract, f"backend contract {path.name}")
+        backend = validate_adapter_name(contract["backend"], "backend")
+        require(path.stem == backend, f"backend filename does not match name: {path.name}")
+        require(backend not in registry, f"duplicate backend contract: {backend}")
+        registry[backend] = contract
+    return registry
+
+
+def select_adapter(benchmark: str) -> dict[str, Any]:
+    validate_adapter_name(benchmark, "benchmark")
+    adapter = load_adapter_registry().get(benchmark)
+    require(adapter is not None, f"unregistered benchmark adapter: {benchmark}")
+    return adapter
+
+
+def select_backend(backend: str) -> dict[str, Any]:
+    validate_adapter_name(backend, "backend")
+    contract = load_backend_registry().get(backend)
+    require(contract is not None, f"unregistered backend contract: {backend}")
+    return contract
+
+
+def validate_application_roster(
+    adapter: dict[str, Any], supplied_tables: list[str] | None
+) -> list[str]:
+    contract_tables = adapter["application_tables"]
+    if not supplied_tables:
+        return contract_tables
+    require(
+        len(supplied_tables) == len(contract_tables)
+        and set(supplied_tables) == set(contract_tables),
+        f"application table roster differs from adapter {adapter['benchmark']} contract",
+    )
+    return contract_tables
+
+
+def validate_transaction_membership(adapter: dict[str, Any], transaction_type: str) -> str:
+    validate_adapter_name(transaction_type, "transaction type")
+    require(
+        transaction_type in adapter["transaction_types"],
+        f"transaction type {transaction_type} is not owned by adapter {adapter['benchmark']}",
+    )
+    return transaction_type
+
+
+def common_table_contracts() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "benchbase.checker_run_fence",
+            "key_columns": ["run_id", "phase"],
+            "columns": [
+                {
+                    "name": "run_id",
+                    "sql_type": "CHAR(36)",
+                    "nullable": False,
+                    "character_set": "ascii",
+                    "collation": "ascii_bin",
+                },
+                {
+                    "name": "phase",
+                    "sql_type": "VARCHAR(32)",
+                    "nullable": False,
+                    "character_set": "ascii",
+                    "collation": "ascii_bin",
+                },
+                {
+                    "name": "nonce",
+                    "sql_type": "CHAR(36)",
+                    "nullable": False,
+                    "character_set": "ascii",
+                    "collation": "ascii_bin",
+                },
+            ],
+        },
+        {
+            "name": "benchbase.session_txn",
+            "key_columns": ["session_id"],
+            "columns": [
+                {
+                    "name": "session_id",
+                    "sql_type": "VARCHAR(64)",
+                    "nullable": False,
+                    "character_set": "ascii",
+                    "collation": "ascii_bin",
+                },
+                {
+                    "name": "txn_id",
+                    "sql_type": "BIGINT",
+                    "nullable": False,
+                },
+            ],
+        },
+    ]
+
+
+def parse_schema_metadata(text: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "settings": {},
+        "database": None,
+        "tables": {},
+    }
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        require(line != "", f"schema metadata contains empty line {line_number}")
+        fields = line.split("\t")
+        record_type = fields[0]
+        if record_type == "SETTING":
+            require(len(fields) == 3, f"schema SETTING line {line_number} has wrong arity")
+            key, value = fields[1:]
+            require(key not in metadata["settings"], f"duplicate schema setting: {key}")
+            metadata["settings"][key] = value
+        elif record_type == "DATABASE":
+            require(len(fields) == 4, f"schema DATABASE line {line_number} has wrong arity")
+            require(metadata["database"] is None, "duplicate schema database record")
+            metadata["database"] = {
+                "name": fields[1],
+                "character_set": fields[2],
+                "collation": fields[3],
+            }
+        elif record_type == "TABLE":
+            require(len(fields) == 4, f"schema TABLE line {line_number} has wrong arity")
+            name = fields[1]
+            require(name not in metadata["tables"], f"duplicate schema table: {name}")
+            metadata["tables"][name] = {
+                "engine": fields[2],
+                "collation": fields[3],
+                "columns": [],
+                "primary_key": [],
+            }
+        elif record_type == "COLUMN":
+            require(len(fields) == 13, f"schema COLUMN line {line_number} has wrong arity")
+            table_name = fields[1]
+            table = metadata["tables"].get(table_name)
+            require(table is not None, f"column precedes or names unknown table: {table_name}")
+            try:
+                ordinal = int(fields[3], 10)
+            except ValueError as error:
+                raise RecordError(f"column ordinal is not an integer on line {line_number}") from error
+            require(ordinal > 0, f"column ordinal is not positive on line {line_number}")
+            table["columns"].append(
+                {
+                    "name": fields[2],
+                    "ordinal": ordinal,
+                    "data_type": fields[4].lower(),
+                    "nullable": fields[5],
+                    "numeric_precision": fields[6],
+                    "numeric_scale": fields[7],
+                    "character_length": fields[8],
+                    "datetime_precision": fields[9],
+                    "character_set": fields[10],
+                    "collation": fields[11],
+                    "extra": fields[12],
+                }
+            )
+        elif record_type == "PRIMARY":
+            require(len(fields) == 4, f"schema PRIMARY line {line_number} has wrong arity")
+            table_name = fields[1]
+            table = metadata["tables"].get(table_name)
+            require(table is not None, f"primary key names unknown table: {table_name}")
+            try:
+                ordinal = int(fields[3], 10)
+            except ValueError as error:
+                raise RecordError(f"primary ordinal is not an integer on line {line_number}") from error
+            require(ordinal > 0, f"primary ordinal is not positive on line {line_number}")
+            table["primary_key"].append((ordinal, fields[2]))
+        else:
+            raise RecordError(f"unknown schema metadata record on line {line_number}: {record_type}")
+    require(metadata["database"] is not None, "schema metadata lacks database record")
+    return metadata
+
+
+def normalized_isolation(value: str) -> str:
+    return value.upper().replace("-", "_").replace(" ", "_")
+
+
+def require_schema_settings(metadata: dict[str, Any], backend: dict[str, Any]) -> None:
+    server = backend["server_defaults"]
+    session = backend["session_requirements"]
+    expected = {
+        "server.character_set": server["character_set"],
+        "server.collation": server["collation"],
+        "server.time_zone": server["time_zone"],
+        "server.sql_mode": server["sql_mode"],
+        "server.transaction_isolation": server["transaction_isolation"],
+        "server.snapshot_isolation": "1" if server["snapshot_isolation"] else "0",
+        "session.character_set_client": session["character_set_client"],
+        "session.character_set_connection": session["character_set_connection"],
+        "session.character_set_results": session["character_set_results"],
+        "session.collation_connection": session["collation_connection"],
+        "session.time_zone": session["time_zone"],
+        "session.sql_mode": session["sql_mode"],
+        "session.transaction_isolation": session["transaction_isolation"],
+        "session.snapshot_isolation": "1" if session["snapshot_isolation"] else "0",
+    }
+    actual = dict(metadata["settings"])
+    for isolation_key in (
+        "server.transaction_isolation",
+        "session.transaction_isolation",
+    ):
+        if isolation_key in actual:
+            actual[isolation_key] = normalized_isolation(actual[isolation_key])
+    require(actual == expected, "MariaDB server/session settings differ from backend contract")
+
+
+SQL_TYPE_PATTERN = re.compile(
+    r"(?:(INT|BIGINT|FLOAT|TIMESTAMP)|(DECIMAL)\(([1-9][0-9]*),([0-9]+)\)|"
+    r"(VARCHAR|CHAR)\(([1-9][0-9]*)\))\Z"
+)
+
+
+def require_column_contract(
+    actual: dict[str, Any],
+    expected: dict[str, Any],
+    ordinal: int,
+    default_character_set: str,
+    default_collation: str,
+    label: str,
+) -> None:
+    require(actual["name"] == expected["name"], f"{label}: column name/order mismatch")
+    require(actual["ordinal"] == ordinal, f"{label}: column ordinal mismatch")
+    require(
+        actual["nullable"] == ("YES" if expected["nullable"] else "NO"),
+        f"{label}: column nullability mismatch",
+    )
+    match = SQL_TYPE_PATTERN.fullmatch(expected["sql_type"])
+    require(match is not None, f"{label}: unsupported contract SQL type")
+    simple_type, decimal_type, precision, scale, string_type, length = match.groups()
+    expected_data_type = (simple_type or decimal_type or string_type).lower()
+    require(actual["data_type"] == expected_data_type, f"{label}: data type mismatch")
+    if decimal_type is not None:
+        require(
+            actual["numeric_precision"] == precision
+            and actual["numeric_scale"] == scale,
+            f"{label}: decimal precision/scale mismatch",
+        )
+    if string_type is not None:
+        require(actual["character_length"] == length, f"{label}: character length mismatch")
+        expected_character_set = expected.get("character_set", default_character_set)
+        expected_collation = expected.get("collation", default_collation)
+        require(
+            actual["character_set"] == expected_character_set
+            and actual["collation"] == expected_collation,
+            f"{label}: character set/collation mismatch",
+        )
+    expected_auto_increment = expected.get("generated") == "auto_increment"
+    actual_auto_increment = "auto_increment" in actual["extra"].split(",")
+    require(
+        actual_auto_increment == expected_auto_increment,
+        f"{label}: auto-increment metadata mismatch",
+    )
+
+
+def validate_schema_metadata(
+    adapter: dict[str, Any], backend: dict[str, Any], metadata_text: str
+) -> None:
+    metadata = parse_schema_metadata(metadata_text)
+    require_schema_settings(metadata, backend)
+    database = metadata["database"]
+    require(database["name"] == "benchbase", "schema metadata names wrong database")
+    require(
+        database["character_set"] == backend["database_defaults"]["character_set"]
+        and database["collation"] == backend["database_defaults"]["collation"],
+        "benchbase database character set/collation differs from backend contract",
+    )
+
+    common_tables = common_table_contracts()
+    expected_tables = adapter["tables"] + common_tables
+    expected_by_name = {table["name"]: table for table in expected_tables}
+    require(
+        set(metadata["tables"]) == set(expected_by_name),
+        "database table roster differs from selected adapter plus common tables",
+    )
+    table_requirements = backend["application_table_requirements"]
+    for table_name, expected_table in expected_by_name.items():
+        actual_table = metadata["tables"][table_name]
+        require(
+            actual_table["engine"].lower() == table_requirements["engine"].lower(),
+            f"{table_name}: storage engine mismatch",
+        )
+        require(
+            actual_table["collation"] == table_requirements["collation"],
+            f"{table_name}: table collation mismatch",
+        )
+        actual_columns = sorted(actual_table["columns"], key=lambda column: column["ordinal"])
+        expected_columns = expected_table["columns"]
+        require(
+            len(actual_columns) == len(expected_columns),
+            f"{table_name}: column count mismatch",
+        )
+        for ordinal, (actual_column, expected_column) in enumerate(
+            zip(actual_columns, expected_columns, strict=True), start=1
+        ):
+            require_column_contract(
+                actual_column,
+                expected_column,
+                ordinal,
+                table_requirements["character_set"],
+                table_requirements["collation"],
+                f"{table_name}.{expected_column['name']}",
+            )
+        primary_key = [
+            name for _, name in sorted(actual_table["primary_key"], key=lambda item: item[0])
+        ]
+        require(
+            primary_key == expected_table["key_columns"],
+            f"{table_name}: primary-key order mismatch",
+        )
 
 
 def length_prefix(value: bytes) -> bytes:
@@ -172,19 +556,34 @@ def dump_record(record: dict[str, Any]) -> None:
 
 def build_run_manifest(args: argparse.Namespace) -> dict[str, Any]:
     run_id = validate_uuid(args.run_id)
+    adapter = select_adapter(args.benchmark)
+    missing_capabilities = sorted(
+        name
+        for name, available in adapter["runtime_capabilities"].items()
+        if not available
+    )
+    require(
+        not missing_capabilities,
+        f"adapter {args.benchmark} runtime is incomplete: {','.join(missing_capabilities)}",
+    )
+    require(
+        args.declared_isolation in adapter["declared_isolations"],
+        f"declared isolation is unsupported by adapter {args.benchmark}",
+    )
     require(1 <= len(args.backend_source_id) <= 256, "backend_source_id length is outside 1..256")
     sessions = [validate_session_id(value) for value in args.session_id]
     require(sessions, "at least one expected session is required")
     require(len(sessions) == len(set(sessions)), "expected session IDs must be unique")
+    application_tables = validate_application_roster(adapter, args.application_table)
     return {
         "kind": "run_manifest",
         "run_id": run_id,
         "backend": "mariadb",
         "backend_source_id": args.backend_source_id,
         "declared_isolation": args.declared_isolation,
-        "benchmark": "ycsb",
+        "benchmark": adapter["benchmark"],
         "expected_session_ids": sessions,
-        "application_table_allowlist": ["benchbase.usertable"],
+        "application_table_allowlist": application_tables,
         "transaction_marker_table": "benchbase.session_txn",
         "control_table_allowlist": ["benchbase.checker_run_fence"],
         "result_scope": "point_transaction_soww",
@@ -193,16 +592,41 @@ def build_run_manifest(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_bootstrap_manifest(args: argparse.Namespace) -> dict[str, Any]:
     run_id = validate_uuid(args.run_id)
+    adapter = select_adapter(args.benchmark)
+    require(
+        adapter["runtime_capabilities"]["bootstrap_scan"],
+        f"adapter {args.benchmark} bootstrap scanner is not implemented",
+    )
     validate_identifier(args.schema, "schema")
     validate_identifier(args.table, "table")
+    table_name = f"{args.schema}.{args.table}"
+    validate_application_roster(adapter, [table_name])
     rows = scan_rows(Path(args.scan_file), args.schema, args.table)
     row_count, digest = bootstrap_digest(rows)
     return {
         "kind": "bootstrap_manifest",
         "run_id": run_id,
-        "table_row_counts": [{"table": f"{args.schema}.{args.table}", "row_count": row_count}],
+        "table_row_counts": [{"table": table_name, "row_count": row_count}],
         "canonical_state_digest": digest,
     }
+
+
+def inspect_adapter_contract(args: argparse.Namespace) -> dict[str, Any]:
+    adapter = select_adapter(args.benchmark)
+    if args.transaction_type is not None:
+        validate_transaction_membership(adapter, args.transaction_type)
+    validate_application_roster(adapter, args.application_table)
+    return adapter
+
+
+def inspect_backend_contract(args: argparse.Namespace) -> dict[str, Any]:
+    return select_backend(args.backend)
+
+
+def check_schema_contract(args: argparse.Namespace) -> None:
+    adapter = select_adapter(args.benchmark)
+    backend = select_backend(args.backend)
+    validate_schema_metadata(adapter, backend, sys.stdin.read())
 
 
 def build_run_failed(args: argparse.Namespace) -> dict[str, Any]:
@@ -232,16 +656,7 @@ def build_run_failed(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def status_validator() -> Draft202012Validator:
-    schema_paths = sorted(SCHEMA_ROOT.glob("*.schema.json"))
-    schemas = [
-        json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys)
-        for path in schema_paths
-    ]
-    status_schema = next(schema for schema in schemas if schema["$id"].endswith("/monitor-status.schema.json"))
-    resolver = RefResolver.from_schema(
-        status_schema, store={schema["$id"]: schema for schema in schemas}
-    )
-    return Draft202012Validator(status_schema, resolver=resolver)
+    return document_validator("monitor-status.schema.json")
 
 
 def validate_final_verdict(record: dict[str, Any], expected_sessions: int) -> None:
@@ -353,13 +768,34 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument(
         "--declared-isolation", choices=("READ_COMMITTED", "REPEATABLE_READ"), required=True
     )
+    manifest.add_argument("--benchmark", default="ycsb")
     manifest.add_argument("--session-id", action="append", default=[])
+    manifest.add_argument("--application-table", action="append", default=[])
 
     bootstrap = subparsers.add_parser("bootstrap-manifest", help="emit a BootstrapManifest")
     bootstrap.add_argument("--run-id", required=True)
+    bootstrap.add_argument("--benchmark", default="ycsb")
     bootstrap.add_argument("--schema", default="benchbase")
     bootstrap.add_argument("--table", default="usertable")
     bootstrap.add_argument("--scan-file", required=True)
+
+    adapter = subparsers.add_parser(
+        "adapter-contract", help="validate and emit one shared adapter contract"
+    )
+    adapter.add_argument("--benchmark", required=True)
+    adapter.add_argument("--transaction-type")
+    adapter.add_argument("--application-table", action="append", default=[])
+
+    backend = subparsers.add_parser(
+        "backend-contract", help="validate and emit one shared backend contract"
+    )
+    backend.add_argument("--backend", default="mariadb")
+
+    schema_check = subparsers.add_parser(
+        "schema-check", help="validate server/session/database/table metadata"
+    )
+    schema_check.add_argument("--backend", default="mariadb")
+    schema_check.add_argument("--benchmark", required=True)
 
     failed = subparsers.add_parser("run-failed", help="emit a coordinator RunFailed record")
     failed.add_argument("--run-id", required=True)
@@ -410,6 +846,12 @@ def main() -> int:
             dump_record(build_run_manifest(args))
         elif args.command == "bootstrap-manifest":
             dump_record(build_bootstrap_manifest(args))
+        elif args.command == "adapter-contract":
+            dump_record(inspect_adapter_contract(args))
+        elif args.command == "backend-contract":
+            dump_record(inspect_backend_contract(args))
+        elif args.command == "schema-check":
+            check_schema_contract(args)
         elif args.command == "run-failed":
             dump_record(build_run_failed(args))
         elif args.command == "status-action":
@@ -417,7 +859,7 @@ def main() -> int:
             print(f"{action}\t{lifecycle}")
         else:  # pragma: no cover - argparse owns this invariant
             raise RecordError(f"unsupported command: {args.command}")
-    except (OSError, RecordError, UnicodeError) as error:
+    except (OSError, RecordError, UnicodeError, json.JSONDecodeError) as error:
         print(f"black-box record error: {error}", file=sys.stderr)
         return 2
     return 0

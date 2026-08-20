@@ -1,0 +1,68 @@
+{
+  "benchmark": "ycsb",
+  "canonical_schema": "benchbase",
+  "runtime_capabilities": {
+    "client_trace": true,
+    "cdc_normalization": true,
+    "bootstrap_scan": true
+  },
+  "declared_isolations": ["READ_COMMITTED", "REPEATABLE_READ"],
+  "transaction_types": [
+    "ycsb_insert",
+    "ycsb_read",
+    "ycsb_update",
+    "ycsb_delete",
+    "si_fractured_read_probe"
+  ],
+  "application_tables": ["benchbase.usertable"],
+  "projection_policy": {
+    "ordinary_rows": "whole_row_points",
+    "predicate_semantics": "omitted",
+    "aggregate_scalars": "omitted_without_event",
+    "implicit_dml_reads": "omitted_without_event",
+    "locking_reads": "omitted_without_event"
+  },
+  "tables": [
+    {
+      "name": "benchbase.usertable",
+      "key_columns": ["ycsb_key"],
+      "value_columns": [
+        "field1",
+        "field2",
+        "field3",
+        "field4",
+        "field5",
+        "field6",
+        "field7",
+        "field8",
+        "field9",
+        "field10"
+      ],
+      "columns": [
+        { "name": "ycsb_key", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "field1", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field2", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field3", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field4", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field5", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field6", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field7", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field8", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field9", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" },
+        { "name": "field10", "sql_type": "VARCHAR(100)", "nullable": true, "canonical_type": "utf8_varchar" }
+      ]
+    }
+  ],
+  "result_sets": [],
+  "loader": {
+    "scale_parameter": null,
+    "cardinalities": [
+      {
+        "table": "benchbase.usertable",
+        "kind": "configuration",
+        "configuration_name": "record_count"
+      }
+    ],
+    "relationships": []
+  }
+}

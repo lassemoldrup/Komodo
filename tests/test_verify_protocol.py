@@ -83,7 +83,9 @@ class SessionAttemptProgressTest(unittest.TestCase):
 class ProtocolArtifactAlignmentTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.validator, _ = VERIFY_PROTOCOL.load_schema_validator()
+        cls.validator, cls.schemas = VERIFY_PROTOCOL.load_schema_validator()
+        cls.contracts = VERIFY_PROTOCOL.load_adapter_contracts(cls.schemas)
+        cls.backends = VERIFY_PROTOCOL.load_backend_contracts(cls.schemas)
 
     @staticmethod
     def example(name: str) -> dict[str, object]:
@@ -96,6 +98,111 @@ class ProtocolArtifactAlignmentTest(unittest.TestCase):
             VERIFY_PROTOCOL.VerificationError, "schema validation failed"
         ):
             VERIFY_PROTOCOL.verify_record_schema(self.validator, manifest, "manifest")
+
+    def test_wire_names_are_bounded_but_not_globally_enumerated(self) -> None:
+        manifest = self.example("run-manifest.json")
+        manifest["benchmark"] = "FutureAdapter_1"
+        VERIFY_PROTOCOL.verify_record_schema(self.validator, manifest, "manifest")
+        manifest["benchmark"] = "1invalid"
+        with self.assertRaisesRegex(
+            VERIFY_PROTOCOL.VerificationError, "schema validation failed"
+        ):
+            VERIFY_PROTOCOL.verify_record_schema(self.validator, manifest, "manifest")
+
+        client = self.example("client-txn-second.json")
+        client["txn_type"] = "FutureTransaction_1"
+        VERIFY_PROTOCOL.verify_record_schema(self.validator, client, "client")
+        client["txn_type"] = "A" * 65
+        with self.assertRaisesRegex(
+            VERIFY_PROTOCOL.VerificationError, "schema validation failed"
+        ):
+            VERIFY_PROTOCOL.verify_record_schema(self.validator, client, "client")
+
+    def test_selected_adapter_rejects_unknown_transaction_membership(self) -> None:
+        records = VERIFY_PROTOCOL.verify_schemas_and_examples()
+        records["client_txn"][0]["txn_type"] = "NewOrder"
+        with self.assertRaisesRegex(
+            VERIFY_PROTOCOL.VerificationError, "not owned by selected adapter"
+        ):
+            VERIFY_PROTOCOL.verify_cross_record_semantics(records, self.contracts)
+
+    def test_selected_adapter_rejects_table_roster_mismatch(self) -> None:
+        records = VERIFY_PROTOCOL.verify_schemas_and_examples()
+        records["run_manifest"][0]["application_table_allowlist"] = [
+            "benchbase.warehouse"
+        ]
+        with self.assertRaisesRegex(
+            VERIFY_PROTOCOL.VerificationError, "table roster differs"
+        ):
+            VERIFY_PROTOCOL.verify_cross_record_semantics(records, self.contracts)
+
+    def test_tpcc_contract_has_exact_names_roster_and_capture_matrix(self) -> None:
+        contract = self.contracts["tpcc"]
+        self.assertEqual(
+            tuple(contract["transaction_types"]), VERIFY_PROTOCOL.TPCC_TRANSACTION_TYPES
+        )
+        self.assertEqual(
+            tuple(contract["application_tables"]), VERIFY_PROTOCOL.TPCC_APPLICATION_TABLES
+        )
+        classifications = [item["classification"] for item in contract["result_sets"]]
+        self.assertEqual(classifications.count("snapshot"), 13)
+        self.assertEqual(classifications.count("local"), 2)
+        self.assertEqual(classifications.count("omit"), 4)
+        aggregates = [
+            item
+            for item in contract["result_sets"]
+            if item["result_shape"] == "aggregate_scalar"
+        ]
+        self.assertEqual(len(aggregates), 2)
+        self.assertTrue(all(item["classification"] == "omit" for item in aggregates))
+
+    def test_tpcc_contract_rejects_capture_matrix_drift(self) -> None:
+        contract = copy.deepcopy(self.contracts["tpcc"])
+        contract["result_sets"][0]["classification"] = "local"
+        with self.assertRaisesRegex(
+            VERIFY_PROTOCOL.VerificationError, "capture/omit matrix"
+        ):
+            VERIFY_PROTOCOL.verify_tpcc_contract(contract)
+
+    def test_tpcc_contract_freezes_history_key_and_empty_new_order_value(self) -> None:
+        tables = {
+            table["name"]: table for table in self.contracts["tpcc"]["tables"]
+        }
+        self.assertEqual(tables["benchbase.history"]["key_columns"], ["h_id"])
+        self.assertEqual(
+            tables["benchbase.history"]["columns"][0],
+            {
+                "name": "h_id",
+                "sql_type": "BIGINT",
+                "nullable": False,
+                "canonical_type": "i64",
+                "generated": "auto_increment",
+            },
+        )
+        self.assertEqual(tables["benchbase.new_order"]["value_columns"], [])
+
+    def test_tpcc_vector_inventory_covers_every_table_and_boundary(self) -> None:
+        VERIFY_PROTOCOL.verify_tpcc_vector_inventory(self.contracts, self.schemas)
+
+    def test_tpcc_adapter_record_examples_are_contract_validated(self) -> None:
+        self.assertEqual(
+            VERIFY_PROTOCOL.verify_adapter_record_examples(
+                self.contracts, self.schemas
+            ),
+            2,
+        )
+
+    def test_mariadb_backend_contract_freezes_session_and_schema_defaults(self) -> None:
+        contract = self.backends["mariadb"]
+        self.assertEqual(contract["server_defaults"]["sql_mode"], VERIFY_PROTOCOL.MARIADB_SQL_MODE)
+        self.assertEqual(
+            contract["session_requirements"]["set_names"],
+            "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
+        )
+        self.assertEqual(
+            contract["application_table_requirements"]["char_read_semantics"],
+            "pad_to_declared_length",
+        )
 
     def test_golden_key_encoder_rejects_noncanonical_identifiers(self) -> None:
         with self.assertRaisesRegex(
@@ -117,6 +224,11 @@ class ProtocolArtifactAlignmentTest(unittest.TestCase):
             VERIFY_PROTOCOL.VerificationError, "undocumented"
         ):
             VERIFY_PROTOCOL.verify_cross_record_semantics(records)
+
+    def test_session_and_isolation_mismatches_have_distinct_stable_codes(self) -> None:
+        codes = VERIFY_PROTOCOL.documented_failure_codes()
+        self.assertIn("SESSION_CONTRACT_MISMATCH", codes)
+        self.assertIn("ISOLATION_MISMATCH", codes)
 
     def test_verifier_rejects_duplicate_session_done(self) -> None:
         records = VERIFY_PROTOCOL.verify_schemas_and_examples()

@@ -1,6 +1,6 @@
-# Milestone 0 protocol decisions
+# Black-box protocol decisions
 
-Status: proposed freeze for review on the current branch.
+Status: frozen branch-local contract.
 
 These decisions turn the open questions in the end-to-end design into one
 implementable contract. Changing one before implementation is inexpensive;
@@ -14,10 +14,13 @@ their golden tests in the same branch.
   marker and is therefore CDC-visible, including read-only and
   no-application-write transactions.
 - The marker write is filtered from the normalized application write set.
-- `PASS` means the complete supported point-transaction history satisfies SOWW;
-  it is not a predicate/phantom or arbitrary-SQL SI claim.
-- V0 accepts non-locking point reads only. Scans, predicates, phantom claims,
-  `SELECT ... FOR UPDATE`, and unclassified read-own-write behavior are rejected.
+- `PASS` means the complete supported point-event projection satisfies SOWW; it
+  is not a predicate/phantom or arbitrary-SQL SI claim.
+- Ordinary non-locking, non-aggregate result rows are retained as whole-row
+  points. Predicate, range, order, limit, and phantom semantics are not retained.
+- Aggregate scalars, implicit DML reads, and locking/current reads such as
+  `SELECT ... FOR UPDATE` are omitted completely. A true read-own-write result
+  may be retained with `source=local`.
 - The result describes the execution with marker instrumentation enabled. The
   marker adds one per-session physical write to every workload transaction.
 
@@ -126,14 +129,19 @@ Rationale: database-specific lifecycle control stays outside the general
 benchmark runner, while transaction evidence remains at the only layer that can
 observe it correctly.
 
-## D4: Scans are disabled
+## D4: Explicit results use the point-event projection
 
-Reject a workload configuration that gives YCSB scans nonzero weight. Do not
-silently reduce a range query to returned point reads in V0.
+For every adapter-classified ordinary result, emit one complete canonical row
+point for every returned row. An exact-primary-key miss emits one `Absent`
+point. A zero-row predicate/range result emits no synthetic miss. Predicates,
+range completeness, ordering, limits, and phantoms are not represented.
 
-Rationale: a returned-point projection cannot represent an empty range, missing
-interior keys, ordering, or phantoms, and would make the result easy to
-overinterpret.
+The selected adapter classifies every result-producing statement as `snapshot`,
+`local`, or `omit`. Aggregate scalars have no synthetic-key representation.
+Omitted results do not enter `ClientTxn.reads` or its digest.
+
+YCSB may retain its adapter-specific scan-weight admission rule. That rule is
+not a wire-protocol restriction and is not applied to other adapters.
 
 ## D5: JSON transport with canonical binary payloads
 
@@ -171,3 +179,81 @@ launch compatible client and monitor builds from the same development branch.
 
 JSON Schema's `$schema` keyword identifies the JSON Schema standard and is not
 an application protocol version.
+
+## D8: Adapter-owned semantic membership
+
+`RunManifest.benchmark` and `ClientTxn.txn_type` are bounded strings matching
+`[A-Za-z][A-Za-z0-9_]{0,63}`. JSON Schema validates only that syntax. The
+adapter selected by the run manifest validates the transaction name and exact
+application-table roster.
+
+The shared contracts are under `protocol/adapters/`. A contract owns its
+transaction names, table/column metadata, statement-result classification, and
+loader acceptance rules. Generic lifecycle, marker, CDC framing, joining,
+reconciliation, and checker records do not enumerate benchmark names.
+
+Runtime-capability flags are fail-closed implementation facts, not wire fields.
+They prevent a contract from admitting a run before its client trace, CDC
+normalizer, and bootstrap scanner implementations are all available.
+
+## D9: TPC-C adapter contract
+
+The stable benchmark name is `tpcc`. Its exact wire transaction names are
+`NewOrder`, `Payment`, `OrderStatus`, `Delivery`, and `StockLevel`.
+
+The application roster is `warehouse`, `item`, `stock`, `district`, `customer`,
+`history`, `oorder`, `new_order`, and `order_line` in schema `benchbase`.
+Columns retain the MariaDB `ddl-mysql.sql` order, type, and nullability. The
+black-box-compatible schema inserts
+`h_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY` as the first `history` column;
+the standard eight history columns are its canonical value.
+
+`protocol/adapters/tpcc.json` is the machine-checkable source for the complete
+column/key/value roster, all 19 result-producing BenchBase statement IDs and
+their snapshot/local/omit classification, and loader counts/relationships. The
+TPC-C adapter accepts only declared repeatable-read runs. Its runtime capability
+flags remain false until the corresponding implementations and typed codec
+goldens land atomically.
+
+No post-run TPC-C application-invariant suite is part of this protocol or its
+result claim. Bootstrap loader cardinality and relationship validation remains
+required and is distinct from a post-workload invariant check.
+
+## D10: TPC-C golden inventory precedes typed vectors
+
+`protocol/golden/tpcc_row_vector_inventory.json` freezes the required row and
+boundary cases without pretending that typed byte encodings already exist.
+It covers every table, signed key boundaries, composite keys, decimals, database
+`FLOAT`, UTC timestamps, `CHAR` padding, strict UTF-8, SQL `NULL`, the empty
+`new_order` value, and the generated history key. Exact bytes and real
+MariaDB/JDBC/Debezium fixtures must satisfy this inventory before the three TPC-C
+runtime capability flags can become true.
+
+## D11: MariaDB session and schema contract
+
+Backend/session requirements remain independent of benchmark adapters and live
+in `protocol/backends/mariadb.json`. The MariaDB server, `benchbase` database,
+and every selected-adapter application table use `utf8mb4` with
+`utf8mb4_bin`. Connections use
+`SET NAMES utf8mb4 COLLATE utf8mb4_bin`, UTC (`+00:00`), repeatable read with
+snapshot isolation enabled, and exactly this ordered SQL-mode string:
+
+```text
+STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH
+```
+
+The client verifies `character_set_client`, `character_set_connection`,
+`character_set_results`, `collation_connection`, time zone, SQL mode, isolation,
+and snapshot isolation on every initial or replacement connection. Exact SQL
+mode membership enforces `PAD_CHAR_TO_FULL_LENGTH`; stored-column padding is
+proved later by a real MariaDB/JDBC codec fixture rather than an expression
+probe. Transaction/snapshot failures use `ISOLATION_MISMATCH`; all other
+connection/session failures use `SESSION_CONTRACT_MISMATCH`.
+
+MariaDB initialization mounts the common marker/fence schema and exactly one
+adapter schema selected by the validated benchmark name. Before CDC starts, the
+coordinator compares server/session metadata, the exact table roster, column
+order/types/nullability, primary keys, engine, charset, collation, and zero row
+counts against the backend and adapter contracts. TPC-C schema validation is
+available independently, while full TPC-C run admission remains disabled until
+all adapter runtime capabilities are present.

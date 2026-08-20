@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://db-monitoring.local/schema/backend-contract.schema.json",
+  "$defs": {
+    "serverDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "character_set",
+        "collation",
+        "time_zone",
+        "sql_mode",
+        "transaction_isolation",
+        "snapshot_isolation"
+      ],
+      "properties": {
+        "character_set": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "collation": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "time_zone": { "type": "string", "pattern": "^[+-][0-9]{2}:[0-9]{2}$" },
+        "sql_mode": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "transaction_isolation": {
+          "type": "string",
+          "enum": ["READ_COMMITTED", "REPEATABLE_READ"]
+        },
+        "snapshot_isolation": { "type": "boolean" }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "backend",
+    "server_defaults",
+    "session_requirements",
+    "database_defaults",
+    "application_table_requirements"
+  ],
+  "properties": {
+    "backend": { "$ref": "common.schema.json#/$defs/adapterName" },
+    "server_defaults": { "$ref": "#/$defs/serverDefaults" },
+    "session_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "set_names",
+        "character_set_client",
+        "character_set_connection",
+        "character_set_results",
+        "collation_connection",
+        "time_zone",
+        "sql_mode",
+        "transaction_isolation",
+        "snapshot_isolation"
+      ],
+      "properties": {
+        "set_names": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "character_set_client": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "character_set_connection": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "character_set_results": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "collation_connection": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "time_zone": { "type": "string", "pattern": "^[+-][0-9]{2}:[0-9]{2}$" },
+        "sql_mode": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "transaction_isolation": {
+          "type": "string",
+          "enum": ["READ_COMMITTED", "REPEATABLE_READ"]
+        },
+        "snapshot_isolation": { "type": "boolean" }
+      }
+    },
+    "database_defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["character_set", "collation"],
+      "properties": {
+        "character_set": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "collation": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" }
+      }
+    },
+    "application_table_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "character_set", "collation", "char_read_semantics"],
+      "properties": {
+        "engine": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,31}$" },
+        "character_set": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "collation": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "char_read_semantics": { "const": "pad_to_declared_length" }
+      }
+    }
+  }
+}

@@ -26,6 +26,8 @@ PROTOCOL_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = PROTOCOL_ROOT / "schema"
 EXAMPLE_ROOT = PROTOCOL_ROOT / "examples"
 GOLDEN_ROOT = PROTOCOL_ROOT / "golden"
+ADAPTER_ROOT = PROTOCOL_ROOT / "adapters"
+BACKEND_ROOT = PROTOCOL_ROOT / "backends"
 
 READ_DOMAIN = b"db-monitoring/read-digest\x00"
 BOOTSTRAP_DOMAIN = b"db-monitoring/bootstrap-state-digest\x00"
@@ -38,6 +40,119 @@ SNAPSHOT = 0x01
 LOCAL = 0x02
 SAFE_JSON_INTEGER = 9_007_199_254_740_991
 CANONICAL_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+ADAPTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+TPCC_TRANSACTION_TYPES = (
+    "NewOrder",
+    "Payment",
+    "OrderStatus",
+    "Delivery",
+    "StockLevel",
+)
+TPCC_APPLICATION_TABLES = (
+    "benchbase.warehouse",
+    "benchbase.item",
+    "benchbase.stock",
+    "benchbase.district",
+    "benchbase.customer",
+    "benchbase.history",
+    "benchbase.oorder",
+    "benchbase.new_order",
+    "benchbase.order_line",
+)
+TPCC_TABLE_CONTRACT_SHA256 = (
+    "811786b59371deb6fafd3c7ff535f93df08d5f0667a584e492ab4083771c71de"
+)
+MARIADB_SQL_MODE = (
+    "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,"
+    "NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH"
+)
+TPCC_RESULT_SET_CONTRACT = {
+    ("NewOrder", "stmtGetCustSQL"): ("benchbase.customer", "snapshot", "exact_key_row", None),
+    ("NewOrder", "stmtGetWhseSQL"): ("benchbase.warehouse", "snapshot", "exact_key_row", None),
+    ("NewOrder", "stmtGetDistSQL"): (
+        "benchbase.district",
+        "omit",
+        "exact_key_row",
+        "locking_current_read",
+    ),
+    ("NewOrder", "stmtGetItemSQL"): ("benchbase.item", "snapshot", "exact_key_row", None),
+    ("NewOrder", "stmtGetStockSQL"): (
+        "benchbase.stock",
+        "omit",
+        "exact_key_row",
+        "locking_current_read",
+    ),
+    ("Payment", "payGetWhseSQL"): ("benchbase.warehouse", "local", "exact_key_row", None),
+    ("Payment", "payGetDistSQL"): ("benchbase.district", "local", "exact_key_row", None),
+    ("Payment", "payGetCustSQL"): ("benchbase.customer", "snapshot", "exact_key_row", None),
+    ("Payment", "payGetCustCdataSQL"): (
+        "benchbase.customer",
+        "snapshot",
+        "exact_key_row",
+        None,
+    ),
+    ("Payment", "customerByNameSQL"): (
+        "benchbase.customer",
+        "snapshot",
+        "returned_rows",
+        None,
+    ),
+    ("OrderStatus", "ordStatGetNewestOrdSQL"): (
+        "benchbase.oorder",
+        "snapshot",
+        "returned_rows",
+        None,
+    ),
+    ("OrderStatus", "ordStatGetOrderLinesSQL"): (
+        "benchbase.order_line",
+        "snapshot",
+        "returned_rows",
+        None,
+    ),
+    ("OrderStatus", "payGetCustSQL"): (
+        "benchbase.customer",
+        "snapshot",
+        "exact_key_row",
+        None,
+    ),
+    ("OrderStatus", "customerByNameSQL"): (
+        "benchbase.customer",
+        "snapshot",
+        "returned_rows",
+        None,
+    ),
+    ("Delivery", "delivGetOrderIdSQL"): (
+        "benchbase.new_order",
+        "snapshot",
+        "returned_rows",
+        None,
+    ),
+    ("Delivery", "delivGetCustIdSQL"): (
+        "benchbase.oorder",
+        "snapshot",
+        "exact_key_row",
+        None,
+    ),
+    ("Delivery", "delivSumOrderAmountSQL"): (
+        "benchbase.order_line",
+        "omit",
+        "aggregate_scalar",
+        "aggregate_scalar",
+    ),
+    ("StockLevel", "stockGetDistOrderIdSQL"): (
+        "benchbase.district",
+        "snapshot",
+        "exact_key_row",
+        None,
+    ),
+    ("StockLevel", "stockGetCountStockSQL"): (
+        "benchbase.stock",
+        "omit",
+        "aggregate_scalar",
+        "aggregate_scalar",
+    ),
+}
 
 
 class VerificationError(RuntimeError):
@@ -261,10 +376,498 @@ def documented_failure_codes() -> set[str]:
     )
 
 
-def load_schema_validator() -> tuple[Draft202012Validator, list[dict[str, Any]]]:
+def load_schema_documents() -> list[dict[str, Any]]:
     schemas = [load_json(path) for path in sorted(SCHEMA_ROOT.glob("*.schema.json"))]
     for schema in schemas:
         Draft202012Validator.check_schema(schema)
+    return schemas
+
+
+def schema_validator(
+    schemas: list[dict[str, Any]], schema_name: str
+) -> Draft202012Validator:
+    schema = next(
+        candidate
+        for candidate in schemas
+        if candidate["$id"].endswith(f"/{schema_name}")
+    )
+    resolver = RefResolver.from_schema(
+        schema, store={candidate["$id"]: candidate for candidate in schemas}
+    )
+    return Draft202012Validator(schema, resolver=resolver)
+
+
+def verify_document_schema(
+    validator: Draft202012Validator, document: dict[str, Any], label: str
+) -> None:
+    errors = sorted(
+        validator.iter_errors(document), key=lambda error: list(error.absolute_path)
+    )
+    if errors:
+        rendered = "; ".join(
+            f"{'/'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
+            for error in errors
+        )
+        raise VerificationError(f"schema validation failed for {label}: {rendered}")
+
+
+def validate_table_contract(table: dict[str, Any], canonical_schema: str) -> None:
+    label = f"table {table['name']}"
+    require(
+        table["name"].startswith(f"{canonical_schema}."),
+        f"{label}: table is outside canonical schema",
+    )
+    columns = table["columns"]
+    column_names = [column["name"] for column in columns]
+    require(
+        len(column_names) == len(set(column_names)),
+        f"{label}: duplicate column name",
+    )
+    key_columns = table["key_columns"]
+    value_columns = table["value_columns"]
+    require(
+        all(column in column_names for column in key_columns),
+        f"{label}: key names an unknown column",
+    )
+    require(
+        all(column in column_names for column in value_columns),
+        f"{label}: value names an unknown column",
+    )
+    require(
+        not set(key_columns).intersection(value_columns),
+        f"{label}: key/value columns overlap",
+    )
+    require(
+        value_columns
+        == [column for column in column_names if column not in set(key_columns)],
+        f"{label}: value columns are not all non-key columns in schema order",
+    )
+    columns_by_name = {column["name"]: column for column in columns}
+    for key_column in key_columns:
+        require(
+            not columns_by_name[key_column]["nullable"],
+            f"{label}: primary-key column is nullable",
+        )
+
+    expected_canonical_types = {
+        "INT": "i32",
+        "BIGINT": "i64",
+        "FLOAT": "float32",
+        "TIMESTAMP": "timestamp_utc",
+    }
+    for column in columns:
+        sql_type = column["sql_type"]
+        if sql_type.startswith("DECIMAL("):
+            expected_type = "fixed_decimal"
+        elif sql_type.startswith("VARCHAR("):
+            expected_type = "utf8_varchar"
+        elif sql_type.startswith("CHAR("):
+            expected_type = "utf8_char"
+        else:
+            expected_type = expected_canonical_types.get(sql_type)
+        require(
+            expected_type == column["canonical_type"],
+            f"{label}.{column['name']}: SQL/canonical type mismatch",
+        )
+        if "generated" in column:
+            require(
+                column["name"] in key_columns
+                and column["generated"] == "auto_increment"
+                and sql_type == "BIGINT"
+                and not column["nullable"],
+                f"{label}.{column['name']}: invalid generated-key contract",
+            )
+
+
+def validate_cardinality_contract(
+    cardinality: dict[str, Any], tables_by_name: dict[str, dict[str, Any]], label: str
+) -> None:
+    table_name = cardinality["table"]
+    require(table_name in tables_by_name, f"{label}: cardinality names unknown table")
+    kind = cardinality["kind"]
+    required_by_kind = {
+        "constant": {"value"},
+        "scale_multiplier": {"multiplier"},
+        "sum_column": {"source_table", "source_column"},
+        "configuration": {"configuration_name"},
+    }
+    common = {"table", "kind"}
+    require(
+        set(cardinality) == common | required_by_kind[kind],
+        f"{label}: {kind} cardinality has wrong fields",
+    )
+    if kind == "sum_column":
+        source_table = cardinality["source_table"]
+        require(
+            source_table in tables_by_name,
+            f"{label}: cardinality source table is unknown",
+        )
+        source_columns = {
+            column["name"] for column in tables_by_name[source_table]["columns"]
+        }
+        require(
+            cardinality["source_column"] in source_columns,
+            f"{label}: cardinality source column is unknown",
+        )
+
+
+def validate_adapter_contract(contract: dict[str, Any], label: str) -> None:
+    benchmark = contract["benchmark"]
+    require(
+        ADAPTER_NAME.fullmatch(benchmark) is not None,
+        f"{label}: benchmark name is not bounded/canonical",
+    )
+    transactions = contract["transaction_types"]
+    require(
+        all(ADAPTER_NAME.fullmatch(name) is not None for name in transactions),
+        f"{label}: transaction type is not bounded/canonical",
+    )
+    tables = contract["tables"]
+    table_names = [table["name"] for table in tables]
+    require(
+        table_names == contract["application_tables"],
+        f"{label}: table definitions disagree with application roster",
+    )
+    require(len(table_names) == len(set(table_names)), f"{label}: duplicate table")
+    for table in tables:
+        validate_table_contract(table, contract["canonical_schema"])
+    tables_by_name = {table["name"]: table for table in tables}
+
+    statement_keys: set[tuple[str, str]] = set()
+    for result_set in contract["result_sets"]:
+        statement_key = (result_set["procedure"], result_set["statement_id"])
+        require(
+            statement_key not in statement_keys,
+            f"{label}: duplicate result-producing statement {statement_key}",
+        )
+        statement_keys.add(statement_key)
+        require(
+            result_set["transaction_type"] in transactions,
+            f"{label}: result set names unknown transaction type",
+        )
+        require(
+            result_set["procedure"] == result_set["transaction_type"],
+            f"{label}: procedure and wire transaction name differ",
+        )
+        require(
+            result_set["table"] in tables_by_name,
+            f"{label}: result set names unknown table",
+        )
+        classification = result_set["classification"]
+        omission_reason = result_set.get("omission_reason")
+        require(
+            (classification == "omit") == (omission_reason is not None),
+            f"{label}: omission classification/reason mismatch",
+        )
+        require(
+            classification == "omit"
+            or result_set["result_shape"] != "aggregate_scalar",
+            f"{label}: aggregate result is presented as a point read",
+        )
+        if omission_reason == "aggregate_scalar":
+            require(
+                result_set["result_shape"] == "aggregate_scalar"
+                and "aggregate" in result_set["semantics_ignored"],
+                f"{label}: aggregate omission is incomplete",
+            )
+        if omission_reason == "locking_current_read":
+            require(
+                "locking" in result_set["semantics_ignored"],
+                f"{label}: locking omission is incomplete",
+            )
+
+    cardinalities = contract["loader"]["cardinalities"]
+    cardinality_tables = [cardinality["table"] for cardinality in cardinalities]
+    require(
+        len(cardinality_tables) == len(set(cardinality_tables))
+        and set(cardinality_tables) == set(table_names),
+        f"{label}: loader cardinalities disagree with table roster",
+    )
+    for index, cardinality in enumerate(cardinalities):
+        validate_cardinality_contract(
+            cardinality, tables_by_name, f"{label}: cardinality {index}"
+        )
+    for relationship in contract["loader"]["relationships"]:
+        parent = tables_by_name.get(relationship["parent_table"])
+        child = tables_by_name.get(relationship["child_table"])
+        require(parent is not None and child is not None, f"{label}: relationship table is unknown")
+        parent_columns = {column["name"] for column in parent["columns"]}
+        child_columns = {column["name"] for column in child["columns"]}
+        require(
+            relationship["parent_key_columns"] == parent["key_columns"],
+            f"{label}: relationship parent key differs from table key",
+        )
+        require(
+            len(relationship["parent_key_columns"])
+            == len(relationship["child_parent_columns"]),
+            f"{label}: relationship key arity mismatch",
+        )
+        require(
+            all(name in child_columns for name in relationship["child_parent_columns"]),
+            f"{label}: relationship child key column is unknown",
+        )
+        require(
+            relationship["expected_count_column"] in parent_columns
+            and relationship["child_sequence_column"] in child_columns,
+            f"{label}: relationship count/sequence column is unknown",
+        )
+        require(
+            relationship["minimum_count"] <= relationship["maximum_count"],
+            f"{label}: relationship count bounds are reversed",
+        )
+
+
+def verify_tpcc_contract(contract: dict[str, Any]) -> None:
+    require(
+        tuple(contract["transaction_types"]) == TPCC_TRANSACTION_TYPES,
+        "TPC-C transaction-type contract differs from the accepted wire names",
+    )
+    require(
+        tuple(contract["application_tables"]) == TPCC_APPLICATION_TABLES,
+        "TPC-C application-table roster differs from the accepted schema",
+    )
+    require(
+        contract["declared_isolations"] == ["REPEATABLE_READ"],
+        "TPC-C isolation contract is not repeatable read only",
+    )
+    require(
+        not any(contract["runtime_capabilities"].values()),
+        "TPC-C contract freeze must not advertise unimplemented runtime codecs",
+    )
+    table_contract_bytes = json.dumps(
+        contract["tables"],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    require(
+        sha256_hex(table_contract_bytes) == TPCC_TABLE_CONTRACT_SHA256,
+        "TPC-C table columns/types/nullability/order differ from the accepted schema",
+    )
+
+    actual_result_sets = {
+        (item["transaction_type"], item["statement_id"]): (
+            item["table"],
+            item["classification"],
+            item["result_shape"],
+            item.get("omission_reason"),
+        )
+        for item in contract["result_sets"]
+    }
+    require(
+        actual_result_sets == TPCC_RESULT_SET_CONTRACT,
+        "TPC-C statement capture/omit matrix differs from BenchBase procedures",
+    )
+
+    tables = {table["name"]: table for table in contract["tables"]}
+    history = tables["benchbase.history"]
+    require(
+        history["columns"][0]
+        == {
+            "name": "h_id",
+            "sql_type": "BIGINT",
+            "nullable": False,
+            "canonical_type": "i64",
+            "generated": "auto_increment",
+        }
+        and history["key_columns"] == ["h_id"],
+        "TPC-C history evidence key contract is wrong",
+    )
+    require(
+        tables["benchbase.new_order"]["value_columns"] == [],
+        "TPC-C new_order canonical value must be empty",
+    )
+
+    expected_cardinalities = {
+        "benchbase.item": ("constant", 100000),
+        "benchbase.warehouse": ("scale_multiplier", 1),
+        "benchbase.stock": ("scale_multiplier", 100000),
+        "benchbase.district": ("scale_multiplier", 10),
+        "benchbase.customer": ("scale_multiplier", 30000),
+        "benchbase.history": ("scale_multiplier", 30000),
+        "benchbase.oorder": ("scale_multiplier", 30000),
+        "benchbase.new_order": ("scale_multiplier", 9000),
+        "benchbase.order_line": ("sum_column", ("benchbase.oorder", "o_ol_cnt")),
+    }
+    actual_cardinalities: dict[str, tuple[str, Any]] = {}
+    for item in contract["loader"]["cardinalities"]:
+        if item["kind"] == "constant":
+            value: Any = item["value"]
+        elif item["kind"] == "scale_multiplier":
+            value = item["multiplier"]
+        elif item["kind"] == "sum_column":
+            value = (item["source_table"], item["source_column"])
+        else:
+            value = item.get("configuration_name")
+        actual_cardinalities[item["table"]] = (item["kind"], value)
+    require(
+        actual_cardinalities == expected_cardinalities,
+        "TPC-C loader cardinality contract differs from the accepted counts",
+    )
+    relationship = contract["loader"]["relationships"]
+    require(len(relationship) == 1, "TPC-C loader must define one order-line relationship")
+    relationship = relationship[0]
+    require(
+        relationship["parent_table"] == "benchbase.oorder"
+        and relationship["child_table"] == "benchbase.order_line"
+        and relationship["parent_key_columns"] == ["o_w_id", "o_d_id", "o_id"]
+        and relationship["child_parent_columns"] == ["ol_w_id", "ol_d_id", "ol_o_id"]
+        and relationship["child_sequence_column"] == "ol_number"
+        and relationship["expected_count_column"] == "o_ol_cnt"
+        and relationship["first_sequence_value"] == 1
+        and relationship["sequence_step"] == 1
+        and relationship["minimum_count"] == 5
+        and relationship["maximum_count"] == 15,
+        "TPC-C order-line relationship contract is wrong",
+    )
+
+
+def load_adapter_contracts(
+    schemas: list[dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    schemas = schemas or load_schema_documents()
+    validator = schema_validator(schemas, "adapter-contract.schema.json")
+    contracts: dict[str, dict[str, Any]] = {}
+    for path in sorted(ADAPTER_ROOT.glob("*.json")):
+        contract = load_json(path)
+        verify_document_schema(validator, contract, path.name)
+        validate_adapter_contract(contract, path.name)
+        benchmark = contract["benchmark"]
+        require(benchmark not in contracts, f"duplicate adapter contract: {benchmark}")
+        require(path.stem == benchmark, f"adapter filename does not match benchmark: {path.name}")
+        contracts[benchmark] = contract
+    require("ycsb" in contracts and "tpcc" in contracts, "required adapter contract is missing")
+    verify_tpcc_contract(contracts["tpcc"])
+    return contracts
+
+
+def load_backend_contracts(
+    schemas: list[dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    schemas = schemas or load_schema_documents()
+    validator = schema_validator(schemas, "backend-contract.schema.json")
+    contracts: dict[str, dict[str, Any]] = {}
+    for path in sorted(BACKEND_ROOT.glob("*.json")):
+        contract = load_json(path)
+        verify_document_schema(validator, contract, path.name)
+        backend = contract["backend"]
+        require(backend not in contracts, f"duplicate backend contract: {backend}")
+        require(path.stem == backend, f"backend filename does not match name: {path.name}")
+        contracts[backend] = contract
+    require("mariadb" in contracts, "MariaDB backend contract is missing")
+
+    mariadb = contracts["mariadb"]
+    server = mariadb["server_defaults"]
+    session = mariadb["session_requirements"]
+    database = mariadb["database_defaults"]
+    tables = mariadb["application_table_requirements"]
+    require(
+        server
+        == {
+            "character_set": "utf8mb4",
+            "collation": "utf8mb4_bin",
+            "time_zone": "+00:00",
+            "sql_mode": MARIADB_SQL_MODE,
+            "transaction_isolation": "REPEATABLE_READ",
+            "snapshot_isolation": True,
+        },
+        "MariaDB server-default contract differs from the accepted settings",
+    )
+    require(
+        session
+        == {
+            "set_names": "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
+            "character_set_client": "utf8mb4",
+            "character_set_connection": "utf8mb4",
+            "character_set_results": "utf8mb4",
+            "collation_connection": "utf8mb4_bin",
+            "time_zone": "+00:00",
+            "sql_mode": MARIADB_SQL_MODE,
+            "transaction_isolation": "REPEATABLE_READ",
+            "snapshot_isolation": True,
+        },
+        "MariaDB session contract differs from the accepted settings",
+    )
+    require(
+        database == {"character_set": "utf8mb4", "collation": "utf8mb4_bin"},
+        "MariaDB database-default contract differs from the accepted settings",
+    )
+    require(
+        tables
+        == {
+            "engine": "InnoDB",
+            "character_set": "utf8mb4",
+            "collation": "utf8mb4_bin",
+            "char_read_semantics": "pad_to_declared_length",
+        },
+        "MariaDB application-table contract differs from the accepted settings",
+    )
+    return contracts
+
+
+def verify_tpcc_vector_inventory(
+    contracts: dict[str, dict[str, Any]], schemas: list[dict[str, Any]]
+) -> None:
+    path = GOLDEN_ROOT / "tpcc_row_vector_inventory.json"
+    inventory = load_json(path)
+    validator = schema_validator(schemas, "row-vector-inventory.schema.json")
+    verify_document_schema(validator, inventory, path.name)
+    require(inventory["benchmark"] == "tpcc", "TPC-C vector inventory benchmark mismatch")
+    contract = contracts[inventory["benchmark"]]
+    vectors = inventory["required_vectors"]
+    names = [vector["name"] for vector in vectors]
+    require(len(names) == len(set(names)), "TPC-C vector inventory has duplicate names")
+    roster = set(contract["application_tables"])
+    require(
+        all(vector["table"] in roster for vector in vectors),
+        "TPC-C vector inventory names an unknown table",
+    )
+    coverage_by_table: dict[str, set[str]] = defaultdict(set)
+    all_coverage: set[str] = set()
+    for vector in vectors:
+        coverage_by_table[vector["table"]].update(vector["covers"])
+        all_coverage.update(vector["covers"])
+    require(
+        all("representative_row" in coverage_by_table[table] for table in roster),
+        "TPC-C vector inventory lacks a representative for every table",
+    )
+    required_coverage = {
+        "i32_min_key",
+        "i32_max_key",
+        "i64_min_key",
+        "i64_max_key",
+        "composite_key",
+        "fixed_decimal",
+        "float32",
+        "timestamp_utc",
+        "char_padding",
+        "strict_utf8",
+        "sql_null",
+        "empty_value",
+        "generated_key",
+    }
+    require(
+        required_coverage <= all_coverage,
+        "TPC-C vector inventory lacks a required boundary category",
+    )
+    require(
+        "empty_value" in coverage_by_table["benchbase.new_order"],
+        "TPC-C vector inventory lacks the empty new_order value",
+    )
+    require(
+        {"i64_min_key", "i64_max_key", "generated_key"}
+        <= coverage_by_table["benchbase.history"],
+        "TPC-C vector inventory lacks history key boundaries",
+    )
+    require(
+        "sql_null" in coverage_by_table["benchbase.oorder"]
+        and "sql_null" in coverage_by_table["benchbase.order_line"],
+        "TPC-C vector inventory lacks nullable carrier/delivery cases",
+    )
+
+
+def load_schema_validator() -> tuple[Draft202012Validator, list[dict[str, Any]]]:
+    schemas = load_schema_documents()
 
     common_schema = next(
         schema for schema in schemas if schema["$id"].endswith("/common.schema.json")
@@ -275,23 +878,13 @@ def load_schema_validator() -> tuple[Draft202012Validator, list[dict[str, Any]]]
         "RunFailed schema codes differ from documented error codes",
     )
 
-    record_schema = next(schema for schema in schemas if schema["$id"].endswith("/records.schema.json"))
-    resolver = RefResolver.from_schema(
-        record_schema, store={schema["$id"]: schema for schema in schemas}
-    )
-    return Draft202012Validator(record_schema, resolver=resolver), schemas
+    return schema_validator(schemas, "records.schema.json"), schemas
 
 
 def verify_record_schema(
     validator: Draft202012Validator, record: dict[str, Any], label: str
 ) -> None:
-    errors = sorted(validator.iter_errors(record), key=lambda error: list(error.absolute_path))
-    if errors:
-        rendered = "; ".join(
-            f"{'/'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
-            for error in errors
-        )
-        raise VerificationError(f"schema validation failed for {label}: {rendered}")
+    verify_document_schema(validator, record, label)
 
 
 def verify_schemas_and_examples() -> dict[str, list[dict[str, Any]]]:
@@ -303,6 +896,50 @@ def verify_schemas_and_examples() -> dict[str, list[dict[str, Any]]]:
         verify_record_schema(validator, record, path.name)
         examples_by_kind[record["kind"]].append(record)
     return examples_by_kind
+
+
+def verify_adapter_record_examples(
+    contracts: dict[str, dict[str, Any]], schemas: list[dict[str, Any]]
+) -> int:
+    validator = schema_validator(schemas, "records.schema.json")
+    paths = sorted((EXAMPLE_ROOT / "adapters").glob("*.json"))
+    records = [load_json(path) for path in paths]
+    for path, record in zip(paths, records, strict=True):
+        verify_record_schema(validator, record, f"adapters/{path.name}")
+    manifests = [record for record in records if record["kind"] == "run_manifest"]
+    clients = [record for record in records if record["kind"] == "client_txn"]
+    require(len(manifests) == 1, "adapter record examples require one RunManifest")
+    manifest = manifests[0]
+    adapter = contracts.get(manifest["benchmark"])
+    require(adapter is not None, "adapter RunManifest names an unregistered benchmark")
+    require(
+        manifest["declared_isolation"] in adapter["declared_isolations"],
+        "adapter RunManifest isolation is unsupported",
+    )
+    require(
+        len(manifest["application_table_allowlist"])
+        == len(adapter["application_tables"])
+        and set(manifest["application_table_allowlist"])
+        == set(adapter["application_tables"]),
+        "adapter RunManifest table roster mismatch",
+    )
+    expected_sessions = set(manifest["expected_session_ids"])
+    for client in clients:
+        require(client["run_id"] == manifest["run_id"], "adapter ClientTxn run mismatch")
+        require(
+            client["session_id"] in expected_sessions,
+            "adapter ClientTxn session is not in manifest",
+        )
+        require(
+            client["txn_type"] in adapter["transaction_types"],
+            "adapter ClientTxn transaction type is not owned by adapter",
+        )
+        require(client["read_count"] == len(client["reads"]), "adapter ClientTxn read count")
+        require(
+            sha256_hex(read_digest_preimage(client["reads"])) == client["read_digest"],
+            "adapter ClientTxn read digest",
+        )
+    return len(records)
 
 
 def verify_golden_vectors() -> None:
@@ -437,10 +1074,27 @@ def verify_final_verdict(status: dict[str, Any], expected_sessions: int) -> None
     )
 
 
-def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> None:
+def verify_cross_record_semantics(
+    records: dict[str, list[dict[str, Any]]],
+    contracts: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    contracts = contracts or load_adapter_contracts()
     manifests = records["run_manifest"]
     require(len(manifests) == 1, "examples require exactly one RunManifest")
     manifest = manifests[0]
+    require(manifest["benchmark"] in contracts, "RunManifest names unknown adapter")
+    adapter = contracts[manifest["benchmark"]]
+    require(
+        manifest["declared_isolation"] in adapter["declared_isolations"],
+        "RunManifest isolation is unsupported by adapter",
+    )
+    require(
+        len(manifest["application_table_allowlist"])
+        == len(adapter["application_tables"])
+        and set(manifest["application_table_allowlist"])
+        == set(adapter["application_tables"]),
+        "RunManifest table roster differs from adapter contract",
+    )
     run_id = manifest["run_id"]
     application_tables = set(manifest["application_table_allowlist"])
     control_tables = set(manifest["control_table_allowlist"])
@@ -461,6 +1115,10 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
     expected_sessions = set(manifest["expected_session_ids"])
 
     for client in clients:
+        require(
+            client["txn_type"] in adapter["transaction_types"],
+            "ClientTxn transaction type is not owned by selected adapter",
+        )
         require(client["session_id"] in expected_sessions, "ClientTxn has unknown session")
         require(client["read_count"] == len(client["reads"]), "ClientTxn read_count mismatch")
         preimage = read_digest_preimage(client["reads"])
@@ -598,16 +1256,23 @@ def verify_cross_record_semantics(records: dict[str, list[dict[str, Any]]]) -> N
 
 def main() -> int:
     try:
+        _, schemas = load_schema_validator()
+        contracts = load_adapter_contracts(schemas)
+        backends = load_backend_contracts(schemas)
+        verify_tpcc_vector_inventory(contracts, schemas)
         records = verify_schemas_and_examples()
+        adapter_example_count = verify_adapter_record_examples(contracts, schemas)
         verify_golden_vectors()
-        verify_cross_record_semantics(records)
+        verify_cross_record_semantics(records, contracts)
     except VerificationError as error:
         print(f"protocol verification failed: {error}", file=sys.stderr)
         return 1
     print(
         "protocol verification passed: "
-        f"{sum(len(records) for records in records.values())} examples, "
-        f"{len(list(SCHEMA_ROOT.glob('*.schema.json')))} schemas"
+        f"{sum(len(records) for records in records.values()) + adapter_example_count} examples, "
+        f"{len(list(SCHEMA_ROOT.glob('*.schema.json')))} schemas, "
+        f"{len(contracts)} adapter contracts, "
+        f"{len(backends)} backend contracts"
     )
     return 0
 

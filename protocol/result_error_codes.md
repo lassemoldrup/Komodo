@@ -38,8 +38,9 @@ FINAL
 |---|---|
 | `CONFIG_INVALID` | Required configuration is missing or contradictory. |
 | `BRANCH_CONTRACT_MISMATCH` | Client/monitor artifacts do not implement the same branch contract. |
-| `ISOLATION_MISMATCH` | A JDBC connection's observed isolation differs from the manifest. |
-| `UNSUPPORTED_TRANSACTION` | The configured procedure shape is outside V0. |
+| `ISOLATION_MISMATCH` | Configured, declared, or observed transaction/snapshot isolation differs from the contract. |
+| `SESSION_CONTRACT_MISMATCH` | Character set, collation, time zone, SQL mode, or CHAR-padding behavior differs from the backend session contract. |
+| `UNSUPPORTED_TRANSACTION` | The transaction name is not owned by the selected adapter, or its required adapter capability is unavailable. |
 | `UNSUPPORTED_READ_SOURCE` | A read cannot be classified safely as snapshot or local. |
 | `UNEXPECTED_TABLE` | CDC contains a table outside the application/control allowlists. |
 | `DDL_OBSERVED` | DDL occurred after run start. |

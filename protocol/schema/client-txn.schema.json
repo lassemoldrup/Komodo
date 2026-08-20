@@ -24,16 +24,7 @@
     "session_seq": { "$ref": "common.schema.json#/$defs/positiveUint64" },
     "logical_txn_id": { "$ref": "common.schema.json#/$defs/uuid" },
     "attempt_id": { "$ref": "common.schema.json#/$defs/uuid" },
-    "txn_type": {
-      "type": "string",
-      "enum": [
-        "ycsb_insert",
-        "ycsb_read",
-        "ycsb_update",
-        "ycsb_delete",
-        "si_fractured_read_probe"
-      ]
-    },
+    "txn_type": { "$ref": "common.schema.json#/$defs/adapterName" },
     "correlation_kind": { "const": "session_txn" },
     "correlation_id": { "$ref": "common.schema.json#/$defs/correlationId" },
     "read_count": { "$ref": "common.schema.json#/$defs/uint32" },

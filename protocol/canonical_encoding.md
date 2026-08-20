@@ -11,6 +11,7 @@ U8(n)       one byte
 U32_BE(n)   four-byte unsigned big-endian integer
 U64_BE(n)   eight-byte unsigned big-endian integer
 I32_BE(n)   four-byte signed two's-complement big-endian integer
+I64_BE(n)   eight-byte signed two's-complement big-endian integer
 LP(bytes)   U32_BE(byte_length) || bytes
 ```
 
@@ -29,12 +30,24 @@ LP(bytes)   U32_BE(byte_length) || bytes
   codec constants, not transmitted protocol-version fields.
 - JSON counters are limited to `0..9007199254740991` for exact interoperability.
 
+## Canonical row prefix
+
+Every adapter row key begins with:
+
+```text
+RowPrefix = LP(UTF8(canonical_schema_name))
+         || LP(UTF8(canonical_table_name))
+```
+
+The selected adapter appends its declared primary-key components in primary-key
+order. A present row value contains every non-key column in the table's declared
+schema order and never repeats a key column.
+
 ## Canonical YCSB key
 
 ```text
 YcsbKey =
-    LP(UTF8(canonical_schema_name))
- || LP(UTF8(canonical_table_name))
+    RowPrefix
  || I32_BE(ycsb_key)
 ```
 
@@ -106,6 +119,33 @@ hex    = 00000000000000000000
 base64 = AAAAAAAAAAAAAA==
 sha256 = 01d448afd928065458cf670b60f5a594d735af0172c8d67f22a81680132681ca
 ```
+
+## TPC-C row contract
+
+`protocol/adapters/tpcc.json` freezes the exact nine-table schema, primary-key
+order, and non-key value order shared by JDBC capture, CDC normalization, and
+bootstrap scanning.
+
+```text
+TpccKey = RowPrefix || Encode(key_column_1) || ... || Encode(key_column_n)
+
+ordinary key column = I32_BE(value)
+history h_id        = I64_BE(value)
+
+TpccValue = Encode(value_column_1) || ... || Encode(value_column_n)
+```
+
+`new_order` has no non-key columns, so its present canonical value is exactly
+zero bytes. That present empty value remains distinct from an absent read or a
+delete, which carries no value payload.
+
+The adapter contract records each column's MariaDB type, nullability, and
+canonical type category. The exact fixed-decimal, database `FLOAT`, timestamp,
+`CHAR`, variable-text, and nullable-field byte encodings are not active yet.
+They must be added here together with byte vectors and real
+MariaDB/JDBC/Debezium fixtures before TPC-C runtime capability is enabled.
+`protocol/golden/tpcc_row_vector_inventory.json` is the machine-checked list of
+cases those typed vectors must cover.
 
 ## Read digest
 

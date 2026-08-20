@@ -1,0 +1,18 @@
+{
+  "kind": "client_txn",
+  "run_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+  "session_id": "tpcc/worker/1",
+  "session_seq": 1,
+  "logical_txn_id": "11111111-aaaa-4aaa-8aaa-111111111111",
+  "attempt_id": "22222222-bbbb-4bbb-8bbb-222222222222",
+  "txn_type": "Delivery",
+  "correlation_kind": "session_txn",
+  "correlation_id": {
+    "run_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "session_id": "tpcc/worker/1",
+    "txn_id": 1
+  },
+  "read_count": 0,
+  "read_digest": "3f251669e36904bc1a3bc472991c9ff89f7f23f6b98bad9dd33f0e66884a06ce",
+  "reads": []
+}

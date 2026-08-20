@@ -5,15 +5,12 @@ C++ black-box monitor.
 
 The contract is branch-local:
 
-- record/type names do not carry `V0`, `V1`, or similar suffixes;
+- record/type names do not carry release or internal-step suffixes;
 - Redis records do not carry an application protocol-version field;
 - BenchBase, the monitor, schemas, and golden vectors must come from compatible
   branches;
 - an incompatible protocol change is developed on a different branch and
   updates all artifacts together.
-
-The design label “V0” may still be used in documentation to describe the first
-prototype's feature scope.
 
 ## Contract artifacts
 
@@ -22,9 +19,11 @@ prototype's feature scope.
 | `decisions.md` | Frozen design choices and their rationale. |
 | `canonical_encoding.md` | Exact key, value, and digest byte encodings. |
 | `result_error_codes.md` | Live/final outcomes and stable error identifiers. |
+| `adapters/` | Machine-checkable benchmark names, transaction membership, table contracts, result classification, loader rules, and runtime capabilities. |
+| `backends/` | Machine-checkable database, connection/session, isolation, and application-table requirements. |
 | `schema/` | JSON Schemas for Redis records. |
 | `examples/` | Valid example records used by schema checks. |
-| `golden/` | Language-neutral codec and digest test vectors. |
+| `golden/` | Language-neutral codec/digest vectors and required typed-row vector inventories. |
 | `tools/verify_protocol.py` | Schema, cross-record, and golden-vector verifier. |
 
 ## Redis streams
@@ -64,5 +63,8 @@ docker exec db-monitoring-dev bash -lc '
 '
 ```
 
-Milestone 0 is complete only when the schemas, examples, golden vectors, and
-this verifier agree, and Java/C++ codec tests consume the same vectors.
+The protocol freeze is complete only when the schemas, examples, golden vectors,
+and this verifier agree, and Java/C++/bootstrap tests consume the same shared
+adapter contracts and vectors. A false adapter runtime-capability flag means the
+contract is available for tests but the corresponding live path must fail
+closed.

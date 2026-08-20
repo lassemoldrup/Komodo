@@ -1,0 +1,487 @@
+{
+  "benchmark": "tpcc",
+  "canonical_schema": "benchbase",
+  "runtime_capabilities": {
+    "client_trace": false,
+    "cdc_normalization": false,
+    "bootstrap_scan": false
+  },
+  "declared_isolations": ["REPEATABLE_READ"],
+  "transaction_types": ["NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel"],
+  "application_tables": [
+    "benchbase.warehouse",
+    "benchbase.item",
+    "benchbase.stock",
+    "benchbase.district",
+    "benchbase.customer",
+    "benchbase.history",
+    "benchbase.oorder",
+    "benchbase.new_order",
+    "benchbase.order_line"
+  ],
+  "projection_policy": {
+    "ordinary_rows": "whole_row_points",
+    "predicate_semantics": "omitted",
+    "aggregate_scalars": "omitted_without_event",
+    "implicit_dml_reads": "omitted_without_event",
+    "locking_reads": "omitted_without_event"
+  },
+  "tables": [
+    {
+      "name": "benchbase.warehouse",
+      "key_columns": ["w_id"],
+      "value_columns": [
+        "w_ytd",
+        "w_tax",
+        "w_name",
+        "w_street_1",
+        "w_street_2",
+        "w_city",
+        "w_state",
+        "w_zip"
+      ],
+      "columns": [
+        { "name": "w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "w_ytd", "sql_type": "DECIMAL(12,2)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "w_tax", "sql_type": "DECIMAL(4,4)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "w_name", "sql_type": "VARCHAR(10)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "w_street_1", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "w_street_2", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "w_city", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "w_state", "sql_type": "CHAR(2)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "w_zip", "sql_type": "CHAR(9)", "nullable": false, "canonical_type": "utf8_char" }
+      ]
+    },
+    {
+      "name": "benchbase.item",
+      "key_columns": ["i_id"],
+      "value_columns": ["i_name", "i_price", "i_data", "i_im_id"],
+      "columns": [
+        { "name": "i_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "i_name", "sql_type": "VARCHAR(24)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "i_price", "sql_type": "DECIMAL(5,2)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "i_data", "sql_type": "VARCHAR(50)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "i_im_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" }
+      ]
+    },
+    {
+      "name": "benchbase.stock",
+      "key_columns": ["s_w_id", "s_i_id"],
+      "value_columns": [
+        "s_quantity",
+        "s_ytd",
+        "s_order_cnt",
+        "s_remote_cnt",
+        "s_data",
+        "s_dist_01",
+        "s_dist_02",
+        "s_dist_03",
+        "s_dist_04",
+        "s_dist_05",
+        "s_dist_06",
+        "s_dist_07",
+        "s_dist_08",
+        "s_dist_09",
+        "s_dist_10"
+      ],
+      "columns": [
+        { "name": "s_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "s_i_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "s_quantity", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "s_ytd", "sql_type": "DECIMAL(8,2)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "s_order_cnt", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "s_remote_cnt", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "s_data", "sql_type": "VARCHAR(50)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "s_dist_01", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_02", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_03", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_04", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_05", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_06", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_07", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_08", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_09", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "s_dist_10", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" }
+      ]
+    },
+    {
+      "name": "benchbase.district",
+      "key_columns": ["d_w_id", "d_id"],
+      "value_columns": [
+        "d_ytd",
+        "d_tax",
+        "d_next_o_id",
+        "d_name",
+        "d_street_1",
+        "d_street_2",
+        "d_city",
+        "d_state",
+        "d_zip"
+      ],
+      "columns": [
+        { "name": "d_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "d_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "d_ytd", "sql_type": "DECIMAL(12,2)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "d_tax", "sql_type": "DECIMAL(4,4)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "d_next_o_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "d_name", "sql_type": "VARCHAR(10)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "d_street_1", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "d_street_2", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "d_city", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "d_state", "sql_type": "CHAR(2)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "d_zip", "sql_type": "CHAR(9)", "nullable": false, "canonical_type": "utf8_char" }
+      ]
+    },
+    {
+      "name": "benchbase.customer",
+      "key_columns": ["c_w_id", "c_d_id", "c_id"],
+      "value_columns": [
+        "c_discount",
+        "c_credit",
+        "c_last",
+        "c_first",
+        "c_credit_lim",
+        "c_balance",
+        "c_ytd_payment",
+        "c_payment_cnt",
+        "c_delivery_cnt",
+        "c_street_1",
+        "c_street_2",
+        "c_city",
+        "c_state",
+        "c_zip",
+        "c_phone",
+        "c_since",
+        "c_middle",
+        "c_data"
+      ],
+      "columns": [
+        { "name": "c_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "c_d_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "c_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "c_discount", "sql_type": "DECIMAL(4,4)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "c_credit", "sql_type": "CHAR(2)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "c_last", "sql_type": "VARCHAR(16)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "c_first", "sql_type": "VARCHAR(16)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "c_credit_lim", "sql_type": "DECIMAL(12,2)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "c_balance", "sql_type": "DECIMAL(12,2)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "c_ytd_payment", "sql_type": "FLOAT", "nullable": false, "canonical_type": "float32" },
+        { "name": "c_payment_cnt", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "c_delivery_cnt", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "c_street_1", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "c_street_2", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "c_city", "sql_type": "VARCHAR(20)", "nullable": false, "canonical_type": "utf8_varchar" },
+        { "name": "c_state", "sql_type": "CHAR(2)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "c_zip", "sql_type": "CHAR(9)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "c_phone", "sql_type": "CHAR(16)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "c_since", "sql_type": "TIMESTAMP", "nullable": false, "canonical_type": "timestamp_utc" },
+        { "name": "c_middle", "sql_type": "CHAR(2)", "nullable": false, "canonical_type": "utf8_char" },
+        { "name": "c_data", "sql_type": "VARCHAR(500)", "nullable": false, "canonical_type": "utf8_varchar" }
+      ]
+    },
+    {
+      "name": "benchbase.history",
+      "key_columns": ["h_id"],
+      "value_columns": [
+        "h_c_id",
+        "h_c_d_id",
+        "h_c_w_id",
+        "h_d_id",
+        "h_w_id",
+        "h_date",
+        "h_amount",
+        "h_data"
+      ],
+      "columns": [
+        { "name": "h_id", "sql_type": "BIGINT", "nullable": false, "canonical_type": "i64", "generated": "auto_increment" },
+        { "name": "h_c_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "h_c_d_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "h_c_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "h_d_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "h_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "h_date", "sql_type": "TIMESTAMP", "nullable": false, "canonical_type": "timestamp_utc" },
+        { "name": "h_amount", "sql_type": "DECIMAL(6,2)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "h_data", "sql_type": "VARCHAR(24)", "nullable": false, "canonical_type": "utf8_varchar" }
+      ]
+    },
+    {
+      "name": "benchbase.oorder",
+      "key_columns": ["o_w_id", "o_d_id", "o_id"],
+      "value_columns": ["o_c_id", "o_carrier_id", "o_ol_cnt", "o_all_local", "o_entry_d"],
+      "columns": [
+        { "name": "o_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "o_d_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "o_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "o_c_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "o_carrier_id", "sql_type": "INT", "nullable": true, "canonical_type": "i32" },
+        { "name": "o_ol_cnt", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "o_all_local", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "o_entry_d", "sql_type": "TIMESTAMP", "nullable": false, "canonical_type": "timestamp_utc" }
+      ]
+    },
+    {
+      "name": "benchbase.new_order",
+      "key_columns": ["no_w_id", "no_d_id", "no_o_id"],
+      "value_columns": [],
+      "columns": [
+        { "name": "no_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "no_d_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "no_o_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" }
+      ]
+    },
+    {
+      "name": "benchbase.order_line",
+      "key_columns": ["ol_w_id", "ol_d_id", "ol_o_id", "ol_number"],
+      "value_columns": [
+        "ol_i_id",
+        "ol_delivery_d",
+        "ol_amount",
+        "ol_supply_w_id",
+        "ol_quantity",
+        "ol_dist_info"
+      ],
+      "columns": [
+        { "name": "ol_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "ol_d_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "ol_o_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "ol_number", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "ol_i_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "ol_delivery_d", "sql_type": "TIMESTAMP", "nullable": true, "canonical_type": "timestamp_utc" },
+        { "name": "ol_amount", "sql_type": "DECIMAL(6,2)", "nullable": false, "canonical_type": "fixed_decimal" },
+        { "name": "ol_supply_w_id", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "ol_quantity", "sql_type": "INT", "nullable": false, "canonical_type": "i32" },
+        { "name": "ol_dist_info", "sql_type": "CHAR(24)", "nullable": false, "canonical_type": "utf8_char" }
+      ]
+    }
+  ],
+  "result_sets": [
+    {
+      "transaction_type": "NewOrder",
+      "procedure": "NewOrder",
+      "statement_id": "stmtGetCustSQL",
+      "table": "benchbase.customer",
+      "classification": "snapshot",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "NewOrder",
+      "procedure": "NewOrder",
+      "statement_id": "stmtGetWhseSQL",
+      "table": "benchbase.warehouse",
+      "classification": "snapshot",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "NewOrder",
+      "procedure": "NewOrder",
+      "statement_id": "stmtGetDistSQL",
+      "table": "benchbase.district",
+      "classification": "omit",
+      "result_shape": "exact_key_row",
+      "empty_result": "no_event",
+      "semantics_ignored": ["predicate", "locking"],
+      "omission_reason": "locking_current_read"
+    },
+    {
+      "transaction_type": "NewOrder",
+      "procedure": "NewOrder",
+      "statement_id": "stmtGetItemSQL",
+      "table": "benchbase.item",
+      "classification": "snapshot",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "NewOrder",
+      "procedure": "NewOrder",
+      "statement_id": "stmtGetStockSQL",
+      "table": "benchbase.stock",
+      "classification": "omit",
+      "result_shape": "exact_key_row",
+      "empty_result": "no_event",
+      "semantics_ignored": ["predicate", "locking"],
+      "omission_reason": "locking_current_read"
+    },
+    {
+      "transaction_type": "Payment",
+      "procedure": "Payment",
+      "statement_id": "payGetWhseSQL",
+      "table": "benchbase.warehouse",
+      "classification": "local",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "Payment",
+      "procedure": "Payment",
+      "statement_id": "payGetDistSQL",
+      "table": "benchbase.district",
+      "classification": "local",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "Payment",
+      "procedure": "Payment",
+      "statement_id": "payGetCustSQL",
+      "table": "benchbase.customer",
+      "classification": "snapshot",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "Payment",
+      "procedure": "Payment",
+      "statement_id": "payGetCustCdataSQL",
+      "table": "benchbase.customer",
+      "classification": "snapshot",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "Payment",
+      "procedure": "Payment",
+      "statement_id": "customerByNameSQL",
+      "table": "benchbase.customer",
+      "classification": "snapshot",
+      "result_shape": "returned_rows",
+      "empty_result": "no_event",
+      "semantics_ignored": ["predicate", "ordering"]
+    },
+    {
+      "transaction_type": "OrderStatus",
+      "procedure": "OrderStatus",
+      "statement_id": "ordStatGetNewestOrdSQL",
+      "table": "benchbase.oorder",
+      "classification": "snapshot",
+      "result_shape": "returned_rows",
+      "empty_result": "no_event",
+      "semantics_ignored": ["predicate", "ordering", "limit"]
+    },
+    {
+      "transaction_type": "OrderStatus",
+      "procedure": "OrderStatus",
+      "statement_id": "ordStatGetOrderLinesSQL",
+      "table": "benchbase.order_line",
+      "classification": "snapshot",
+      "result_shape": "returned_rows",
+      "empty_result": "no_event",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "OrderStatus",
+      "procedure": "OrderStatus",
+      "statement_id": "payGetCustSQL",
+      "table": "benchbase.customer",
+      "classification": "snapshot",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "OrderStatus",
+      "procedure": "OrderStatus",
+      "statement_id": "customerByNameSQL",
+      "table": "benchbase.customer",
+      "classification": "snapshot",
+      "result_shape": "returned_rows",
+      "empty_result": "no_event",
+      "semantics_ignored": ["predicate", "ordering"]
+    },
+    {
+      "transaction_type": "Delivery",
+      "procedure": "Delivery",
+      "statement_id": "delivGetOrderIdSQL",
+      "table": "benchbase.new_order",
+      "classification": "snapshot",
+      "result_shape": "returned_rows",
+      "empty_result": "no_event",
+      "semantics_ignored": ["predicate", "ordering", "limit"]
+    },
+    {
+      "transaction_type": "Delivery",
+      "procedure": "Delivery",
+      "statement_id": "delivGetCustIdSQL",
+      "table": "benchbase.oorder",
+      "classification": "snapshot",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "Delivery",
+      "procedure": "Delivery",
+      "statement_id": "delivSumOrderAmountSQL",
+      "table": "benchbase.order_line",
+      "classification": "omit",
+      "result_shape": "aggregate_scalar",
+      "empty_result": "not_applicable",
+      "semantics_ignored": ["predicate", "aggregate"],
+      "omission_reason": "aggregate_scalar"
+    },
+    {
+      "transaction_type": "StockLevel",
+      "procedure": "StockLevel",
+      "statement_id": "stockGetDistOrderIdSQL",
+      "table": "benchbase.district",
+      "classification": "snapshot",
+      "result_shape": "exact_key_row",
+      "empty_result": "absent",
+      "semantics_ignored": ["predicate"]
+    },
+    {
+      "transaction_type": "StockLevel",
+      "procedure": "StockLevel",
+      "statement_id": "stockGetCountStockSQL",
+      "table": "benchbase.stock",
+      "classification": "omit",
+      "result_shape": "aggregate_scalar",
+      "empty_result": "not_applicable",
+      "semantics_ignored": ["predicate", "join", "aggregate"],
+      "omission_reason": "aggregate_scalar"
+    }
+  ],
+  "loader": {
+    "scale_parameter": { "name": "warehouses", "minimum": 1 },
+    "cardinalities": [
+      { "table": "benchbase.item", "kind": "constant", "value": 100000 },
+      { "table": "benchbase.warehouse", "kind": "scale_multiplier", "multiplier": 1 },
+      { "table": "benchbase.stock", "kind": "scale_multiplier", "multiplier": 100000 },
+      { "table": "benchbase.district", "kind": "scale_multiplier", "multiplier": 10 },
+      { "table": "benchbase.customer", "kind": "scale_multiplier", "multiplier": 30000 },
+      { "table": "benchbase.history", "kind": "scale_multiplier", "multiplier": 30000 },
+      { "table": "benchbase.oorder", "kind": "scale_multiplier", "multiplier": 30000 },
+      { "table": "benchbase.new_order", "kind": "scale_multiplier", "multiplier": 9000 },
+      {
+        "table": "benchbase.order_line",
+        "kind": "sum_column",
+        "source_table": "benchbase.oorder",
+        "source_column": "o_ol_cnt"
+      }
+    ],
+    "relationships": [
+      {
+        "kind": "contiguous_child_sequence",
+        "parent_table": "benchbase.oorder",
+        "child_table": "benchbase.order_line",
+        "parent_key_columns": ["o_w_id", "o_d_id", "o_id"],
+        "child_parent_columns": ["ol_w_id", "ol_d_id", "ol_o_id"],
+        "child_sequence_column": "ol_number",
+        "expected_count_column": "o_ol_cnt",
+        "first_sequence_value": 1,
+        "sequence_step": 1,
+        "minimum_count": 5,
+        "maximum_count": 15
+      }
+    ]
+  }
+}

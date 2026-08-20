@@ -37,6 +37,14 @@
       "maxLength": 256,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
     },
+    "adapterName": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"
+    },
+    "canonicalIdentifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
     "tableName": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]{0,63}\\.[a-z][a-z0-9_]{0,63}$"
@@ -70,6 +78,7 @@
         "CONFIG_INVALID",
         "BRANCH_CONTRACT_MISMATCH",
         "ISOLATION_MISMATCH",
+        "SESSION_CONTRACT_MISMATCH",
         "UNSUPPORTED_TRANSACTION",
         "UNSUPPORTED_READ_SOURCE",
         "UNEXPECTED_TABLE",
