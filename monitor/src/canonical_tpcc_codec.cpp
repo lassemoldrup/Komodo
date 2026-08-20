@@ -649,6 +649,27 @@ public:
     return table_;
   }
 
+  [[nodiscard]] CanonicalBytes encodeKeyObject(const Json &key) const override {
+    const auto separator = table_.find('.');
+    if (separator == std::string_view::npos) {
+      fail("row_shape", "registered TPC-C table is not qualified");
+    }
+    return CanonicalTpccCodec::encodeKey(table_.substr(0U, separator),
+                                         table_.substr(separator + 1U), key);
+  }
+
+  [[nodiscard]] CanonicalRowImage
+  encodeImage(const Json &image) const override {
+    const auto separator = table_.find('.');
+    if (separator == std::string_view::npos) {
+      fail("row_shape", "registered TPC-C table is not qualified");
+    }
+    auto encoded = CanonicalTpccCodec::encodeRow(
+        table_.substr(0U, separator), table_.substr(separator + 1U), image);
+    return CanonicalRowImage{.key = std::move(encoded.key),
+                             .value = std::move(encoded.value)};
+  }
+
   void validateKey(const std::span<const std::byte> key) const override {
     validateCanonicalKey(table_, key);
   }

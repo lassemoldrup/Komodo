@@ -128,6 +128,14 @@ void checkExecutableGoldens() {
                        qualified, vector.at("row")) == encoded.value);
     const auto *codec = CanonicalTpccCodec::tableCodec(qualified);
     BLACKBOX_REQUIRE(codec != nullptr);
+    const auto *registered =
+        BenchmarkAdapterRegistry::require("tpcc").rowCodec(qualified);
+    BLACKBOX_REQUIRE(registered == codec);
+    BLACKBOX_CHECK(registered->encodeKeyObject(
+                       keyObject(qualified, vector.at("row"))) == encoded.key);
+    const auto expected_image =
+        blackbox::CanonicalRowImage{.key = encoded.key, .value = encoded.value};
+    BLACKBOX_CHECK(registered->encodeImage(vector.at("row")) == expected_image);
     codec->validateKey(encoded.key);
     codec->validatePresentValue(encoded.value);
     rows.emplace(name, vector.at("row"));

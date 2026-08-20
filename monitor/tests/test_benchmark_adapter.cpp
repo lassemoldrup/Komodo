@@ -275,28 +275,43 @@ void checkRegistryValidationAndCapabilities() {
   for (const auto &table : tpcc.tables()) {
     roster.emplace_back(table.name);
   }
-  tpcc.validateRunConfiguration("REPEATABLE_READ", roster, false);
+  tpcc.validateRunConfiguration("REPEATABLE_READ", roster, {});
   std::reverse(roster.begin(), roster.end());
-  tpcc.validateRunConfiguration("REPEATABLE_READ", roster, false);
+  tpcc.validateRunConfiguration("REPEATABLE_READ", roster, {});
   expectError(
-      [&] { tpcc.validateRunConfiguration("READ_COMMITTED", roster, false); },
+      [&] { tpcc.validateRunConfiguration("READ_COMMITTED", roster, {}); },
       MonitorErrorCode::IsolationMismatch);
   auto wrong_roster = roster;
   wrong_roster.pop_back();
   expectError(
       [&] {
-        tpcc.validateRunConfiguration("REPEATABLE_READ", wrong_roster, false);
+        tpcc.validateRunConfiguration("REPEATABLE_READ", wrong_roster, {});
       },
       MonitorErrorCode::UnexpectedTable);
+  tpcc.validateRunConfiguration(
+      "REPEATABLE_READ", roster,
+      blackbox::AdapterRuntimeCapabilities{.client_trace = false,
+                                           .cdc_normalization = true,
+                                           .bootstrap_scan = true});
   expectError(
-      [&] { tpcc.validateRunConfiguration("REPEATABLE_READ", roster, true); },
+      [&] {
+        tpcc.validateRunConfiguration(
+            "REPEATABLE_READ", roster,
+            blackbox::AdapterRuntimeCapabilities{.client_trace = true,
+                                                 .cdc_normalization = true,
+                                                 .bootstrap_scan = true});
+      },
       MonitorErrorCode::BranchContractMismatch);
 
   const auto &ycsb = BenchmarkAdapterRegistry::require("ycsb");
   BLACKBOX_CHECK(ycsb.runtimeCapabilities().complete());
   std::vector<std::string> ycsb_roster{"benchbase.usertable"};
-  ycsb.validateRunConfiguration("REPEATABLE_READ", ycsb_roster, true);
-  ycsb.validateRunConfiguration("READ_COMMITTED", ycsb_roster, true);
+  const auto all_capabilities = blackbox::AdapterRuntimeCapabilities{
+      .client_trace = true, .cdc_normalization = true, .bootstrap_scan = true};
+  ycsb.validateRunConfiguration("REPEATABLE_READ", ycsb_roster,
+                                all_capabilities);
+  ycsb.validateRunConfiguration("READ_COMMITTED", ycsb_roster,
+                                all_capabilities);
 }
 
 void checkStartupSchemaContracts() {

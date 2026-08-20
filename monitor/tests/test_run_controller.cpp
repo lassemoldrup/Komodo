@@ -1,14 +1,18 @@
 #include "blackbox/run_controller.h"
 
+#include "blackbox/canonical_tpcc_codec.h"
 #include "blackbox/canonical_ycsb_codec.h"
 #include "blackbox/client_txn.h"
+#include "blackbox/debezium_assembler.h"
 #include "test_support.h"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <optional>
 #include <sstream>
@@ -29,6 +33,7 @@ using blackbox::ClientValueState;
 using blackbox::FinalOutcome;
 using blackbox::MonitorError;
 using blackbox::MonitorErrorCode;
+using blackbox::NormalizedValueState;
 using blackbox::NormalizedWrite;
 using blackbox::ProcessingMode;
 using blackbox::RunController;
@@ -37,6 +42,10 @@ using blackbox::RunManifest;
 using blackbox::RunScopedCorrelationId;
 using blackbox::SessionMarkerEntry;
 using Json = nlohmann::json;
+
+#ifndef BLACKBOX_PROTOCOL_FIXTURE_DIR
+#error "BLACKBOX_PROTOCOL_FIXTURE_DIR must name the shared protocol fixtures"
+#endif
 
 constexpr std::string_view run_id = "00112233-4455-6677-8899-aabbccddeeff";
 constexpr std::string_view session_id = "ycsb/worker/1";
@@ -69,8 +78,9 @@ constexpr std::string_view session_id = "ycsb/worker/1";
   };
 }
 
-[[nodiscard]] CdcTransaction workload(const std::uint64_t cdc_seq,
-                                      const std::uint64_t txn_id) {
+[[nodiscard]] CdcTransaction
+workload(const std::uint64_t cdc_seq, const std::uint64_t txn_id,
+         std::vector<NormalizedWrite> writes = {}) {
   return CdcTransaction{
       .cdc_seq = cdc_seq,
       .kind = CdcTransactionKind::WorkloadMarked,
@@ -81,7 +91,7 @@ constexpr std::string_view session_id = "ycsb/worker/1";
               .session_id = std::string(session_id),
               .txn_id = txn_id,
           },
-      .writes = {},
+      .writes = std::move(writes),
       .begin_stream_id = std::to_string(cdc_seq + 1U) + "-0",
       .end_stream_id = std::to_string(cdc_seq + 1U) + "-2",
   };
@@ -203,6 +213,144 @@ clientPayload(const std::uint64_t sequence,
       .dump();
 }
 
+[[nodiscard]] RunManifest tpccManifest() {
+  auto result = manifest();
+  result.benchmark = "tpcc";
+  result.application_table_allowlist.clear();
+  for (const auto &table :
+       blackbox::BenchmarkAdapterRegistry::require("tpcc").tables()) {
+    result.application_table_allowlist.emplace_back(table.name);
+  }
+  return result;
+}
+
+[[nodiscard]] std::string tpccBootstrapPayload() {
+  Json counts = Json::array();
+  for (const auto &table :
+       blackbox::BenchmarkAdapterRegistry::require("tpcc").tables()) {
+    counts.push_back(Json{{"table", table.name}, {"row_count", 0}});
+  }
+  std::sort(counts.begin(), counts.end(),
+            [](const Json &left, const Json &right) {
+              return left.at("table").get<std::string>() <
+                     right.at("table").get<std::string>();
+            });
+  return Json{
+      {"kind", "bootstrap_manifest"},
+      {"run_id", run_id},
+      {"table_row_counts", std::move(counts)},
+      {"canonical_state_digest",
+       "944dd6136dbad7047e31af3b6419eb6a632d4dea64bec8159e93307163810bc2"},
+  }
+      .dump();
+}
+
+[[nodiscard]] Json loadTpccTransactionFixture() {
+  std::ifstream input(std::string(BLACKBOX_PROTOCOL_FIXTURE_DIR) +
+                      "/mariadb_tpcc_transactions.json");
+  if (!input) {
+    throw std::runtime_error(
+        "failed to open captured TPC-C transaction fixture");
+  }
+  return Json::parse(input);
+}
+
+[[nodiscard]] RunManifest tpccFixtureManifest(const Json &fixture) {
+  auto result = tpccManifest();
+  result.run_id = fixture.at("run_id").get<std::string>();
+  result.expected_session_ids = {"tpcc/worker/1"};
+  return result;
+}
+
+[[nodiscard]] std::vector<CdcTransaction>
+assembleTpccFixture(const Json &fixture) {
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  std::vector<std::string> tables;
+  for (const auto &table : adapter.tables()) {
+    tables.emplace_back(table.name);
+  }
+  blackbox::DebeziumTxnAssembler assembler(blackbox::DebeziumAssemblerConfig{
+      .run_id = fixture.at("run_id").get<std::string>(),
+      .backend_source_id = "mariadb-main",
+      .debezium_version = fixture.at("debezium_version").get<std::string>(),
+      .backend_adapter = &blackbox::BackendAdapterRegistry::require("mariadb"),
+      .benchmark_adapter = &adapter,
+      .application_tables = std::move(tables),
+      .transaction_marker_table = "benchbase.session_txn",
+      .run_fence_table = "benchbase.checker_run_fence",
+  });
+  Json entries = fixture.at("startup_schema");
+  for (const auto &transaction : fixture.at("transactions")) {
+    for (const auto &entry : transaction.at("raw_entries")) {
+      entries.push_back(entry);
+    }
+  }
+  std::vector<CdcTransaction> result;
+  for (const auto &entry : entries) {
+    auto completed = assembler.accept(blackbox::CdcStreamRecord{
+        .stream_id = entry.at(0).get<std::string>(),
+        .key_json = entry.at(1).at(0).get<std::string>(),
+        .envelope_json = entry.at(1).at(1).get<std::string>(),
+    });
+    if (completed.has_value()) {
+      result.push_back(std::move(*completed));
+    }
+  }
+  assembler.finish();
+  return result;
+}
+
+[[nodiscard]] std::string
+fixtureClientPayload(const std::string &fixture_run_id,
+                     const std::uint64_t sequence,
+                     const std::string_view transaction_type) {
+  return Json{
+      {"kind", "client_txn"},
+      {"run_id", fixture_run_id},
+      {"session_id", "tpcc/worker/1"},
+      {"session_seq", sequence},
+      {"logical_txn_id", uuid(sequence, '3')},
+      {"attempt_id", uuid(sequence, '4')},
+      {"txn_type", transaction_type},
+      {"correlation_kind", "session_txn"},
+      {"correlation_id", Json{{"run_id", fixture_run_id},
+                              {"session_id", "tpcc/worker/1"},
+                              {"txn_id", sequence}}},
+      {"read_count", 0},
+      {"read_digest",
+       "3f251669e36904bc1a3bc472991c9ff89f7f23f6b98bad9dd33f0e66884a06ce"},
+      {"reads", Json::array()},
+  }
+      .dump();
+}
+
+[[nodiscard]] std::string
+fixtureDonePayload(const std::string &fixture_run_id) {
+  std::vector<SessionMarkerEntry> entries;
+  for (std::uint64_t sequence = 1U; sequence <= 7U; ++sequence) {
+    entries.push_back(
+        SessionMarkerEntry{.session_seq = sequence, .txn_id = sequence});
+  }
+  return Json{
+      {"kind", "session_done"},
+      {"run_id", fixture_run_id},
+      {"session_id", "tpcc/worker/1"},
+      {"final_session_seq", 7},
+      {"logical_transactions_started", 7},
+      {"successful_transactions", 7},
+      {"terminal_aborted_transactions", 0},
+      {"physical_attempts_started", 7},
+      {"definitively_aborted_attempts", 0},
+      {"published_transactions", 7},
+      {"retry_attempts", 0},
+      {"ambiguous_attempts", 0},
+      {"rolling_correlation_digest",
+       blackbox::computeRollingSessionMarkerDigest(fixture_run_id,
+                                                   "tpcc/worker/1", entries)},
+  }
+      .dump();
+}
+
 [[nodiscard]] std::string manifestPayload() {
   return Json{
       {"kind", "run_manifest"},
@@ -277,6 +425,15 @@ void openWorkload(RunController &controller) {
   discardStatuses(controller);
   controller.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
   controller.acceptClientPayload(bootstrapPayload());
+  controller.acceptCdcTransaction(control(1U, RunFencePhase::LoadFinished));
+  BLACKBOX_CHECK(controller.joinerMetrics().bootstrap_state_validated);
+  discardStatuses(controller);
+}
+
+void openTpccWorkload(RunController &controller) {
+  discardStatuses(controller);
+  controller.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
+  controller.acceptClientPayload(tpccBootstrapPayload());
   controller.acceptCdcTransaction(control(1U, RunFencePhase::LoadFinished));
   BLACKBOX_CHECK(controller.joinerMetrics().bootstrap_state_validated);
   discardStatuses(controller);
@@ -831,7 +988,7 @@ void testCompletedSessionTrackingUsesTerminalAudit() {
   BLACKBOX_CHECK(!hasDiagnostic(controller, "SESSION_DONE_MISSING"));
 }
 
-void testIncompleteAdapterRuntimeIsRejectedAtAdmission() {
+void testMonitorOwnedCapabilitiesAdmitTpcc() {
   auto tpcc = manifest();
   tpcc.benchmark = "tpcc";
   tpcc.expected_session_ids = {"tpcc/worker/1"};
@@ -848,12 +1005,8 @@ void testIncompleteAdapterRuntimeIsRejectedAtAdmission() {
   } catch (const MonitorError &error) {
     BLACKBOX_CHECK(error.code() == MonitorErrorCode::IsolationMismatch);
   }
-  try {
-    (void)RunController(std::move(tpcc));
-    BLACKBOX_CHECK(false);
-  } catch (const MonitorError &error) {
-    BLACKBOX_CHECK(error.code() == MonitorErrorCode::BranchContractMismatch);
-  }
+  RunController controller(std::move(tpcc));
+  BLACKBOX_CHECK(!controller.terminal());
 }
 
 void testAdapterManifestSemanticsAreValidatedAtAdmission() {
@@ -879,6 +1032,87 @@ void testAdapterManifestSemanticsAreValidatedAtAdmission() {
   }
 }
 
+void testTpccControllerUsesGenericJoinAndReconciliation() {
+  RunController controller(tpccManifest());
+  openTpccWorkload(controller);
+  auto client = Json::parse(clientPayload(1U));
+  client["txn_type"] = "NewOrder";
+  controller.acceptClientPayload(client.dump());
+  const auto encoded = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "new_order",
+      Json{{"no_w_id", 1}, {"no_d_id", 2}, {"no_o_id", 3}});
+  controller.acceptCdcTransaction(
+      workload(2U, 1U,
+               {NormalizedWrite{.key = encoded.key,
+                                .state = NormalizedValueState::Present,
+                                .value = encoded.value}}));
+  controller.acceptClientPayload(donePayload(1U));
+  controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+  controller.onInputIdle();
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  BLACKBOX_CHECK(
+      controller.finalReconciliation()->joined_workload_transactions == 1U);
+  BLACKBOX_CHECK(controller.joinerMetrics().joined_write_events == 1U);
+}
+
+void testCapturedTpccControllerReconciliation() {
+  const auto fixture = loadTpccTransactionFixture();
+  auto transactions = assembleTpccFixture(fixture);
+  BLACKBOX_REQUIRE(transactions.size() == 11U);
+  RunController controller(tpccFixtureManifest(fixture));
+  discardStatuses(controller);
+  controller.acceptCdcTransaction(std::move(transactions[0]));
+  controller.acceptCdcTransaction(std::move(transactions[1]));
+  controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
+  controller.acceptCdcTransaction(std::move(transactions[2]));
+  BLACKBOX_CHECK(controller.joinerMetrics().bootstrap_state_validated);
+  constexpr std::array<std::string_view, 7> transaction_types = {
+      "Payment", "NewOrder", "Delivery", "StockLevel",
+      "Payment", "Payment",  "NewOrder"};
+  const auto fixture_run_id = fixture.at("run_id").get<std::string>();
+  for (std::size_t index = 0; index < transaction_types.size(); ++index) {
+    const auto sequence = static_cast<std::uint64_t>(index + 1U);
+    auto client = fixtureClientPayload(fixture_run_id, sequence,
+                                       transaction_types[index]);
+    if (index % 2U == 0U) {
+      controller.acceptClientPayload(client);
+      controller.acceptCdcTransaction(std::move(transactions[index + 3U]));
+    } else {
+      controller.acceptCdcTransaction(std::move(transactions[index + 3U]));
+      controller.acceptClientPayload(client);
+    }
+  }
+  controller.acceptClientPayload(fixtureDonePayload(fixture_run_id));
+  controller.acceptCdcTransaction(std::move(transactions[10]));
+  controller.onInputIdle();
+
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  const auto &reconciliation = *controller.finalReconciliation();
+  BLACKBOX_CHECK(reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(reconciliation.bootstrap_manifest_validated);
+  BLACKBOX_CHECK(reconciliation.end_fence_seen);
+  BLACKBOX_CHECK(reconciliation.expected_sessions == 1U);
+  BLACKBOX_CHECK(reconciliation.completed_sessions == 1U);
+  BLACKBOX_CHECK(reconciliation.accepted_client_transactions == 7U);
+  BLACKBOX_CHECK(reconciliation.joined_workload_transactions == 7U);
+  BLACKBOX_CHECK(reconciliation.bootstrap_cdc_transactions == 1U);
+  BLACKBOX_CHECK(reconciliation.bootstrap_checker_transactions == 1U);
+  BLACKBOX_CHECK(reconciliation.phase_anchor_transactions == 1U);
+  BLACKBOX_CHECK(reconciliation.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(reconciliation.unmatched_workload_cdc_slots == 0U);
+  const auto metrics = controller.joinerMetrics();
+  BLACKBOX_CHECK(metrics.accepted_cdc_transactions == 11U);
+  BLACKBOX_CHECK(metrics.joined_workload_transactions == 7U);
+  BLACKBOX_CHECK(metrics.released_bootstrap_transactions == 1U);
+  BLACKBOX_CHECK(metrics.released_phase_anchor_transactions == 1U);
+  BLACKBOX_CHECK(metrics.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(metrics.unmatched_workload_cdc_slots == 0U);
+}
+
 } // namespace
 
 int runRunControllerTests() {
@@ -899,7 +1133,9 @@ int runRunControllerTests() {
   testJoinOnlyReconcilesWouldBeViolationWithoutVerdict();
   testJoinOnlyFailureHasNoAuditedOutcome();
   testCompletedSessionTrackingUsesTerminalAudit();
-  testIncompleteAdapterRuntimeIsRejectedAtAdmission();
+  testMonitorOwnedCapabilitiesAdmitTpcc();
   testAdapterManifestSemanticsAreValidatedAtAdmission();
+  testTpccControllerUsesGenericJoinAndReconciliation();
+  testCapturedTpccControllerReconciliation();
   return 0;
 }

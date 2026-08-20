@@ -332,9 +332,9 @@ void updateLengthPrefixed(DigestContext &digest,
   std::size_t cursor = 0;
   const auto schema = readKeyIdentifier(key, cursor);
   const auto table = readKeyIdentifier(key, cursor);
-  if (cursor > key.size() || key.size() - cursor != 4U) {
+  if (cursor >= key.size()) {
     throw MonitorError(MonitorErrorCode::InternalError,
-                       "canonical bootstrap key lacks its final I32");
+                       "canonical key lacks adapter-owned primary-key bytes");
   }
   return schema + "." + table;
 }
@@ -915,15 +915,35 @@ private:
         fail(MonitorErrorCode::CheckerInputRejected,
              "CDC normalized write has an empty key");
       }
-      if (!application_tables_.contains(tableFromKey(write.key))) {
+      const auto table = tableFromKey(write.key);
+      if (!application_tables_.contains(table)) {
         fail(MonitorErrorCode::CheckerInputRejected,
              "CDC normalized write names an unallowlisted table");
+      }
+      const auto *codec = config_.benchmark_adapter->rowCodec(table);
+      if (codec == nullptr) {
+        fail(MonitorErrorCode::CheckerInputRejected,
+             "CDC normalized write table lacks a registered codec");
+      }
+      try {
+        codec->validateKey(write.key);
+      } catch (const CanonicalEncodingError &error) {
+        fail(MonitorErrorCode::CheckerInputRejected,
+             std::string("CDC normalized write key is invalid: ") +
+                 error.what());
       }
       switch (write.state) {
       case NormalizedValueState::Present:
         if (!write.value.has_value()) {
           fail(MonitorErrorCode::CheckerInputRejected,
                "present CDC write lacks a value");
+        }
+        try {
+          codec->validatePresentValue(*write.value);
+        } catch (const CanonicalEncodingError &error) {
+          fail(MonitorErrorCode::CheckerInputRejected,
+               std::string("CDC normalized write value is invalid: ") +
+                   error.what());
         }
         break;
       case NormalizedValueState::Absent:

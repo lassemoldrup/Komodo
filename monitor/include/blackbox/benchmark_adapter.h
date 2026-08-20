@@ -88,6 +88,13 @@ struct AdapterRuntimeCapabilities {
     return client_trace && cdc_normalization && bootstrap_scan;
   }
 
+  [[nodiscard]] bool
+  satisfies(const AdapterRuntimeCapabilities &required) const noexcept {
+    return (!required.client_trace || client_trace) &&
+           (!required.cdc_normalization || cdc_normalization) &&
+           (!required.bootstrap_scan || bootstrap_scan);
+  }
+
   bool operator==(const AdapterRuntimeCapabilities &) const = default;
 };
 
@@ -160,7 +167,7 @@ public:
   void validateRunConfiguration(
       std::string_view declared_isolation,
       std::span<const std::string> application_table_allowlist,
-      bool require_runtime_capabilities) const;
+      AdapterRuntimeCapabilities required_capabilities) const;
   void validateApplicationTableRoster(
       std::span<const std::string> application_table_allowlist) const;
   void validateStartupTableSchema(

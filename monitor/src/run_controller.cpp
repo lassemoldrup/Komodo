@@ -108,8 +108,11 @@ validatedBenchmarkAdapter(const RunManifest &manifest) {
         "RunManifest backend/control/result contract is unsupported");
   }
   const auto &adapter = BenchmarkAdapterRegistry::require(manifest.benchmark);
-  adapter.validateRunConfiguration(manifest.declared_isolation,
-                                   manifest.application_table_allowlist, true);
+  adapter.validateRunConfiguration(
+      manifest.declared_isolation, manifest.application_table_allowlist,
+      AdapterRuntimeCapabilities{.client_trace = false,
+                                 .cdc_normalization = true,
+                                 .bootstrap_scan = true});
   return adapter;
 }
 

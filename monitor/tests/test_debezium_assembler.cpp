@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -34,6 +35,10 @@ using blackbox::DebeziumTxnAssembler;
 using blackbox::NormalizedValueState;
 using blackbox::RunFencePhase;
 using Json = nlohmann::json;
+
+#ifndef BLACKBOX_PROTOCOL_FIXTURE_DIR
+#error "BLACKBOX_PROTOCOL_FIXTURE_DIR must name the shared protocol fixtures"
+#endif
 
 constexpr std::string_view kFixtureRunId =
     "084cc5a1-3cbe-4fef-bb5c-43559a1c13a0";
@@ -58,6 +63,56 @@ constexpr std::string_view kFixtureRunId =
     throw std::runtime_error("failed to open captured MariaDB CDC fixture");
   }
   return Json::parse(input);
+}
+
+[[nodiscard]] Json loadTpccTransactionFixture() {
+  std::ifstream input(std::string(BLACKBOX_PROTOCOL_FIXTURE_DIR) +
+                      "/mariadb_tpcc_transactions.json");
+  if (!input) {
+    throw std::runtime_error("failed to open captured TPC-C CDC fixture");
+  }
+  return Json::parse(input);
+}
+
+[[nodiscard]] DebeziumAssemblerConfig tpccAssemblerConfig(const Json &fixture) {
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  std::vector<std::string> tables;
+  tables.reserve(adapter.tables().size());
+  for (const auto &table : adapter.tables()) {
+    tables.emplace_back(table.name);
+  }
+  return DebeziumAssemblerConfig{
+      .run_id = fixture.at("run_id").get<std::string>(),
+      .backend_source_id = "mariadb-main",
+      .debezium_version = fixture.at("debezium_version").get<std::string>(),
+      .backend_adapter = &blackbox::BackendAdapterRegistry::require("mariadb"),
+      .benchmark_adapter = &adapter,
+      .application_tables = std::move(tables),
+      .transaction_marker_table = "benchbase.session_txn",
+      .run_fence_table = "benchbase.checker_run_fence",
+  };
+}
+
+[[nodiscard]] Json tpccRawEntries(const Json &fixture) {
+  auto result = fixture.at("startup_schema");
+  for (const auto &transaction : fixture.at("transactions")) {
+    for (const auto &entry : transaction.at("raw_entries")) {
+      result.push_back(entry);
+    }
+  }
+  return result;
+}
+
+[[nodiscard]] std::string bytesHex(const CanonicalBytes &bytes) {
+  constexpr std::string_view digits = "0123456789abcdef";
+  std::string result;
+  result.reserve(bytes.size() * 2U);
+  for (const auto byte : bytes) {
+    const auto value = std::to_integer<unsigned int>(byte);
+    result.push_back(digits[value >> 4U]);
+    result.push_back(digits[value & 0x0fU]);
+  }
+  return result;
 }
 
 [[nodiscard]] Json loadFixture() {
@@ -117,6 +172,50 @@ void setEnvelope(Json &root, const std::size_t index, const Json &envelope) {
 
 void setKey(Json &root, const std::size_t index, const Json &key) {
   root.at(index).at(1).at(0) = key.dump();
+}
+
+[[nodiscard]] Json &tpccTransaction(Json &fixture,
+                                    const std::string_view name) {
+  for (auto &transaction : fixture.at("transactions")) {
+    if (transaction.at("name") == name) {
+      return transaction;
+    }
+  }
+  throw std::runtime_error("TPC-C fixture transaction is missing");
+}
+
+[[nodiscard]] Json &tpccRowEntry(Json &fixture,
+                                 const std::string_view transaction_name,
+                                 const std::string_view table,
+                                 const std::size_t occurrence = 0U) {
+  auto &entries = tpccTransaction(fixture, transaction_name).at("raw_entries");
+  std::size_t seen = 0;
+  for (auto &entry : entries) {
+    const auto envelope = Json::parse(entry.at(1).at(1).get<std::string>());
+    if (envelope.contains("op") && envelope.at("source").at("table") == table) {
+      if (seen == occurrence) {
+        return entry;
+      }
+      ++seen;
+    }
+  }
+  throw std::runtime_error("TPC-C fixture row entry is missing");
+}
+
+[[nodiscard]] Json entryEnvelope(const Json &entry) {
+  return Json::parse(entry.at(1).at(1).get<std::string>());
+}
+
+void setEntryEnvelope(Json &entry, const Json &envelope) {
+  entry.at(1).at(1) = envelope.dump();
+}
+
+[[nodiscard]] Json entryKey(const Json &entry) {
+  return Json::parse(entry.at(1).at(0).get<std::string>());
+}
+
+void setEntryKey(Json &entry, const Json &key) {
+  entry.at(1).at(0) = key.dump();
 }
 
 void renumberStreamIds(Json &root) {
@@ -901,6 +1000,152 @@ void checkAttemptGapsAndContiguousFrames() {
   expectError(std::move(interleaved), CdcErrorCode::CdcOrderInvalid);
 }
 
+void checkCapturedTpccTransactionsAndFailures() {
+  const auto fixture = loadTpccTransactionFixture();
+  BLACKBOX_CHECK(fixture.at("backend") == "mariadb");
+  BLACKBOX_CHECK(fixture.at("mariadb_image") == "mariadb:12.3");
+  BLACKBOX_REQUIRE(fixture.at("startup_schema").size() == 26U);
+  BLACKBOX_REQUIRE(fixture.at("transactions").size() == 11U);
+
+  DebeziumTxnAssembler assembler(tpccAssemblerConfig(fixture));
+  std::vector<CdcTransaction> actual;
+  for (const auto &record : recordsFromFixture(tpccRawEntries(fixture))) {
+    auto completed = assembler.accept(record);
+    if (completed.has_value()) {
+      actual.push_back(std::move(*completed));
+    }
+  }
+  assembler.finish();
+  BLACKBOX_REQUIRE(actual.size() == fixture.at("transactions").size());
+  std::set<std::string> tables;
+  std::uint64_t expected_write_count = 0U;
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    const auto &expected = fixture.at("transactions")[index].at("expected");
+    const auto &transaction = actual[index];
+    BLACKBOX_CHECK(transaction.cdc_seq == expected.at("cdc_seq"));
+    BLACKBOX_CHECK(blackbox::toString(transaction.kind) ==
+                   expected.at("kind").get<std::string>());
+    if (expected.at("fence_phase").is_null()) {
+      BLACKBOX_CHECK(!transaction.fence_phase.has_value());
+    } else {
+      BLACKBOX_REQUIRE(transaction.fence_phase.has_value());
+      BLACKBOX_CHECK(blackbox::toString(*transaction.fence_phase) ==
+                     expected.at("fence_phase").get<std::string>());
+    }
+    if (expected.at("correlation_id").is_null()) {
+      BLACKBOX_CHECK(!transaction.correlation_id.has_value());
+    } else {
+      BLACKBOX_REQUIRE(transaction.correlation_id.has_value());
+      BLACKBOX_CHECK(
+          transaction.correlation_id->run_id ==
+          expected.at("correlation_id").at("run_id").get<std::string>());
+      BLACKBOX_CHECK(
+          transaction.correlation_id->session_id ==
+          expected.at("correlation_id").at("session_id").get<std::string>());
+      BLACKBOX_CHECK(
+          transaction.correlation_id->txn_id ==
+          expected.at("correlation_id").at("txn_id").get<std::uint64_t>());
+    }
+    const auto &expected_writes = expected.at("writes");
+    BLACKBOX_REQUIRE(transaction.writes.size() == expected_writes.size());
+    expected_write_count += expected_writes.size();
+    for (std::size_t write_index = 0; write_index < transaction.writes.size();
+         ++write_index) {
+      const auto &write = transaction.writes[write_index];
+      const auto &expected_write = expected_writes[write_index];
+      BLACKBOX_CHECK(bytesHex(write.key) ==
+                     expected_write.at("key_hex").get<std::string>());
+      BLACKBOX_CHECK(blackbox::toString(write.state) ==
+                     expected_write.at("state").get<std::string>());
+      if (write.state == NormalizedValueState::Present) {
+        BLACKBOX_REQUIRE(write.value.has_value());
+        BLACKBOX_CHECK(bytesHex(*write.value) ==
+                       expected_write.at("value_hex").get<std::string>());
+      } else {
+        BLACKBOX_CHECK(!write.value.has_value());
+        BLACKBOX_CHECK(!expected_write.contains("value_hex"));
+      }
+      tables.insert(expected_write.at("table").get<std::string>());
+    }
+  }
+  const auto metrics = assembler.metrics();
+  BLACKBOX_CHECK(metrics.completed_transactions == 11U);
+  BLACKBOX_CHECK(metrics.completed_run_control_transactions == 3U);
+  BLACKBOX_CHECK(metrics.completed_bootstrap_transactions == 1U);
+  BLACKBOX_CHECK(metrics.completed_workload_transactions == 7U);
+  BLACKBOX_CHECK(metrics.normalized_write_events == expected_write_count);
+  BLACKBOX_CHECK(
+      tables.size() ==
+      blackbox::BenchmarkAdapterRegistry::require("tpcc").tables().size());
+
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "warehouse");
+    auto envelope = entryEnvelope(entry);
+    envelope["source"]["table"] = "unknown_table";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::UnexpectedTable,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "warehouse");
+    auto key = entryKey(entry);
+    key.erase("w_id");
+    setEntryKey(entry, key);
+    expectError(tpccRawEntries(invalid),
+                CdcErrorCode::PrimaryKeyImageIncomplete,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "warehouse");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"]["w_id"] = nullptr;
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid),
+                CdcErrorCode::PrimaryKeyImageIncomplete,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "warehouse");
+    auto key = entryKey(entry);
+    key["w_id"] = 2;
+    setEntryKey(entry, key);
+    expectError(tpccRawEntries(invalid),
+                CdcErrorCode::PrimaryKeyImageIncomplete,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "net_no_change", "item", 1U);
+    auto envelope = entryEnvelope(entry);
+    envelope["before"]["i_name"] = "broken-chain";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "delivery_shape", "new_order");
+    auto envelope = entryEnvelope(entry);
+    envelope["before"] = nullptr;
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "warehouse");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"]["w_ytd"] = "not-a-decimal";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CanonicalEncodingFailed,
+                tpccAssemblerConfig(invalid), false);
+  }
+}
+
 } // namespace
 
 int runDebeziumAssemblerTests() {
@@ -911,5 +1156,6 @@ int runDebeziumAssemblerTests() {
   checkMarkerAndFenceFailuresAreClosed();
   checkNormalizationFailuresAndPrimaryKeyUpdateRule();
   checkAttemptGapsAndContiguousFrames();
+  checkCapturedTpccTransactionsAndFailures();
   return 0;
 }

@@ -365,7 +365,7 @@ def check_status_timeout(executable):
     print("status XADD: silent peer bounded by the operation timeout cap")
 
 
-def check_incomplete_adapter_is_rejected(executable):
+def check_tpcc_adapter_enters_main_read(executable):
     xreads = 0
 
     def handler(_connection_id, command):
@@ -374,18 +374,20 @@ def check_incomplete_adapter_is_rejected(executable):
             return resp_integer(1)
         if command[0] == b"XREAD":
             xreads += 1
-            assert xreads == 1
-            return manifest_xread_reply(tpcc_manifest_payload())
+            if xreads == 1:
+                return manifest_xread_reply(tpcc_manifest_payload())
+            return STALL
         if command[0] == b"XADD":
             return resp_bulk("1-0")
         raise AssertionError(f"unexpected Redis command: {command!r}")
 
     with ScriptedRedis(handler) as server:
         result, _ = run_monitor(executable, server.port, 1000)
-        require_invalid(result, "BRANCH_CONTRACT_MISMATCH")
-        assert xreads == 1
+        assert result.returncode == 4, result
+        assert "BRANCH_CONTRACT_MISMATCH" not in output(result)
+        assert xreads == 2
         assert any(command[0] == b"XADD" for command in server.commands)
-    print("adapter capability: incomplete TPC-C runtime rejected before CDC admission")
+    print("adapter capability: TPC-C enters the monitor-owned CDC path")
 
 
 def assert_no_audited_result(value):
@@ -524,7 +526,7 @@ def main():
     check_manifest_timeout(args.monitor)
     check_main_read_timeout(args.monitor)
     check_status_timeout(args.monitor)
-    check_incomplete_adapter_is_rejected(args.monitor)
+    check_tpcc_adapter_enters_main_read(args.monitor)
     check_join_only_requires_metrics(args.monitor)
     check_join_only_early_failure_artifact(args.monitor)
     check_joiner_byte_limit_options(args.monitor)

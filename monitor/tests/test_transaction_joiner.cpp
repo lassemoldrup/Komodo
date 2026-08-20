@@ -1,5 +1,6 @@
 #include "blackbox/transaction_joiner.h"
 
+#include "blackbox/canonical_tpcc_codec.h"
 #include "blackbox/canonical_ycsb_codec.h"
 #include "test_support.h"
 
@@ -24,6 +25,7 @@ using blackbox::BootstrapPrefix;
 using blackbox::BootstrapStateProof;
 using blackbox::BootstrapTableCount;
 using blackbox::CanonicalBytes;
+using blackbox::CanonicalTpccCodec;
 using blackbox::CanonicalYcsbCodec;
 using blackbox::CdcTransaction;
 using blackbox::CdcTransactionKind;
@@ -56,6 +58,25 @@ config(const TransactionJoinerLimits limits = {}) {
                                std::string(session_two)},
       .application_tables = {"benchbase.usertable"},
       .benchmark_adapter = &blackbox::BenchmarkAdapterRegistry::require("ycsb"),
+      .client_parser_limits = {},
+      .limits = limits,
+  };
+}
+
+[[nodiscard]] TransactionJoinerConfig
+tpccConfig(const TransactionJoinerLimits limits = {}) {
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  std::vector<std::string> tables;
+  tables.reserve(adapter.tables().size());
+  for (const auto &table : adapter.tables()) {
+    tables.emplace_back(table.name);
+  }
+  return TransactionJoinerConfig{
+      .run_id = std::string(run_id),
+      .expected_session_ids = {std::string(session_one),
+                               std::string(session_two)},
+      .application_tables = std::move(tables),
+      .benchmark_adapter = &adapter,
       .client_parser_limits = {},
       .limits = limits,
   };
@@ -257,6 +278,25 @@ void openWorkload(TransactionJoiner &joiner) {
   BLACKBOX_CHECK(joiner.headBlockReason() ==
                  HeadBlockReason::BootstrapValidation);
   approveLoad(joiner);
+  BLACKBOX_CHECK(joiner.lifecycle() == JoinLifecycle::Workload);
+}
+
+void openTpccWorkload(TransactionJoiner &joiner) {
+  joiner.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
+  joiner.acceptCdcTransaction(control(1U, RunFencePhase::LoadFinished));
+  BLACKBOX_REQUIRE(joiner.pendingBootstrapPrefix().has_value());
+  std::vector<BootstrapTableCount> counts;
+  for (const auto &table :
+       blackbox::BenchmarkAdapterRegistry::require("tpcc").tables()) {
+    counts.push_back(
+        BootstrapTableCount{.table = std::string(table.name), .row_count = 0U});
+  }
+  joiner.validateBootstrapState(BootstrapStateProof{
+      .prefix = *joiner.pendingBootstrapPrefix(),
+      .table_row_counts = std::move(counts),
+      .canonical_state_digest =
+          "944dd6136dbad7047e31af3b6419eb6a632d4dea64bec8159e93307163810bc2",
+  });
   BLACKBOX_CHECK(joiner.lifecycle() == JoinLifecycle::Workload);
 }
 
@@ -799,12 +839,12 @@ void testBoundsAreCountedWithoutDroppingEvidence() {
   TransactionJoiner cdc_with_large_write(config());
   openWorkload(cdc_with_large_write);
   constexpr std::size_t large_value_size = 1024U * 1024U;
+  const auto large_value = value(std::string(large_value_size, 'x'));
   cdc_with_large_write.acceptCdcTransaction(
       workload(2U, session_one, 1U,
-               {NormalizedWrite{
-                   .key = key(1),
-                   .state = NormalizedValueState::Present,
-                   .value = CanonicalBytes(large_value_size, std::byte{0})}}));
+               {NormalizedWrite{.key = key(1),
+                                .state = NormalizedValueState::Present,
+                                .value = large_value}}));
   BLACKBOX_CHECK(cdc_with_large_write.metrics().pending_cdc_bytes >=
                  cdc_baseline.metrics().pending_cdc_bytes + large_value_size +
                      4096U);
@@ -935,6 +975,63 @@ void testIncrementalUnmatchedMetricsUnderLongPendingPrefix() {
   BLACKBOX_CHECK(audit.pending_cdc_slots == 0U);
 }
 
+void testTpccCompositeAndHistoryWritesUseGenericJoiner() {
+  const auto new_order = CanonicalTpccCodec::encodeRow(
+      "benchbase", "new_order",
+      Json{{"no_w_id", 1}, {"no_d_id", 2}, {"no_o_id", 3}});
+  const auto history =
+      CanonicalTpccCodec::encodeRow("benchbase", "history",
+                                    Json{{"h_id", 7},
+                                         {"h_c_id", 1},
+                                         {"h_c_d_id", 2},
+                                         {"h_c_w_id", 3},
+                                         {"h_d_id", 4},
+                                         {"h_w_id", 5},
+                                         {"h_date", "2026-08-20T12:34:57Z"},
+                                         {"h_amount", "10.00"},
+                                         {"h_data", "history"}});
+  std::vector<NormalizedWrite> writes = {
+      NormalizedWrite{.key = new_order.key,
+                      .state = NormalizedValueState::Present,
+                      .value = new_order.value},
+      NormalizedWrite{.key = history.key,
+                      .state = NormalizedValueState::Present,
+                      .value = history.value},
+  };
+  std::sort(writes.begin(), writes.end(),
+            [](const NormalizedWrite &left, const NormalizedWrite &right) {
+              return std::lexicographical_compare(
+                  left.key.begin(), left.key.end(), right.key.begin(),
+                  right.key.end());
+            });
+
+  TransactionJoiner joiner(tpccConfig());
+  openTpccWorkload(joiner);
+  auto client = Json::parse(clientPayload(session_one, 1U, 1U, 1U));
+  client["txn_type"] = "NewOrder";
+  joiner.acceptClientPayload(client.dump());
+  joiner.acceptCdcTransaction(workload(2U, session_one, 1U, std::move(writes)));
+  const auto metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.joined_workload_transactions == 1U);
+  BLACKBOX_CHECK(metrics.joined_write_events == 2U);
+  BLACKBOX_CHECK(metrics.checker.workload_transactions == 1U);
+
+  TransactionJoiner malformed(tpccConfig());
+  openTpccWorkload(malformed);
+  auto truncated = new_order.key;
+  truncated.pop_back();
+  expectError(
+      malformed,
+      [&] {
+        malformed.acceptCdcTransaction(
+            workload(2U, session_one, 1U,
+                     {NormalizedWrite{.key = std::move(truncated),
+                                      .state = NormalizedValueState::Present,
+                                      .value = new_order.value}}));
+      },
+      MonitorErrorCode::CheckerInputRejected);
+}
+
 } // namespace
 
 int runTransactionJoinerTests() {
@@ -950,5 +1047,6 @@ int runTransactionJoinerTests() {
   testBoundsAreCountedWithoutDroppingEvidence();
   testCheckerLimitAndAnchorCollision();
   testIncrementalUnmatchedMetricsUnderLongPendingPrefix();
+  testTpccCompositeAndHistoryWritesUseGenericJoiner();
   return 0;
 }

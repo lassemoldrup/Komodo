@@ -1,6 +1,9 @@
 #include "blackbox/benchmark_adapter.h"
 
+#include "blackbox/canonical_tpcc_codec.h"
 #include "blackbox/canonical_ycsb_codec.h"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
@@ -208,6 +211,56 @@ public:
     return "benchbase.usertable";
   }
 
+  [[nodiscard]] CanonicalBytes
+  encodeKeyObject(const nlohmann::json &key) const override {
+    if (!key.is_object() || key.size() != 1U || !key.contains("ycsb_key")) {
+      throw CanonicalEncodingError(
+          "row_shape: YCSB key object does not contain exactly ycsb_key");
+    }
+    return CanonicalYcsbCodec::encodeKey("benchbase", "usertable",
+                                         integerKey(key.at("ycsb_key")));
+  }
+
+  [[nodiscard]] CanonicalRowImage
+  encodeImage(const nlohmann::json &image) const override {
+    if (!image.is_object() || image.size() != 11U ||
+        !image.contains("ycsb_key")) {
+      throw CanonicalEncodingError("row_shape: YCSB image does not contain its "
+                                   "exact eleven-column schema");
+    }
+    std::array<NullableYcsbField, CanonicalYcsbCodec::field_count> fields;
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+      const auto name = "field" + std::to_string(index + 1U);
+      if (!image.contains(name)) {
+        throw CanonicalEncodingError("row_shape: YCSB image lacks " + name);
+      }
+      const auto &value = image.at(name);
+      if (value.is_null()) {
+        fields[index] = std::nullopt;
+      } else if (value.is_string()) {
+        fields[index] = value.get<std::string>();
+      } else {
+        throw CanonicalEncodingError(
+            "row_shape: YCSB image field is not string/null");
+      }
+    }
+    for (const auto &[name, unused] : image.items()) {
+      (void)unused;
+      if (name == "ycsb_key") {
+        continue;
+      }
+      if (!name.starts_with("field") || name.size() < 6U) {
+        throw CanonicalEncodingError(
+            "row_shape: YCSB image has an undeclared column");
+      }
+    }
+    const auto key = integerKey(image.at("ycsb_key"));
+    return CanonicalRowImage{
+        .key = CanonicalYcsbCodec::encodeKey("benchbase", "usertable", key),
+        .value = CanonicalYcsbCodec::encodeValue(fields),
+    };
+  }
+
   void validateKey(const std::span<const std::byte> key) const override {
     const auto prefix = parseTablePrefix(key);
     if (prefix.qualified_table != tableName() ||
@@ -252,10 +305,34 @@ public:
       throw CanonicalEncodingError("YCSB canonical value has trailing bytes");
     }
   }
+
+private:
+  [[nodiscard]] static std::int32_t integerKey(const nlohmann::json &value) {
+    std::int64_t converted = 0;
+    if (value.is_number_unsigned()) {
+      const auto raw = value.get<std::uint64_t>();
+      if (raw > static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int32_t>::max())) {
+        throw CanonicalEncodingError("YCSB key exceeds signed I32");
+      }
+      converted = static_cast<std::int64_t>(raw);
+    } else if (value.is_number_integer()) {
+      converted = value.get<std::int64_t>();
+    } else {
+      throw CanonicalEncodingError("YCSB key is not an integer");
+    }
+    if (converted < std::numeric_limits<std::int32_t>::min() ||
+        converted > std::numeric_limits<std::int32_t>::max()) {
+      throw CanonicalEncodingError("YCSB key exceeds signed I32");
+    }
+    return static_cast<std::int32_t>(converted);
+  }
 };
 
 class StaticBenchmarkAdapter final : public BenchmarkAdapter {
 public:
+  using CodecResolver = const CanonicalRowCodec *(*)(std::string_view) noexcept;
+
   constexpr StaticBenchmarkAdapter(
       const std::string_view adapter_name,
       const std::span<const std::string_view> transaction_types,
@@ -263,11 +340,12 @@ public:
       const std::span<const AdapterTableContract> tables,
       const std::span<const AdapterResultSetContract> result_sets,
       const AdapterRuntimeCapabilities capabilities,
-      const std::span<const CanonicalRowCodec *const> codecs)
+      const std::span<const CanonicalRowCodec *const> codecs,
+      const CodecResolver codec_resolver)
       : name_(adapter_name), transaction_types_(transaction_types),
         accepted_isolations_(accepted_isolations), tables_(tables),
-        result_sets_(result_sets), capabilities_(capabilities),
-        codecs_(codecs) {}
+        result_sets_(result_sets), capabilities_(capabilities), codecs_(codecs),
+        codec_resolver_(codec_resolver) {}
 
   [[nodiscard]] std::string_view name() const noexcept override {
     return name_;
@@ -305,7 +383,11 @@ public:
         [qualified_table](const CanonicalRowCodec *codec) {
           return codec != nullptr && codec->tableName() == qualified_table;
         });
-    return found == codecs_.end() ? nullptr : *found;
+    if (found != codecs_.end()) {
+      return *found;
+    }
+    return codec_resolver_ == nullptr ? nullptr
+                                      : codec_resolver_(qualified_table);
   }
 
 private:
@@ -316,6 +398,7 @@ private:
   std::span<const AdapterResultSetContract> result_sets_;
   AdapterRuntimeCapabilities capabilities_;
   std::span<const CanonicalRowCodec *const> codecs_;
+  CodecResolver codec_resolver_ = nullptr;
 };
 
 constexpr std::array ycsb_transactions = {
@@ -686,15 +769,15 @@ const StaticBenchmarkAdapter
                  AdapterRuntimeCapabilities{.client_trace = true,
                                             .cdc_normalization = true,
                                             .bootstrap_scan = true},
-                 ycsb_codecs);
+                 ycsb_codecs, nullptr);
 
 const StaticBenchmarkAdapter
     tpcc_adapter("tpcc", tpcc_transactions, tpcc_isolations, tpcc_tables,
                  tpcc_result_sets,
                  AdapterRuntimeCapabilities{.client_trace = false,
-                                            .cdc_normalization = false,
+                                            .cdc_normalization = true,
                                             .bootstrap_scan = true},
-                 tpcc_codecs);
+                 tpcc_codecs, CanonicalTpccCodec::tableCodec);
 
 const std::array<const BenchmarkAdapter *, 2> registered_adapters = {
     &ycsb_adapter,
@@ -744,7 +827,7 @@ BenchmarkAdapter::table(const std::string_view qualified_table) const noexcept {
 void BenchmarkAdapter::validateRunConfiguration(
     const std::string_view declared_isolation,
     const std::span<const std::string> application_table_allowlist,
-    const bool require_runtime_capabilities) const {
+    const AdapterRuntimeCapabilities required_capabilities) const {
   if (!acceptsIsolation(declared_isolation)) {
     throw MonitorError(
         MonitorErrorCode::IsolationMismatch,
@@ -754,10 +837,10 @@ void BenchmarkAdapter::validateRunConfiguration(
 
   validateApplicationTableRoster(application_table_allowlist);
 
-  if (require_runtime_capabilities && !runtimeCapabilities().complete()) {
+  if (!runtimeCapabilities().satisfies(required_capabilities)) {
     throw MonitorError(
         MonitorErrorCode::BranchContractMismatch,
-        "benchmark adapter lacks complete monitor runtime capabilities: " +
+        "benchmark adapter lacks required monitor runtime capabilities: " +
             std::string(name()));
   }
 }

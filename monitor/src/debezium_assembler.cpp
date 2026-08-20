@@ -1,6 +1,5 @@
 #include "blackbox/debezium_assembler.h"
 
-#include "blackbox/canonical_ycsb_codec.h"
 #include "strict_json.h"
 
 #include <nlohmann/json.hpp>
@@ -378,13 +377,6 @@ private:
     std::string identity;
   };
 
-  struct YcsbImage {
-    std::int32_t key = 0;
-    std::array<std::optional<std::string>, 10> fields;
-
-    bool operator==(const YcsbImage &) const = default;
-  };
-
   [[noreturn]] void fail(const CdcErrorCode code,
                          const std::string &message) const {
     throw CdcAssemblerError(code, message, current_stream_id_);
@@ -451,6 +443,11 @@ private:
     }
     config_.benchmark_adapter->validateApplicationTableRoster(
         config_.application_tables);
+    if (!config_.benchmark_adapter->runtimeCapabilities().cdc_normalization) {
+      throw MonitorError(
+          MonitorErrorCode::BranchContractMismatch,
+          "benchmark adapter lacks CDC normalization capability");
+    }
 
     const auto marker = parseQualifiedTable(config_.transaction_marker_table);
     const auto fence = parseQualifiedTable(config_.run_fence_table);
@@ -1632,91 +1629,11 @@ private:
     };
   }
 
-  [[nodiscard]] YcsbImage parseYcsbImage(const Json &image,
-                                         const std::string_view label) const {
-    if (!image.is_object()) {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           std::string(label) + " is not a complete row object");
-    }
-    if (!image.contains("ycsb_key")) {
-      fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-           std::string(label) + " lacks ycsb_key");
-    }
-    std::set<std::string, std::less<>> expected{"ycsb_key"};
-    for (std::size_t index = 1; index <= 10U; ++index) {
-      expected.insert("field" + std::to_string(index));
-    }
-    for (const auto &[key, unused] : image.items()) {
-      (void)unused;
-      if (expected.erase(key) == 0U) {
-        fail(CdcErrorCode::CdcRecordMalformed,
-             std::string(label) + " contains unexpected field " + key);
-      }
-    }
-    if (!expected.empty()) {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           std::string(label) + " lacks field " + *expected.begin());
-    }
-
-    const auto raw_key =
-        uintOrSignedKey(member(image, "ycsb_key", label), label);
-    YcsbImage result;
-    result.key = raw_key;
-    for (std::size_t index = 0; index < result.fields.size(); ++index) {
-      const auto field_name = "field" + std::to_string(index + 1U);
-      const auto &field = member(image, field_name, label);
-      if (field.is_null()) {
-        result.fields[index] = std::nullopt;
-      } else if (field.is_string()) {
-        result.fields[index] = field.get<std::string>();
-      } else {
-        fail(CdcErrorCode::CdcRecordMalformed,
-             std::string(label) + "." + field_name +
-                 " is neither string nor SQL NULL");
-      }
-    }
-    return result;
-  }
-
-  [[nodiscard]] std::int32_t
-  uintOrSignedKey(const Json &value, const std::string_view label) const {
-    std::int64_t converted = 0;
-    if (value.is_number_unsigned()) {
-      const auto unsigned_value = value.get<std::uint64_t>();
-      if (unsigned_value > static_cast<std::uint64_t>(
-                               std::numeric_limits<std::int32_t>::max())) {
-        fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-             std::string(label) + " ycsb_key exceeds signed 32-bit range");
-      }
-      converted = static_cast<std::int64_t>(unsigned_value);
-    } else if (value.is_number_integer()) {
-      converted = value.get<std::int64_t>();
-    } else {
-      fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-           std::string(label) + " ycsb_key is not an integer");
-    }
-    if (converted < std::numeric_limits<std::int32_t>::min() ||
-        converted > std::numeric_limits<std::int32_t>::max()) {
-      fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-           std::string(label) + " ycsb_key exceeds signed 32-bit range");
-    }
-    return static_cast<std::int32_t>(converted);
-  }
-
-  [[nodiscard]] std::int32_t
-  parseYcsbKeyObject(const Json &key, const std::string_view label) const {
-    requireExactKeys(key, {"ycsb_key"}, label,
-                     CdcErrorCode::PrimaryKeyImageIncomplete);
-    return uintOrSignedKey(
-        member(key, "ycsb_key", label, CdcErrorCode::PrimaryKeyImageIncomplete),
-        label);
-  }
-
   [[nodiscard]] std::vector<NormalizedWrite>
   normalizeApplicationWrites(const std::vector<RowEvent> &rows) const {
     std::map<CanonicalBytes, NormalizedWrite, CanonicalBytesLess> collapsed;
-    using LocalRowKey = std::pair<std::string, std::int32_t>;
-    std::map<LocalRowKey, std::optional<YcsbImage>> local_state;
+    std::map<CanonicalBytes, std::optional<CanonicalBytes>, CanonicalBytesLess>
+        local_state;
     const auto put_present = [&collapsed](CanonicalBytes key,
                                           CanonicalBytes value) {
       NormalizedWrite write{.key = key,
@@ -1731,104 +1648,131 @@ private:
       collapsed.insert_or_assign(std::move(key), std::move(write));
     };
     const auto require_before_matches =
-        [this, &local_state](const LocalRowKey &key, const YcsbImage &before,
+        [this, &local_state](const CanonicalRowImage &before,
                              const std::string_view operation) {
-          const auto previous = local_state.find(key);
+          const auto previous = local_state.find(before.key);
           if (previous == local_state.end()) {
             return;
           }
           if (!previous->second.has_value()) {
             fail(CdcErrorCode::CdcRecordMalformed,
-                 "YCSB " + std::string(operation) +
+                 "application " + std::string(operation) +
                      " follows a transaction-local Absent row state");
           }
-          if (*previous->second != before) {
+          if (*previous->second != before.value) {
             fail(CdcErrorCode::CdcRecordMalformed,
-                 "YCSB " + std::string(operation) +
+                 "application " + std::string(operation) +
                      " before-image does not continue the prior after-image");
           }
         };
     const auto require_insert_follows_absent =
-        [this, &local_state](const LocalRowKey &key) {
+        [this, &local_state](const CanonicalBytes &key) {
           const auto previous = local_state.find(key);
           if (previous != local_state.end() && previous->second.has_value()) {
             fail(CdcErrorCode::CdcRecordMalformed,
-                 "YCSB insert follows a transaction-local Present row state");
+                 "application insert follows a transaction-local Present row "
+                 "state");
           }
         };
 
-    try {
-      for (const auto &row : rows) {
-        const auto key_object = parseYcsbKeyObject(row.key, "usertable key");
-        if (row.operation == "c") {
-          if (!row.before.is_null() || !row.after.is_object()) {
-            fail(CdcErrorCode::CdcRecordMalformed,
-                 "YCSB insert has invalid before/after images");
-          }
-          const auto after =
-              parseYcsbImage(row.after, "YCSB insert after-image");
-          if (key_object != after.key) {
-            fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-                 "YCSB insert key and after-image disagree");
-          }
-          const LocalRowKey state_key{row.table.full_name, after.key};
-          require_insert_follows_absent(state_key);
-          local_state.insert_or_assign(state_key, after);
-          put_present(CanonicalYcsbCodec::encodeKey(row.table.schema,
-                                                    row.table.table, after.key),
-                      CanonicalYcsbCodec::encodeValue(after.fields));
-          continue;
-        }
-        if (row.operation == "d") {
-          if (!row.before.is_object() || !row.after.is_null()) {
-            fail(CdcErrorCode::CdcRecordMalformed,
-                 "YCSB delete has invalid before/after images");
-          }
-          const auto before =
-              parseYcsbImage(row.before, "YCSB delete before-image");
-          if (key_object != before.key) {
-            fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-                 "YCSB delete key and before-image disagree");
-          }
-          const LocalRowKey state_key{row.table.full_name, before.key};
-          require_before_matches(state_key, before, "delete");
-          local_state.insert_or_assign(state_key, std::nullopt);
-          put_absent(CanonicalYcsbCodec::encodeKey(
-              row.table.schema, row.table.table, before.key));
-          continue;
-        }
-
-        if (!row.before.is_object() || !row.after.is_object()) {
-          fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-               "YCSB update lacks complete before/after images");
-        }
-        const auto before =
-            parseYcsbImage(row.before, "YCSB update before-image");
-        const auto after = parseYcsbImage(row.after, "YCSB update after-image");
-        if (key_object != after.key) {
-          fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-               "YCSB update key and after-image disagree");
-        }
-        const LocalRowKey before_state_key{row.table.full_name, before.key};
-        const LocalRowKey after_state_key{row.table.full_name, after.key};
-        require_before_matches(before_state_key, before, "update");
-        if (before.key != after.key) {
-          require_insert_follows_absent(after_state_key);
-          local_state.insert_or_assign(before_state_key, std::nullopt);
-          put_absent(CanonicalYcsbCodec::encodeKey(
-              row.table.schema, row.table.table, before.key));
-        }
-        local_state.insert_or_assign(after_state_key, after);
-        put_present(CanonicalYcsbCodec::encodeKey(row.table.schema,
-                                                  row.table.table, after.key),
-                    CanonicalYcsbCodec::encodeValue(after.fields));
+    for (const auto &row : rows) {
+      const auto *codec =
+          config_.benchmark_adapter->rowCodec(row.table.full_name);
+      if (codec == nullptr) {
+        fail(CdcErrorCode::UnexpectedTable,
+             "application table has no registered canonical row codec");
       }
-    } catch (const CdcAssemblerError &) {
-      throw;
-    } catch (const CanonicalEncodingError &error) {
-      fail(CdcErrorCode::CanonicalEncodingFailed,
-           std::string("failed to canonically encode YCSB CDC row: ") +
-               error.what());
+      const auto require_primary_columns = [this, &row](const Json &image,
+                                                        const char *label) {
+        if (!image.is_object()) {
+          fail(CdcErrorCode::CdcRecordMalformed,
+               std::string(label) + " is not a complete row object");
+        }
+        const auto *table =
+            config_.benchmark_adapter->table(row.table.full_name);
+        if (table == nullptr) {
+          fail(CdcErrorCode::UnexpectedTable,
+               "application image names an unregistered table");
+        }
+        for (const auto name : table->primary_key) {
+          if (!image.contains(name) || image.at(name).is_null()) {
+            fail(CdcErrorCode::PrimaryKeyImageIncomplete,
+                 std::string(label) +
+                     " lacks a non-null primary-key component");
+          }
+        }
+      };
+      const auto event_key = [&]() {
+        try {
+          return codec->encodeKeyObject(row.key);
+        } catch (const CanonicalEncodingError &error) {
+          fail(CdcErrorCode::PrimaryKeyImageIncomplete,
+               std::string("failed to encode application event key: ") +
+                   error.what());
+        }
+      }();
+      const auto image = [&](const Json &value, const char *label) {
+        require_primary_columns(value, label);
+        try {
+          return codec->encodeImage(value);
+        } catch (const CanonicalEncodingError &error) {
+          const auto message = std::string_view(error.what());
+          fail(message.starts_with("row_shape:")
+                   ? CdcErrorCode::CdcRecordMalformed
+                   : CdcErrorCode::CanonicalEncodingFailed,
+               std::string("failed to encode ") + label + ": " + error.what());
+        }
+      };
+
+      if (row.operation == "c") {
+        if (!row.before.is_null() || !row.after.is_object()) {
+          fail(CdcErrorCode::CdcRecordMalformed,
+               "application insert has invalid before/after images");
+        }
+        const auto after = image(row.after, "insert after-image");
+        if (event_key != after.key) {
+          fail(CdcErrorCode::PrimaryKeyImageIncomplete,
+               "application insert key and after-image disagree");
+        }
+        require_insert_follows_absent(after.key);
+        local_state.insert_or_assign(after.key, after.value);
+        put_present(after.key, after.value);
+        continue;
+      }
+      if (row.operation == "d") {
+        if (!row.before.is_object() || !row.after.is_null()) {
+          fail(CdcErrorCode::CdcRecordMalformed,
+               "application delete has invalid before/after images");
+        }
+        const auto before = image(row.before, "delete before-image");
+        if (event_key != before.key) {
+          fail(CdcErrorCode::PrimaryKeyImageIncomplete,
+               "application delete key and before-image disagree");
+        }
+        require_before_matches(before, "delete");
+        local_state.insert_or_assign(before.key, std::nullopt);
+        put_absent(before.key);
+        continue;
+      }
+
+      if (!row.before.is_object() || !row.after.is_object()) {
+        fail(CdcErrorCode::PrimaryKeyImageIncomplete,
+             "application update lacks complete before/after images");
+      }
+      const auto before = image(row.before, "update before-image");
+      const auto after = image(row.after, "update after-image");
+      if (event_key != after.key) {
+        fail(CdcErrorCode::PrimaryKeyImageIncomplete,
+             "application update key and after-image disagree");
+      }
+      require_before_matches(before, "update");
+      if (before.key != after.key) {
+        require_insert_follows_absent(after.key);
+        local_state.insert_or_assign(before.key, std::nullopt);
+        put_absent(before.key);
+      }
+      local_state.insert_or_assign(after.key, after.value);
+      put_present(after.key, after.value);
     }
 
     std::vector<NormalizedWrite> result;
