@@ -31,6 +31,7 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 add_library(blackbox_monitor
   src/backend_adapter.cpp
   src/benchmark_adapter.cpp
+  src/canonical_tpcc_codec.cpp
   src/canonical_ycsb_codec.cpp
   src/cdc_error.cpp
   src/cdc_types.cpp
@@ -121,6 +122,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   add_executable(blackbox_monitor_tests
     tests/test_backend_adapter.cpp
     tests/test_benchmark_adapter.cpp
+    tests/test_canonical_tpcc_codec.cpp
     tests/test_canonical_ycsb_codec.cpp
     tests/test_checker_adapter.cpp
     tests/test_client_txn.cpp
@@ -145,6 +147,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
       BLACKBOX_PROTOCOL_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/golden"
       BLACKBOX_PROTOCOL_ADAPTER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/adapters"
       BLACKBOX_PROTOCOL_BACKEND_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/backends"
+      BLACKBOX_PROTOCOL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures"
       BLACKBOX_PROTOCOL_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/examples"
       BLACKBOX_CDC_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
   )
@@ -188,6 +191,14 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   set_tests_properties(blackbox_cdc_snapshot_schema_fixture_checksum PROPERTIES
     FIXTURES_SETUP captured_mariadb_snapshot_schema_fixture
     PASS_REGULAR_EXPRESSION "4be5e5dbb70beffd2acb558708e52482d348a0b0e19983dc34c4e775f38f1301"
+  )
+  add_test(
+    NAME blackbox_tpcc_typed_cdc_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+            ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures/mariadb_tpcc_typed_rows.json
+  )
+  set_tests_properties(blackbox_tpcc_typed_cdc_fixture_checksum PROPERTIES
+    PASS_REGULAR_EXPRESSION "fa4f72247f42eb5062082a964b118acdbd54a99c991c7ae4aeda99bcc267bb82"
   )
   add_test(
     NAME blackbox_cdc_replay_snapshot_schema_fixture

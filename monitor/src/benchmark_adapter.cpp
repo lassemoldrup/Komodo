@@ -690,7 +690,11 @@ const StaticBenchmarkAdapter
 
 const StaticBenchmarkAdapter
     tpcc_adapter("tpcc", tpcc_transactions, tpcc_isolations, tpcc_tables,
-                 tpcc_result_sets, AdapterRuntimeCapabilities{}, tpcc_codecs);
+                 tpcc_result_sets,
+                 AdapterRuntimeCapabilities{.client_trace = false,
+                                            .cdc_normalization = false,
+                                            .bootstrap_scan = true},
+                 tpcc_codecs);
 
 const std::array<const BenchmarkAdapter *, 2> registered_adapters = {
     &ycsb_adapter,

@@ -240,18 +240,15 @@ void checkSharedAdapterContract(const std::string_view benchmark) {
   }
 }
 
-void checkGoldenInventoryUsesRegisteredTables() {
-  const auto inventory =
-      loadJson(std::filesystem::path(BLACKBOX_PROTOCOL_GOLDEN_DIR) /
-               "tpcc_row_vector_inventory.json");
+void checkExecutableGoldensUseRegisteredTables() {
+  const auto goldens = loadJson(
+      std::filesystem::path(BLACKBOX_PROTOCOL_GOLDEN_DIR) / "tpcc_rows.json");
   const auto &adapter = BenchmarkAdapterRegistry::require("tpcc");
-  BLACKBOX_CHECK(inventory.at("benchmark").get<std::string>() ==
-                 adapter.name());
+  BLACKBOX_CHECK(goldens.at("benchmark").get<std::string>() == adapter.name());
   std::set<std::string> covered_tables;
-  for (const auto &vector : inventory.at("required_vectors")) {
+  for (const auto &vector : goldens.at("vectors")) {
     const auto table = vector.at("table").get<std::string>();
     BLACKBOX_CHECK(adapter.table(table) != nullptr);
-    BLACKBOX_CHECK(!vector.at("covers").empty());
     covered_tables.insert(table);
   }
   BLACKBOX_CHECK(covered_tables.size() == adapter.tables().size());
@@ -397,7 +394,7 @@ void checkStartupSchemaContracts() {
 int runBenchmarkAdapterTests() {
   checkSharedAdapterContract("ycsb");
   checkSharedAdapterContract("tpcc");
-  checkGoldenInventoryUsesRegisteredTables();
+  checkExecutableGoldensUseRegisteredTables();
   checkRegistryValidationAndCapabilities();
   checkStartupSchemaContracts();
   return 0;

@@ -4,6 +4,7 @@
 
 int runBackendAdapterTests();
 int runBenchmarkAdapterTests();
+int runCanonicalTpccCodecTests();
 int runCanonicalYcsbCodecTests();
 int runCheckerAdapterTests();
 int runClientTxnTests();
@@ -16,6 +17,7 @@ int runTransactionJoinerTests();
 int main() {
   runBackendAdapterTests();
   runBenchmarkAdapterTests();
+  runCanonicalTpccCodecTests();
   runCanonicalYcsbCodecTests();
   runCheckerAdapterTests();
   runClientTxnTests();
