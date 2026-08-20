@@ -27,6 +27,8 @@ using blackbox::ClientRead;
 using blackbox::ClientReadSource;
 using blackbox::ClientValueState;
 using blackbox::FinalOutcome;
+using blackbox::MonitorError;
+using blackbox::MonitorErrorCode;
 using blackbox::NormalizedWrite;
 using blackbox::ProcessingMode;
 using blackbox::RunController;
@@ -829,6 +831,54 @@ void testCompletedSessionTrackingUsesTerminalAudit() {
   BLACKBOX_CHECK(!hasDiagnostic(controller, "SESSION_DONE_MISSING"));
 }
 
+void testIncompleteAdapterRuntimeIsRejectedAtAdmission() {
+  auto tpcc = manifest();
+  tpcc.benchmark = "tpcc";
+  tpcc.expected_session_ids = {"tpcc/worker/1"};
+  tpcc.application_table_allowlist = {
+      "benchbase.warehouse", "benchbase.item",      "benchbase.stock",
+      "benchbase.district",  "benchbase.customer",  "benchbase.history",
+      "benchbase.oorder",    "benchbase.new_order", "benchbase.order_line",
+  };
+  auto read_committed = tpcc;
+  read_committed.declared_isolation = "READ_COMMITTED";
+  try {
+    (void)RunController(std::move(read_committed));
+    BLACKBOX_CHECK(false);
+  } catch (const MonitorError &error) {
+    BLACKBOX_CHECK(error.code() == MonitorErrorCode::IsolationMismatch);
+  }
+  try {
+    (void)RunController(std::move(tpcc));
+    BLACKBOX_CHECK(false);
+  } catch (const MonitorError &error) {
+    BLACKBOX_CHECK(error.code() == MonitorErrorCode::BranchContractMismatch);
+  }
+}
+
+void testAdapterManifestSemanticsAreValidatedAtAdmission() {
+  {
+    auto unknown = manifest();
+    unknown.benchmark = "unknown";
+    try {
+      (void)RunController(std::move(unknown));
+      BLACKBOX_CHECK(false);
+    } catch (const MonitorError &error) {
+      BLACKBOX_CHECK(error.code() == MonitorErrorCode::ConfigInvalid);
+    }
+  }
+  {
+    auto wrong_roster = manifest();
+    wrong_roster.application_table_allowlist = {"benchbase.other"};
+    try {
+      (void)RunController(std::move(wrong_roster));
+      BLACKBOX_CHECK(false);
+    } catch (const MonitorError &error) {
+      BLACKBOX_CHECK(error.code() == MonitorErrorCode::UnexpectedTable);
+    }
+  }
+}
+
 } // namespace
 
 int runRunControllerTests() {
@@ -849,5 +899,7 @@ int runRunControllerTests() {
   testJoinOnlyReconcilesWouldBeViolationWithoutVerdict();
   testJoinOnlyFailureHasNoAuditedOutcome();
   testCompletedSessionTrackingUsesTerminalAudit();
+  testIncompleteAdapterRuntimeIsRejectedAtAdmission();
+  testAdapterManifestSemanticsAreValidatedAtAdmission();
   return 0;
 }

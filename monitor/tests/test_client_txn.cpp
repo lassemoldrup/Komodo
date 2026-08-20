@@ -1,5 +1,7 @@
 #include "blackbox/client_txn.h"
 
+#include "blackbox/canonical_ycsb_codec.h"
+
 #include "test_support.h"
 
 #include <nlohmann/json.hpp>
@@ -47,7 +49,7 @@ constexpr std::string_view session_id = "ycsb/worker/1";
 [[nodiscard]] ClientTxnParser parser() {
   return ClientTxnParser(std::string(run_id),
                          {std::string(session_id), "ycsb/worker/2"},
-                         {"benchbase.usertable"});
+                         blackbox::BenchmarkAdapterRegistry::require("ycsb"));
 }
 
 [[nodiscard]] std::string encodeBase64(const std::span<const std::byte> bytes) {
@@ -381,25 +383,20 @@ void testCanonicalPaddingPaths() {
   const std::vector<ClientRead> reads = {
       ClientRead{
           .event_seq = 0,
-          .key = CanonicalYcsbCodec::encodeKey("benchbase", "tableaa", 1),
+          .key = CanonicalYcsbCodec::encodeKey("benchbase", "usertable", 1),
           .state = ClientValueState::Present,
           .value = valueWithFields(all_null),
           .source = ClientReadSource::Snapshot,
       },
       ClientRead{
           .event_seq = 1,
-          .key = CanonicalYcsbCodec::encodeKey("benchbase", "tableone", 2),
+          .key = CanonicalYcsbCodec::encodeKey("benchbase", "usertable", 2),
           .state = ClientValueState::Present,
           .value = valueWithFields(one_empty),
           .source = ClientReadSource::Snapshot,
       },
   };
   const auto record = recordWithReads(reads);
-  BLACKBOX_CHECK(
-      record["reads"][0]["key_bytes_base64"].get<std::string>().ends_with(
-          "=="));
-  BLACKBOX_CHECK(
-      record["reads"][1]["key_bytes_base64"].get<std::string>().ends_with('='));
   BLACKBOX_CHECK(
       record["reads"][0]["value_bytes_base64"].get<std::string>().ends_with(
           "=="));
@@ -408,7 +405,7 @@ void testCanonicalPaddingPaths() {
           '='));
   const ClientTxnParser padded_parser(
       std::string(run_id), {std::string(session_id)},
-      {"benchbase.tableaa", "benchbase.tableone"});
+      blackbox::BenchmarkAdapterRegistry::require("ycsb"));
   const auto parsed = padded_parser.parse(record.dump());
   BLACKBOX_CHECK(parsed.reads == reads);
 }
@@ -493,7 +490,8 @@ void testLimitsAndConfiguration() {
   }
   const auto with_limits = [](const ClientTxnParserLimits limits) {
     return ClientTxnParser(std::string(run_id), {std::string(session_id)},
-                           {"benchbase.usertable"}, limits);
+                           blackbox::BenchmarkAdapterRegistry::require("ycsb"),
+                           limits);
   };
 
   auto limits = ClientTxnParserLimits{};
@@ -538,16 +536,7 @@ void testLimitsAndConfiguration() {
   try {
     (void)ClientTxnParser(std::string(run_id),
                           {std::string(session_id), std::string(session_id)},
-                          {"benchbase.usertable"});
-  } catch (const std::invalid_argument &) {
-    rejected = true;
-  }
-  BLACKBOX_CHECK(rejected);
-
-  rejected = false;
-  try {
-    (void)ClientTxnParser(std::string(run_id), {std::string(session_id)},
-                          {"BenchBase.usertable"});
+                          blackbox::BenchmarkAdapterRegistry::require("ycsb"));
   } catch (const std::invalid_argument &) {
     rejected = true;
   }
@@ -567,6 +556,43 @@ void testLimitsAndConfiguration() {
       "CANONICAL_ENCODING_FAILED");
 }
 
+void testAdapterOwnedTransactionMembership() {
+  const ClientTxnParser tpcc_parser(
+      std::string(run_id), {std::string(session_id)},
+      blackbox::BenchmarkAdapterRegistry::require("tpcc"));
+  const auto payload =
+      readFile(std::filesystem::path(BLACKBOX_PROTOCOL_EXAMPLE_DIR) /
+               "client-txn-second.json");
+  constexpr std::array<std::string_view, 5> transactions = {
+      "NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel"};
+  for (const auto transaction : transactions) {
+    auto record = Json::parse(payload);
+    record["txn_type"] = transaction;
+    BLACKBOX_CHECK(tpcc_parser.parse(record.dump()).txn_type == transaction);
+  }
+
+  auto wrong_adapter_transaction = Json::parse(payload);
+  wrong_adapter_transaction["txn_type"] = "ycsb_update";
+  expectError(tpcc_parser, wrong_adapter_transaction.dump(),
+              MonitorErrorCode::UnsupportedTransaction);
+
+  auto malformed_name = Json::parse(payload);
+  malformed_name["txn_type"] = "New-Order";
+  expectError(tpcc_parser, malformed_name.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto read_record = recordWithReads({ClientRead{
+      .event_seq = 0,
+      .key = CanonicalYcsbCodec::encodeKey("benchbase", "warehouse", 1),
+      .state = ClientValueState::Absent,
+      .value = std::nullopt,
+      .source = ClientReadSource::Snapshot,
+  }});
+  read_record["txn_type"] = "NewOrder";
+  expectError(tpcc_parser, read_record.dump(),
+              MonitorErrorCode::BranchContractMismatch);
+}
+
 } // namespace
 
 int runClientTxnTests() {
@@ -578,5 +604,6 @@ int runClientTxnTests() {
   testCanonicalPaddingPaths();
   testCounterValidation();
   testLimitsAndConfiguration();
+  testAdapterOwnedTransactionMembership();
   return 0;
 }

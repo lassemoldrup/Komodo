@@ -71,6 +71,7 @@ struct TransactionJoinerConfig {
   std::string run_id;
   std::vector<std::string> expected_session_ids;
   std::vector<std::string> application_tables;
+  const BenchmarkAdapter *benchmark_adapter = nullptr;
   ClientTxnParserLimits client_parser_limits;
   TransactionJoinerLimits limits;
   bool execute_consistency_check = true;

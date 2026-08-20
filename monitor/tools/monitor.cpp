@@ -805,11 +805,10 @@ public:
                                                   finished_usage.ru_stime)},
                          {"max_rss_kib", finished_usage.ru_maxrss}}},
         {"limits",
-         Json{{"joiner",
-               Json{{"max_pending_client_bytes",
-                     options_.max_pending_client_bytes},
-                    {"max_retained_identity_bytes",
-                     options_.max_retained_identity_bytes}}}}},
+         Json{{"joiner", Json{{"max_pending_client_bytes",
+                               options_.max_pending_client_bytes},
+                              {"max_retained_identity_bytes",
+                               options_.max_retained_identity_bytes}}}}},
         {"assembler", assemblerMetricsJson(assembler_metrics_)},
         {"joiner", joinerMetricsJson(joiner_metrics_)},
         {"checker", checkerMetricsJson(joiner_metrics_.checker)},
@@ -893,14 +892,6 @@ private:
       .dump();
 }
 
-[[nodiscard]] bool supportedManifest(const RunManifest &manifest) {
-  return manifest.application_table_allowlist ==
-             std::vector<std::string>{"benchbase.usertable"} &&
-         manifest.transaction_marker_table == "benchbase.session_txn" &&
-         manifest.control_table_allowlist ==
-             std::vector<std::string>{"benchbase.checker_run_fence"};
-}
-
 struct ManifestEvidence {
   RunManifest manifest;
   std::string stream_id;
@@ -938,11 +929,6 @@ readManifest(redisContext *context, const Options &options,
   if (manifest.run_id != options.run_id) {
     throw MonitorError(blackbox::MonitorErrorCode::RunIdMismatch,
                        "RunManifest belongs to another run");
-  }
-  if (!supportedManifest(manifest)) {
-    throw MonitorError(
-        blackbox::MonitorErrorCode::UnsupportedTransaction,
-        "RunManifest names an unsupported application/control table layout");
   }
   return ManifestEvidence{.manifest = std::move(manifest),
                           .stream_id = std::move(first->stream_id)};
@@ -1115,14 +1101,6 @@ int run(const Options &options) {
   std::optional<RunController> controller_storage;
   std::unique_ptr<BlockingRedisReader> reader_storage;
   try {
-    assembler_storage.emplace(DebeziumAssemblerConfig{
-        .run_id = manifest.run_id,
-        .backend_source_id = manifest.backend_source_id,
-        .debezium_version = "3.6.1.Final",
-        .application_tables = manifest.application_table_allowlist,
-        .transaction_marker_table = manifest.transaction_marker_table,
-        .run_fence_table = manifest.control_table_allowlist.front(),
-    });
     blackbox::RunControllerConfig controller_config;
     controller_config.processing_mode = options.processing_mode;
     controller_config.joiner_limits.max_pending_client_bytes =
@@ -1131,6 +1109,18 @@ int run(const Options &options) {
         options.max_retained_identity_bytes;
     controller_storage.emplace(manifest, std::move(controller_config));
     controller_storage->setLastClientStreamId(manifest_evidence.stream_id);
+    assembler_storage.emplace(DebeziumAssemblerConfig{
+        .run_id = manifest.run_id,
+        .backend_source_id = manifest.backend_source_id,
+        .debezium_version = "3.6.1.Final",
+        .backend_adapter =
+            &blackbox::BackendAdapterRegistry::require(manifest.backend),
+        .benchmark_adapter =
+            &blackbox::BenchmarkAdapterRegistry::require(manifest.benchmark),
+        .application_tables = manifest.application_table_allowlist,
+        .transaction_marker_table = manifest.transaction_marker_table,
+        .run_fence_table = manifest.control_table_allowlist.front(),
+    });
     reader_storage = std::make_unique<BlockingRedisReader>(
         reader_context.get(),
         std::vector<RedisStreamSpec>{

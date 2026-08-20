@@ -1,5 +1,8 @@
 #include "blackbox/run_controller.h"
 
+#include "blackbox/backend_adapter.h"
+#include "blackbox/benchmark_adapter.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -93,20 +96,38 @@ sortedStrings(std::vector<std::string> values) {
   return values;
 }
 
+[[nodiscard]] const BenchmarkAdapter &
+validatedBenchmarkAdapter(const RunManifest &manifest) {
+  (void)BackendAdapterRegistry::require(manifest.backend);
+  if (manifest.transaction_marker_table != "benchbase.session_txn" ||
+      manifest.control_table_allowlist !=
+          std::vector<std::string>{"benchbase.checker_run_fence"} ||
+      manifest.result_scope != "point_transaction_soww") {
+    throw MonitorError(
+        MonitorErrorCode::ConfigInvalid,
+        "RunManifest backend/control/result contract is unsupported");
+  }
+  const auto &adapter = BenchmarkAdapterRegistry::require(manifest.benchmark);
+  adapter.validateRunConfiguration(manifest.declared_isolation,
+                                   manifest.application_table_allowlist, true);
+  return adapter;
+}
+
 } // namespace
 
 class RunController::Impl final {
 public:
   Impl(RunManifest manifest, RunControllerConfig config)
       : manifest_(std::move(manifest)), config_(std::move(config)),
+        benchmark_adapter_(validatedBenchmarkAdapter(manifest_)),
         record_parser_(config_.record_parser_limits),
         client_parser_(manifest_.run_id, manifest_.expected_session_ids,
-                       manifest_.application_table_allowlist,
-                       config_.client_parser_limits),
+                       benchmark_adapter_, config_.client_parser_limits),
         joiner_(TransactionJoinerConfig{
             .run_id = manifest_.run_id,
             .expected_session_ids = manifest_.expected_session_ids,
             .application_tables = manifest_.application_table_allowlist,
+            .benchmark_adapter = &benchmark_adapter_,
             .client_parser_limits = config_.client_parser_limits,
             .limits = config_.joiner_limits,
             .execute_consistency_check =
@@ -924,6 +945,7 @@ private:
 
   RunManifest manifest_;
   RunControllerConfig config_;
+  const BenchmarkAdapter &benchmark_adapter_;
   ProtocolRecordParser record_parser_;
   ClientTxnParser client_parser_;
   TransactionJoiner joiner_;

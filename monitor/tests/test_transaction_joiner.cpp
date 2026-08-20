@@ -55,6 +55,7 @@ config(const TransactionJoinerLimits limits = {}) {
       .expected_session_ids = {std::string(session_one),
                                std::string(session_two)},
       .application_tables = {"benchbase.usertable"},
+      .benchmark_adapter = &blackbox::BenchmarkAdapterRegistry::require("ycsb"),
       .client_parser_limits = {},
       .limits = limits,
   };

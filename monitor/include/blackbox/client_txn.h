@@ -1,6 +1,7 @@
 #pragma once
 
-#include "blackbox/canonical_ycsb_codec.h"
+#include "blackbox/benchmark_adapter.h"
+#include "blackbox/canonical_row_codec.h"
 #include "blackbox/cdc_types.h"
 #include "blackbox/monitor_error.h"
 
@@ -61,7 +62,7 @@ class ClientTxnParser final {
 public:
   ClientTxnParser(std::string run_id,
                   std::vector<std::string> expected_session_ids,
-                  std::vector<std::string> application_tables,
+                  const BenchmarkAdapter &benchmark_adapter,
                   ClientTxnParserLimits limits = {});
 
   [[nodiscard]] ClientTxn parse(std::string_view payload) const;
@@ -69,7 +70,7 @@ public:
 private:
   std::string run_id_;
   std::unordered_set<std::string> expected_session_ids_;
-  std::unordered_set<std::string> application_tables_;
+  const BenchmarkAdapter *benchmark_adapter_ = nullptr;
   ClientTxnParserLimits limits_;
 };
 

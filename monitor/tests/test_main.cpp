@@ -2,6 +2,8 @@
 
 #include <iostream>
 
+int runBackendAdapterTests();
+int runBenchmarkAdapterTests();
 int runCanonicalYcsbCodecTests();
 int runCheckerAdapterTests();
 int runClientTxnTests();
@@ -12,6 +14,8 @@ int runRunControllerTests();
 int runTransactionJoinerTests();
 
 int main() {
+  runBackendAdapterTests();
+  runBenchmarkAdapterTests();
   runCanonicalYcsbCodecTests();
   runCheckerAdapterTests();
   runClientTxnTests();

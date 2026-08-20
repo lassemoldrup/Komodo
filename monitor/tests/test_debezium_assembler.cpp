@@ -43,6 +43,8 @@ constexpr std::string_view kFixtureRunId =
       .run_id = std::string(kFixtureRunId),
       .backend_source_id = "mariadb-main",
       .debezium_version = "3.6.1.Final",
+      .backend_adapter = &blackbox::BackendAdapterRegistry::require("mariadb"),
+      .benchmark_adapter = &blackbox::BenchmarkAdapterRegistry::require("ycsb"),
       .application_tables = {"benchbase.usertable"},
       .transaction_marker_table = "benchbase.session_txn",
       .run_fence_table = "benchbase.checker_run_fence",
@@ -263,6 +265,50 @@ void checkCapturedStartupSchemaSnapshot() {
   envelope["tableChanges"] = Json::object();
   setEnvelope(malformed, 0U, envelope);
   expectError(std::move(malformed), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto wrong_application_type = captured;
+  envelope = envelopeAt(wrong_application_type, 9U);
+  envelope["tableChanges"][0]["table"]["columns"][0]["typeName"] = "BIGINT";
+  envelope["tableChanges"][0]["table"]["columns"][0]["typeExpression"] =
+      "BIGINT";
+  setEnvelope(wrong_application_type, 9U, envelope);
+  expectError(std::move(wrong_application_type), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto wrong_application_nullability = captured;
+  envelope = envelopeAt(wrong_application_nullability, 9U);
+  envelope["tableChanges"][0]["table"]["columns"][1]["optional"] = false;
+  setEnvelope(wrong_application_nullability, 9U, envelope);
+  expectError(std::move(wrong_application_nullability),
+              CdcErrorCode::DdlObserved, assemblerConfig(), false);
+
+  auto wrong_application_key = captured;
+  envelope = envelopeAt(wrong_application_key, 9U);
+  envelope["tableChanges"][0]["table"]["primaryKeyColumnNames"] =
+      Json::array({"field1"});
+  setEnvelope(wrong_application_key, 9U, envelope);
+  expectError(std::move(wrong_application_key), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto wrong_application_order = captured;
+  envelope = envelopeAt(wrong_application_order, 9U);
+  std::swap(envelope["tableChanges"][0]["table"]["columns"][0],
+            envelope["tableChanges"][0]["table"]["columns"][1]);
+  setEnvelope(wrong_application_order, 9U, envelope);
+  expectError(std::move(wrong_application_order), CdcErrorCode::DdlObserved,
+              assemblerConfig(), false);
+
+  auto wrong_application_collation = captured;
+  envelope = envelopeAt(wrong_application_collation, 9U);
+  auto ddl = envelope["ddl"].get<std::string>();
+  const auto collation = ddl.find("utf8mb4_bin");
+  BLACKBOX_REQUIRE(collation != std::string::npos);
+  ddl.replace(collation, std::string_view("utf8mb4_bin").size(),
+              "utf8mb4_general_ci");
+  envelope["ddl"] = std::move(ddl);
+  setEnvelope(wrong_application_collation, 9U, envelope);
+  expectError(std::move(wrong_application_collation), CdcErrorCode::DdlObserved,
               assemblerConfig(), false);
 
   auto incomplete = captured;

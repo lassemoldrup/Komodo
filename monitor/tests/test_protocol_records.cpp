@@ -125,6 +125,30 @@ void testManifestValidationAndBounds() {
   auto manifest = exampleJson("run-manifest.json");
 
   {
+    auto tpcc = manifest;
+    tpcc["benchmark"] = "tpcc";
+    BLACKBOX_CHECK(parser.parseRunManifest(tpcc.dump()).benchmark == "tpcc");
+  }
+  {
+    auto future = manifest;
+    future["benchmark"] = "FutureAdapter_1";
+    BLACKBOX_CHECK(parser.parseRunManifest(future.dump()).benchmark ==
+                   "FutureAdapter_1");
+  }
+  for (const auto invalid_name : {"", "1tpcc", "tpcc-adapter"}) {
+    auto invalid = manifest;
+    invalid["benchmark"] = invalid_name;
+    expectError([&] { (void)parser.parseRunManifest(invalid.dump()); },
+                MonitorErrorCode::ClientRecordMalformed);
+  }
+  {
+    auto invalid = manifest;
+    invalid["benchmark"] = std::string(65U, 'a');
+    expectError([&] { (void)parser.parseRunManifest(invalid.dump()); },
+                MonitorErrorCode::ClientRecordMalformed);
+  }
+
+  {
     auto invalid = manifest;
     invalid["backend"] = "postgres";
     expectError([&] { (void)parser.parseRunManifest(invalid.dump()); },
@@ -261,6 +285,12 @@ void testSessionDoneValidation() {
 void testFailureAndDiscriminatorValidation() {
   ProtocolRecordParser parser;
   const auto failed = exampleJson("run-failed.json");
+  {
+    auto session_contract = failed;
+    session_contract["reason_code"] = "SESSION_CONTRACT_MISMATCH";
+    BLACKBOX_CHECK(parser.parseRunFailed(session_contract.dump()).reason_code ==
+                   "SESSION_CONTRACT_MISMATCH");
+  }
   {
     auto invalid = failed;
     invalid["reason_code"] = "PASS";

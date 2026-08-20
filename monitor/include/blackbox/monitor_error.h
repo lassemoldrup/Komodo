@@ -7,8 +7,13 @@
 namespace blackbox {
 
 enum class MonitorErrorCode {
+  ConfigInvalid,
+  BranchContractMismatch,
+  IsolationMismatch,
+  SessionContractMismatch,
   UnsupportedTransaction,
   UnsupportedReadSource,
+  UnexpectedTable,
   CanonicalEncodingFailed,
   ClientRecordMalformed,
   ClientReadCountMismatch,

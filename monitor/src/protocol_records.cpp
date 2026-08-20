@@ -1,5 +1,7 @@
 #include "blackbox/protocol_records.h"
 
+#include "blackbox/benchmark_adapter.h"
+
 #include "strict_json.h"
 
 #include <openssl/evp.h>
@@ -446,6 +448,7 @@ parseStringArray(const Json &value, const std::string_view label,
       "CONFIG_INVALID",
       "BRANCH_CONTRACT_MISMATCH",
       "ISOLATION_MISMATCH",
+      "SESSION_CONTRACT_MISMATCH",
       "UNSUPPORTED_TRANSACTION",
       "UNSUPPORTED_READ_SOURCE",
       "UNEXPECTED_TABLE",
@@ -674,8 +677,8 @@ ProtocolRecordParser::parseRunManifest(const std::string_view payload) const {
     }
     auto benchmark = stringValue(member(record, "benchmark", "RunManifest"),
                                  "RunManifest.benchmark");
-    if (benchmark != "ycsb") {
-      malformed("RunManifest.benchmark is unsupported");
+    if (!isProtocolName(benchmark)) {
+      malformed("RunManifest.benchmark is not a bounded protocol name");
     }
     auto sessions =
         parseStringArray(member(record, "expected_session_ids", "RunManifest"),

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "blackbox/backend_adapter.h"
+#include "blackbox/benchmark_adapter.h"
 #include "blackbox/cdc_error.h"
 #include "blackbox/cdc_types.h"
 
@@ -22,6 +24,8 @@ struct DebeziumAssemblerConfig {
   std::string run_id;
   std::string backend_source_id;
   std::string debezium_version = "3.6.1.Final";
+  const BackendAdapter *backend_adapter = nullptr;
+  const BenchmarkAdapter *benchmark_adapter = nullptr;
   std::vector<std::string> application_tables;
   std::string transaction_marker_table;
   std::string run_fence_table;
@@ -67,7 +71,8 @@ public:
   accept(const CdcStreamRecord &record);
 
   // Declare end-of-input. An active BEGIN without END is fatal. Run lifecycle
-  // closure and END_FENCE reconciliation remain the controller's responsibility.
+  // closure and END_FENCE reconciliation remain the controller's
+  // responsibility.
   void finish();
 
   [[nodiscard]] bool failed() const noexcept;

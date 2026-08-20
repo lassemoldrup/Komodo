@@ -423,6 +423,11 @@ private:
     if (config_.debezium_version.empty()) {
       throw std::invalid_argument("assembler Debezium version is empty");
     }
+    if (config_.backend_adapter == nullptr ||
+        config_.benchmark_adapter == nullptr) {
+      throw std::invalid_argument(
+          "assembler backend/benchmark adapter is missing");
+    }
     if (config_.application_tables.empty()) {
       throw std::invalid_argument(
           "assembler application table allowlist is empty");
@@ -444,6 +449,8 @@ private:
       }
       application_tables_.emplace(name, *parsed);
     }
+    config_.benchmark_adapter->validateApplicationTableRoster(
+        config_.application_tables);
 
     const auto marker = parseQualifiedTable(config_.transaction_marker_table);
     const auto fence = parseQualifiedTable(config_.run_fence_table);
@@ -621,6 +628,86 @@ private:
     }
   }
 
+  [[nodiscard]] std::optional<std::string>
+  startupNullableString(const Json &value) const {
+    if (value.is_null()) {
+      return std::nullopt;
+    }
+    return value.get<std::string>();
+  }
+
+  [[nodiscard]] std::optional<std::uint64_t>
+  startupNullableUint(const Json &value, const std::string_view label) const {
+    if (value.is_null()) {
+      return std::nullopt;
+    }
+    return uintValue(value, label, std::numeric_limits<std::uint64_t>::max(),
+                     CdcErrorCode::DdlObserved);
+  }
+
+  [[nodiscard]] StartupSchemaColumn
+  decodeStartupSchemaColumn(const Json &column) const {
+    constexpr auto code = CdcErrorCode::DdlObserved;
+    return StartupSchemaColumn{
+        .name =
+            stringValue(member(column, "name", "startup schema column", code),
+                        "startup schema column.name", code),
+        .type_name = stringValue(
+            member(column, "typeName", "startup schema column", code),
+            "startup schema column.typeName", code),
+        .type_expression = stringValue(
+            member(column, "typeExpression", "startup schema column", code),
+            "startup schema column.typeExpression", code),
+        .length = startupNullableUint(
+            member(column, "length", "startup schema column", code),
+            "startup schema column.length"),
+        .scale = startupNullableUint(
+            member(column, "scale", "startup schema column", code),
+            "startup schema column.scale"),
+        .charset_name = startupNullableString(
+            member(column, "charsetName", "startup schema column", code)),
+        .position =
+            uintValue(member(column, "position", "startup schema column", code),
+                      "startup schema column.position",
+                      std::numeric_limits<std::uint32_t>::max(), code),
+        .nullable = member(column, "optional", "startup schema column", code)
+                        .get<bool>(),
+        .auto_incremented =
+            member(column, "autoIncremented", "startup schema column", code)
+                .get<bool>(),
+        .generated = member(column, "generated", "startup schema column", code)
+                         .get<bool>(),
+    };
+  }
+
+  [[nodiscard]] StartupTableSchema
+  decodeStartupTableSchema(const QualifiedTable &qualified_table,
+                           const std::string &ddl, const Json &table) const {
+    constexpr auto code = CdcErrorCode::DdlObserved;
+    StartupTableSchema result{
+        .name = qualified_table.full_name,
+        .ddl = ddl,
+        .default_charset_name = startupNullableString(
+            member(table, "defaultCharsetName", "startup schema table", code)),
+        .primary_key_columns = {},
+        .columns = {},
+    };
+    const auto &primary_keys =
+        member(table, "primaryKeyColumnNames", "startup schema table", code);
+    result.primary_key_columns.reserve(primary_keys.size());
+    for (const auto &primary_key : primary_keys) {
+      result.primary_key_columns.push_back(
+          stringValue(primary_key, "startup schema primary-key name", code));
+    }
+    const auto &columns =
+        member(table, "columns", "startup schema table", code);
+    result.columns.reserve(columns.size());
+    for (const auto &column : columns) {
+      result.columns.push_back(decodeStartupSchemaColumn(column));
+    }
+    return result;
+  }
+
   void validateSnapshotTableDefinition(const Json &table) const {
     constexpr auto code = CdcErrorCode::DdlObserved;
     requireExactKeys(
@@ -781,6 +868,15 @@ private:
       fail(code, "startup CREATE TABLE record is out of order");
     }
     validateSnapshotTableDefinition(table);
+    if (application_tables_.contains(source_qualified.full_name)) {
+      try {
+        config_.benchmark_adapter->validateStartupTableSchema(
+            decodeStartupTableSchema(source_qualified, ddl, table),
+            config_.backend_adapter->applicationTableRequirements());
+      } catch (const AdapterSchemaError &error) {
+        fail(code, error.what());
+      }
+    }
     if (startup_schema_create_index_ >=
             startup_schema_dropped_table_ids_.size() ||
         identifier !=

@@ -145,6 +145,8 @@ int run(const Options &options) {
       .run_id = options.run_id,
       .backend_source_id = "mariadb-main",
       .debezium_version = "3.6.1.Final",
+      .backend_adapter = &blackbox::BackendAdapterRegistry::require("mariadb"),
+      .benchmark_adapter = &blackbox::BenchmarkAdapterRegistry::require("ycsb"),
       .application_tables = {"benchbase.usertable"},
       .transaction_marker_table = "benchbase.session_txn",
       .run_fence_table = "benchbase.checker_run_fence",

@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -27,6 +28,8 @@ using Json = nlohmann::json;
 struct Options {
   std::string input;
   std::string run_id;
+  std::string backend = "mariadb";
+  std::string benchmark = "ycsb";
   std::string backend_source_id = "mariadb-main";
 };
 
@@ -43,6 +46,10 @@ struct Options {
       options.input = value;
     } else if (argument == "--run-id") {
       options.run_id = value;
+    } else if (argument == "--backend") {
+      options.backend = value;
+    } else if (argument == "--benchmark") {
+      options.benchmark = value;
     } else if (argument == "--backend-source-id") {
       options.backend_source_id = value;
     } else {
@@ -121,11 +128,22 @@ struct Options {
 }
 
 int run(const Options &options) {
+  const auto &backend =
+      blackbox::BackendAdapterRegistry::require(options.backend);
+  const auto &benchmark =
+      blackbox::BenchmarkAdapterRegistry::require(options.benchmark);
+  std::vector<std::string> application_tables;
+  application_tables.reserve(benchmark.tables().size());
+  for (const auto &table : benchmark.tables()) {
+    application_tables.emplace_back(table.name);
+  }
   DebeziumTxnAssembler assembler(DebeziumAssemblerConfig{
       .run_id = options.run_id,
       .backend_source_id = options.backend_source_id,
       .debezium_version = "3.6.1.Final",
-      .application_tables = {"benchbase.usertable"},
+      .backend_adapter = &backend,
+      .benchmark_adapter = &benchmark,
+      .application_tables = std::move(application_tables),
       .transaction_marker_table = "benchbase.session_txn",
       .run_fence_table = "benchbase.checker_run_fence",
   });

@@ -33,10 +33,6 @@ constexpr std::array<char, 26> read_digest_domain = {
   throw MonitorError(MonitorErrorCode::ClientRecordMalformed, message);
 }
 
-[[noreturn]] void canonicalFailure(const std::string &message) {
-  throw MonitorError(MonitorErrorCode::CanonicalEncodingFailed, message);
-}
-
 void requireObject(const Json &value, const std::string_view label) {
   if (!value.is_object()) {
     malformed(std::string(label) + " is not an object");
@@ -269,159 +265,6 @@ void validateIntegralNumberLexemes(const std::string_view input) {
   }
 }
 
-[[nodiscard]] bool isCanonicalIdentifier(const std::string_view value) {
-  if (value.empty() || value.size() > 64U || value.front() < 'a' ||
-      value.front() > 'z') {
-    return false;
-  }
-  return std::all_of(value.begin() + 1, value.end(), [](const char character) {
-    return (character >= 'a' && character <= 'z') ||
-           (character >= '0' && character <= '9') || character == '_';
-  });
-}
-
-[[nodiscard]] bool isCanonicalTable(const std::string_view value) {
-  const auto separator = value.find('.');
-  return separator != std::string_view::npos && separator != 0U &&
-         separator + 1U < value.size() &&
-         value.find('.', separator + 1U) == std::string_view::npos &&
-         isCanonicalIdentifier(value.substr(0U, separator)) &&
-         isCanonicalIdentifier(value.substr(separator + 1U));
-}
-
-[[nodiscard]] std::uint32_t readU32(const std::span<const std::byte> bytes,
-                                    std::size_t &cursor,
-                                    const std::string_view label) {
-  if (cursor > bytes.size() || bytes.size() - cursor < 4U) {
-    canonicalFailure(std::string(label) + " has truncated U32 framing");
-  }
-  const auto byte = [&bytes](const std::size_t index) {
-    return std::to_integer<std::uint32_t>(bytes[index]);
-  };
-  const auto result = (byte(cursor) << 24U) | (byte(cursor + 1U) << 16U) |
-                      (byte(cursor + 2U) << 8U) | byte(cursor + 3U);
-  cursor += 4U;
-  return result;
-}
-
-[[nodiscard]] std::string readIdentifier(const std::span<const std::byte> bytes,
-                                         std::size_t &cursor,
-                                         const std::string_view label) {
-  const auto encoded_size = readU32(bytes, cursor, label);
-  const auto size = static_cast<std::size_t>(encoded_size);
-  if (cursor > bytes.size() || size > bytes.size() - cursor) {
-    canonicalFailure(std::string(label) + " has truncated LP framing");
-  }
-  std::string result;
-  result.reserve(size);
-  for (std::size_t index = 0; index < size; ++index) {
-    result.push_back(static_cast<char>(
-        std::to_integer<unsigned char>(bytes[cursor + index])));
-  }
-  cursor += size;
-  if (!isCanonicalIdentifier(result)) {
-    canonicalFailure(std::string(label) + " is not a canonical identifier");
-  }
-  return result;
-}
-
-[[nodiscard]] bool validUtf8(const std::span<const std::byte> bytes) {
-  const auto value = [&bytes](const std::size_t index) {
-    return std::to_integer<unsigned int>(bytes[index]);
-  };
-  const auto continuation = [&value](const std::size_t index) {
-    const auto current = value(index);
-    return current >= 0x80U && current <= 0xbfU;
-  };
-  for (std::size_t index = 0; index < bytes.size();) {
-    const auto first = value(index);
-    if (first <= 0x7fU) {
-      ++index;
-      continue;
-    }
-    if (first >= 0xc2U && first <= 0xdfU) {
-      if (index + 1U >= bytes.size() || !continuation(index + 1U)) {
-        return false;
-      }
-      index += 2U;
-      continue;
-    }
-    if (first >= 0xe0U && first <= 0xefU) {
-      if (index + 2U >= bytes.size() || !continuation(index + 1U) ||
-          !continuation(index + 2U)) {
-        return false;
-      }
-      const auto second = value(index + 1U);
-      if ((first == 0xe0U && second < 0xa0U) ||
-          (first == 0xedU && second > 0x9fU)) {
-        return false;
-      }
-      index += 3U;
-      continue;
-    }
-    if (first >= 0xf0U && first <= 0xf4U) {
-      if (index + 3U >= bytes.size() || !continuation(index + 1U) ||
-          !continuation(index + 2U) || !continuation(index + 3U)) {
-        return false;
-      }
-      const auto second = value(index + 1U);
-      if ((first == 0xf0U && second < 0x90U) ||
-          (first == 0xf4U && second > 0x8fU)) {
-        return false;
-      }
-      index += 4U;
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-
-void validateCanonicalKey(
-    const std::span<const std::byte> key,
-    const std::unordered_set<std::string> &application_tables) {
-  std::size_t cursor = 0;
-  const auto schema = readIdentifier(key, cursor, "ClientTxn read key schema");
-  const auto table = readIdentifier(key, cursor, "ClientTxn read key table");
-  if (cursor > key.size() || key.size() - cursor != 4U) {
-    canonicalFailure("ClientTxn read key does not end in exactly one I32");
-  }
-  if (!application_tables.contains(schema + "." + table)) {
-    canonicalFailure("ClientTxn read key names an unallowlisted table");
-  }
-}
-
-void validateCanonicalValue(const std::span<const std::byte> value) {
-  std::size_t cursor = 0;
-  for (std::size_t field = 0; field < CanonicalYcsbCodec::field_count;
-       ++field) {
-    if (cursor >= value.size()) {
-      canonicalFailure("ClientTxn present value has fewer than ten fields");
-    }
-    const auto tag = std::to_integer<unsigned int>(value[cursor]);
-    ++cursor;
-    if (tag == 0U) {
-      continue;
-    }
-    if (tag != 1U) {
-      canonicalFailure("ClientTxn present value contains an invalid field tag");
-    }
-    const auto encoded_size =
-        readU32(value, cursor, "ClientTxn present value field");
-    const auto size = static_cast<std::size_t>(encoded_size);
-    if (cursor > value.size() || size > value.size() - cursor) {
-      canonicalFailure("ClientTxn present value contains a truncated field");
-    }
-    if (!validUtf8(value.subspan(cursor, size))) {
-      canonicalFailure("ClientTxn present value contains malformed UTF-8");
-    }
-    cursor += size;
-  }
-  if (cursor != value.size()) {
-    canonicalFailure("ClientTxn present value has trailing bytes");
-  }
-}
-
 [[nodiscard]] int base64Value(const char character) noexcept {
   if (character >= 'A' && character <= 'Z') {
     return character - 'A';
@@ -582,14 +425,6 @@ void updateLengthPrefixed(DigestContext &digest,
          });
 }
 
-[[nodiscard]] bool isSupportedTransaction(const std::string_view value) {
-  constexpr std::array<std::string_view, 5> supported = {
-      "ycsb_insert", "ycsb_read", "ycsb_update", "ycsb_delete",
-      "si_fractured_read_probe"};
-  return std::find(supported.begin(), supported.end(), value) !=
-         supported.end();
-}
-
 } // namespace
 
 std::string computeClientReadDigest(const std::span<const ClientRead> reads) {
@@ -652,9 +487,10 @@ std::string computeClientReadDigest(const std::span<const ClientRead> reads) {
 
 ClientTxnParser::ClientTxnParser(std::string run_id,
                                  std::vector<std::string> expected_session_ids,
-                                 std::vector<std::string> application_tables,
+                                 const BenchmarkAdapter &benchmark_adapter,
                                  const ClientTxnParserLimits limits)
-    : run_id_(std::move(run_id)), limits_(limits) {
+    : run_id_(std::move(run_id)), benchmark_adapter_(&benchmark_adapter),
+      limits_(limits) {
   if (!isLowerUuid(run_id_)) {
     throw std::invalid_argument("client parser run_id is not a lowercase UUID");
   }
@@ -667,16 +503,6 @@ ClientTxnParser::ClientTxnParser(std::string run_id,
         !expected_session_ids_.insert(std::move(session_id)).second) {
       throw std::invalid_argument(
           "client parser expected-session roster is invalid or duplicated");
-    }
-  }
-  if (application_tables.empty()) {
-    throw std::invalid_argument("client parser application allowlist is empty");
-  }
-  for (auto &table : application_tables) {
-    if (!isCanonicalTable(table) ||
-        !application_tables_.insert(std::move(table)).second) {
-      throw std::invalid_argument(
-          "client parser application allowlist is invalid or duplicated");
     }
   }
   if (limits_.max_payload_bytes == 0U || limits_.max_reads == 0U ||
@@ -743,9 +569,13 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
     }
     const auto txn_type = stringValue(member(record, "txn_type", "ClientTxn"),
                                       "ClientTxn.txn_type");
-    if (!isSupportedTransaction(txn_type)) {
+    if (!isProtocolName(txn_type)) {
+      malformed("ClientTxn.txn_type is not a bounded protocol name");
+    }
+    if (!benchmark_adapter_->supportsTransaction(txn_type)) {
       throw MonitorError(MonitorErrorCode::UnsupportedTransaction,
-                         "ClientTxn transaction type is unsupported");
+                         "ClientTxn transaction type is not owned by the "
+                         "selected benchmark adapter");
     }
     if (stringValue(member(record, "correlation_kind", "ClientTxn"),
                     "ClientTxn.correlation_kind") != "session_txn") {
@@ -836,7 +666,6 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
       if (key.empty()) {
         malformed("ClientTxn read key is empty");
       }
-      validateCanonicalKey(key, application_tables_);
       decoded_bytes += key.size();
       std::optional<CanonicalBytes> value;
       if (state_text == "present") {
@@ -847,9 +676,12 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
                         "ClientTxn read.value_bytes_base64"),
             "ClientTxn read value",
             std::min(limits_.max_value_bytes, remaining_before_value));
-        validateCanonicalValue(*value);
         decoded_bytes += value->size();
       }
+      benchmark_adapter_->validateClientRead(
+          key, value.has_value()
+                   ? std::optional<std::span<const std::byte>>{*value}
+                   : std::nullopt);
       const auto source_text = stringValue(
           member(read, "source", "ClientTxn read"), "ClientTxn read.source");
       ClientReadSource source;

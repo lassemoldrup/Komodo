@@ -347,6 +347,15 @@ void updateLengthPrefixed(DigestContext &digest,
          });
 }
 
+[[nodiscard]] const BenchmarkAdapter &
+configuredBenchmarkAdapter(const TransactionJoinerConfig &config) {
+  if (config.benchmark_adapter == nullptr) {
+    throw std::invalid_argument(
+        "transaction joiner benchmark adapter is missing");
+  }
+  return *config.benchmark_adapter;
+}
+
 } // namespace
 
 class TransactionJoiner::Impl final {
@@ -354,7 +363,8 @@ public:
   explicit Impl(TransactionJoinerConfig config)
       : config_(std::move(config)),
         parser_(config_.run_id, config_.expected_session_ids,
-                config_.application_tables, config_.client_parser_limits) {
+                configuredBenchmarkAdapter(config_),
+                config_.client_parser_limits) {
     validateConfig();
     monotonic_clock_nanoseconds_ = config_.monotonic_clock_nanoseconds;
     if (!monotonic_clock_nanoseconds_) {

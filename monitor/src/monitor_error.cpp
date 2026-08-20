@@ -7,10 +7,20 @@ namespace blackbox {
 
 std::string_view toString(const MonitorErrorCode code) noexcept {
   switch (code) {
+  case MonitorErrorCode::ConfigInvalid:
+    return "CONFIG_INVALID";
+  case MonitorErrorCode::BranchContractMismatch:
+    return "BRANCH_CONTRACT_MISMATCH";
+  case MonitorErrorCode::IsolationMismatch:
+    return "ISOLATION_MISMATCH";
+  case MonitorErrorCode::SessionContractMismatch:
+    return "SESSION_CONTRACT_MISMATCH";
   case MonitorErrorCode::UnsupportedTransaction:
     return "UNSUPPORTED_TRANSACTION";
   case MonitorErrorCode::UnsupportedReadSource:
     return "UNSUPPORTED_READ_SOURCE";
+  case MonitorErrorCode::UnexpectedTable:
+    return "UNEXPECTED_TABLE";
   case MonitorErrorCode::CanonicalEncodingFailed:
     return "CANONICAL_ENCODING_FAILED";
   case MonitorErrorCode::ClientRecordMalformed:

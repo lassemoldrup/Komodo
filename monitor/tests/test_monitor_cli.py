@@ -48,12 +48,32 @@ def manifest_payload():
     )
 
 
-def manifest_xread_reply():
+def manifest_xread_reply(payload=None):
     stream = f"blackbox:client:{RUN_ID}"
+    if payload is None:
+        payload = manifest_payload()
     entry = resp_array(
-        [resp_bulk("1-0"), resp_array([resp_bulk("payload"), resp_bulk(manifest_payload())])]
+        [resp_bulk("1-0"), resp_array([resp_bulk("payload"), resp_bulk(payload)])]
     )
     return resp_array([resp_array([resp_bulk(stream), resp_array([entry])])])
+
+
+def tpcc_manifest_payload():
+    manifest = json.loads(manifest_payload())
+    manifest["benchmark"] = "tpcc"
+    manifest["expected_session_ids"] = ["tpcc/worker/1"]
+    manifest["application_table_allowlist"] = [
+        "benchbase.warehouse",
+        "benchbase.item",
+        "benchbase.stock",
+        "benchbase.district",
+        "benchbase.customer",
+        "benchbase.history",
+        "benchbase.oorder",
+        "benchbase.new_order",
+        "benchbase.order_line",
+    ]
+    return json.dumps(manifest, separators=(",", ":"))
 
 
 def read_resp_command(connection):
@@ -345,6 +365,29 @@ def check_status_timeout(executable):
     print("status XADD: silent peer bounded by the operation timeout cap")
 
 
+def check_incomplete_adapter_is_rejected(executable):
+    xreads = 0
+
+    def handler(_connection_id, command):
+        nonlocal xreads
+        if command[0] == b"EVAL":
+            return resp_integer(1)
+        if command[0] == b"XREAD":
+            xreads += 1
+            assert xreads == 1
+            return manifest_xread_reply(tpcc_manifest_payload())
+        if command[0] == b"XADD":
+            return resp_bulk("1-0")
+        raise AssertionError(f"unexpected Redis command: {command!r}")
+
+    with ScriptedRedis(handler) as server:
+        result, _ = run_monitor(executable, server.port, 1000)
+        require_invalid(result, "BRANCH_CONTRACT_MISMATCH")
+        assert xreads == 1
+        assert any(command[0] == b"XADD" for command in server.commands)
+    print("adapter capability: incomplete TPC-C runtime rejected before CDC admission")
+
+
 def assert_no_audited_result(value):
     if isinstance(value, dict):
         assert "outcome" not in value, value
@@ -481,6 +524,7 @@ def main():
     check_manifest_timeout(args.monitor)
     check_main_read_timeout(args.monitor)
     check_status_timeout(args.monitor)
+    check_incomplete_adapter_is_rejected(args.monitor)
     check_join_only_requires_metrics(args.monitor)
     check_join_only_early_failure_artifact(args.monitor)
     check_joiner_byte_limit_options(args.monitor)

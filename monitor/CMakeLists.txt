@@ -29,6 +29,8 @@ find_package(nlohmann_json 3.11.3 EXACT CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 add_library(blackbox_monitor
+  src/backend_adapter.cpp
+  src/benchmark_adapter.cpp
   src/canonical_ycsb_codec.cpp
   src/cdc_error.cpp
   src/cdc_types.cpp
@@ -117,6 +119,8 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
   add_executable(blackbox_monitor_tests
+    tests/test_backend_adapter.cpp
+    tests/test_benchmark_adapter.cpp
     tests/test_canonical_ycsb_codec.cpp
     tests/test_checker_adapter.cpp
     tests/test_client_txn.cpp
@@ -139,6 +143,8 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   target_compile_definitions(blackbox_monitor_tests
     PRIVATE
       BLACKBOX_PROTOCOL_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/golden"
+      BLACKBOX_PROTOCOL_ADAPTER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/adapters"
+      BLACKBOX_PROTOCOL_BACKEND_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/backends"
       BLACKBOX_PROTOCOL_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../protocol/examples"
       BLACKBOX_CDC_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
   )
@@ -202,6 +208,10 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_full_lifecycle.json
             --run-id
             084cc5a1-3cbe-4fef-bb5c-43559a1c13a0
+            --backend
+            mariadb
+            --benchmark
+            ycsb
   )
   set_tests_properties(blackbox_cdc_replay_fixture PROPERTIES
     FIXTURES_REQUIRED captured_mariadb_full_lifecycle_fixture

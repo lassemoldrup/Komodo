@@ -1,6 +1,6 @@
 #pragma once
 
-#include "blackbox/canonical_ycsb_codec.h"
+#include "blackbox/canonical_row_codec.h"
 
 #include <cstdint>
 #include <optional>
