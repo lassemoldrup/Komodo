@@ -181,8 +181,8 @@ class ProtocolArtifactAlignmentTest(unittest.TestCase):
         )
         self.assertEqual(tables["benchbase.new_order"]["value_columns"], [])
 
-    def test_tpcc_vector_inventory_covers_every_table_and_boundary(self) -> None:
-        VERIFY_PROTOCOL.verify_tpcc_vector_inventory(self.contracts, self.schemas)
+    def test_tpcc_executable_vectors_cover_every_table_and_boundary(self) -> None:
+        VERIFY_PROTOCOL.verify_tpcc_executable_vectors(self.contracts, self.schemas)
 
     def test_tpcc_adapter_record_examples_are_contract_validated(self) -> None:
         self.assertEqual(

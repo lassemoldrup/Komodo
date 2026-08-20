@@ -594,6 +594,14 @@ if grep -q '^fence:LOAD_FINISHED$' "$CASE_LOG"; then
   fail 'loader SQL/declaration mismatch advanced to LOAD_FINISHED'
 fi
 
+run_case canonical_scan_count_mismatch 0 0 0 0 0 0 '' audited 0 '' '' ycsb 128 1 1
+[[ $CASE_STATUS == 1 ]] || fail 'canonical scan/count mismatch unexpectedly succeeded'
+grep -q '^publish:run_failed$' "$CASE_LOG" ||
+  fail 'canonical scan/count mismatch lacked a failure record'
+if grep -q '^fence:LOAD_FINISHED$' "$CASE_LOG"; then
+  fail 'canonical scan/count mismatch advanced to LOAD_FINISHED'
+fi
+
 run_case tpcc_runtime_gate 0 0 0 0 0 0 '' audited 0 '' '' tpcc
 [[ $CASE_STATUS != 0 ]] || fail 'incomplete TPC-C runtime unexpectedly entered the lifecycle'
 if grep -q '^stack:database$' "$CASE_LOG"; then

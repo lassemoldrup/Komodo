@@ -112,6 +112,12 @@ require_configuration() {
   [[ $BLACKBOX_MONITOR_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_LOADER_BATCH_SIZE =~ ^[1-9][0-9]*$ ]] ||
     blackbox_die "BLACKBOX_LOADER_BATCH_SIZE must be a positive integer"
+  [[ $BLACKBOX_BOOTSTRAP_MAX_ROWS =~ ^[1-9][0-9]*$ ]] ||
+    blackbox_die "BLACKBOX_BOOTSTRAP_MAX_ROWS must be a positive integer"
+  [[ $BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES =~ ^[1-9][0-9]*$ ]] ||
+    blackbox_die "BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES must be a positive integer"
+  [[ $BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES =~ ^[1-9][0-9]*$ ]] ||
+    blackbox_die "BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES must be a positive integer"
   if [[ -n $BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES &&
         ! $BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES =~ ^[1-9][0-9]*$ ]]; then
     blackbox_die \
@@ -182,6 +188,8 @@ require_configuration() {
   export BLACKBOX_RUN_ID_PATH BLACKBOX_BOOTSTRAP_MANIFEST_PATH
   export BLACKBOX_LOADER_VALIDATION_PATH BLACKBOX_LOADER_BATCH_SIZE
   export BLACKBOX_LOADER_SCALE_VALUE BLACKBOX_LOADER_DECLARED_COUNTS_FILE
+  export BLACKBOX_BOOTSTRAP_MAX_ROWS BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES
+  export BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES
   export BENCHBASE_MEASUREMENT_BATCH_SIZE="$BLACKBOX_LOADER_BATCH_SIZE"
   if [[ -n $BLACKBOX_LOADER_SCALE_VALUE ]]; then
     export BENCHBASE_MEASUREMENT_SCALE_FACTOR="$BLACKBOX_LOADER_SCALE_VALUE"
@@ -690,6 +698,16 @@ run_loader_and_close_bootstrap() {
   local manifest
   if ! manifest=$(blackbox_build_bootstrap_manifest "$BOOTSTRAP_SCAN_FILE"); then
     close_failed_run CANONICAL_ENCODING_FAILED "post-loader canonical state encoding failed" 1
+    return 1
+  fi
+  if ! jq -en \
+      --argjson loader "$loader_validation" \
+      --argjson bootstrap "$manifest" '
+        ($loader.observed_table_row_counts | sort_by(.table)) ==
+        ($bootstrap.table_row_counts | sort_by(.table))
+      ' >/dev/null; then
+    close_failed_run BOOTSTRAP_STATE_MISMATCH \
+      "canonical scan counts differ from loader declaration and independent SQL" 1
     return 1
   fi
   if [[ -n $BLACKBOX_BOOTSTRAP_MANIFEST_PATH ]]; then

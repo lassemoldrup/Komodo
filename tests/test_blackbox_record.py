@@ -234,7 +234,14 @@ class BlackboxRecordTest(unittest.TestCase):
             ["NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel"],
         )
         self.assertEqual(len(contract["application_tables"]), 9)
-        self.assertFalse(any(contract["runtime_capabilities"].values()))
+        self.assertEqual(
+            contract["runtime_capabilities"],
+            {
+                "client_trace": False,
+                "cdc_normalization": False,
+                "bootstrap_scan": True,
+            },
+        )
 
     def test_backend_contract_exposes_pinned_mariadb_session(self) -> None:
         result = self.run_tool("backend-contract", "--backend", "mariadb")
@@ -462,7 +469,7 @@ class BlackboxRecordTest(unittest.TestCase):
         )
         self.assertIn("adapter tpcc runtime is incomplete", result.stderr)
 
-    def test_bootstrap_scan_fails_closed_for_incomplete_tpcc_codec(self) -> None:
+    def test_empty_tpcc_bootstrap_uses_full_roster_and_empty_digest(self) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8") as scan:
             result = self.run_tool(
                 "bootstrap-manifest",
@@ -470,15 +477,16 @@ class BlackboxRecordTest(unittest.TestCase):
                 RUN_ID,
                 "--benchmark",
                 "tpcc",
-                "--schema",
-                "benchbase",
-                "--table",
-                "warehouse",
                 "--scan-file",
                 scan.name,
-                expected_status=2,
             )
-        self.assertIn("bootstrap scanner is not implemented", result.stderr)
+        manifest = json.loads(result.stdout)
+        self.assertEqual(len(manifest["table_row_counts"]), 9)
+        self.assertTrue(all(entry["row_count"] == 0 for entry in manifest["table_row_counts"]))
+        self.assertEqual(
+            manifest["canonical_state_digest"],
+            "944dd6136dbad7047e31af3b6419eb6a632d4dea64bec8159e93307163810bc2",
+        )
 
     def test_ycsb_run_manifest_roster_is_adapter_validated(self) -> None:
         result = self.run_tool(

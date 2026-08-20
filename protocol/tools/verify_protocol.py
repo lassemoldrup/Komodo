@@ -21,6 +21,9 @@ except ImportError as error:  # pragma: no cover - exercised by environment setu
         "python3-jsonschema is required; rebuild the canonical development container"
     ) from error
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tpcc_codec import CodecError, TpccCodec, materialize_invalid_vector  # noqa: E402
+
 
 PROTOCOL_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = PROTOCOL_ROOT / "schema"
@@ -62,6 +65,9 @@ TPCC_APPLICATION_TABLES = (
 )
 TPCC_TABLE_CONTRACT_SHA256 = (
     "811786b59371deb6fafd3c7ff535f93df08d5f0667a584e492ab4083771c71de"
+)
+TPCC_LIVE_FIXTURE_SHA256 = (
+    "fa4f72247f42eb5062082a964b118acdbd54a99c991c7ae4aeda99bcc267bb82"
 )
 MARIADB_SQL_MODE = (
     "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,"
@@ -631,8 +637,13 @@ def verify_tpcc_contract(contract: dict[str, Any]) -> None:
         "TPC-C isolation contract is not repeatable read only",
     )
     require(
-        not any(contract["runtime_capabilities"].values()),
-        "TPC-C contract freeze must not advertise unimplemented runtime codecs",
+        contract["runtime_capabilities"]
+        == {
+            "client_trace": False,
+            "cdc_normalization": False,
+            "bootstrap_scan": True,
+        },
+        "TPC-C runtime capabilities differ from implemented boundaries",
     )
     table_contract_bytes = json.dumps(
         contract["tables"],
@@ -805,64 +816,251 @@ def load_backend_contracts(
     return contracts
 
 
-def verify_tpcc_vector_inventory(
+def verify_tpcc_executable_vectors(
     contracts: dict[str, dict[str, Any]], schemas: list[dict[str, Any]]
 ) -> None:
-    path = GOLDEN_ROOT / "tpcc_row_vector_inventory.json"
-    inventory = load_json(path)
-    validator = schema_validator(schemas, "row-vector-inventory.schema.json")
-    verify_document_schema(validator, inventory, path.name)
-    require(inventory["benchmark"] == "tpcc", "TPC-C vector inventory benchmark mismatch")
-    contract = contracts[inventory["benchmark"]]
-    vectors = inventory["required_vectors"]
-    names = [vector["name"] for vector in vectors]
-    require(len(names) == len(set(names)), "TPC-C vector inventory has duplicate names")
-    roster = set(contract["application_tables"])
+    del schemas  # executable goldens are validated by the shared codec, not a shape-only schema
+    path = GOLDEN_ROOT / "tpcc_rows.json"
+    golden = load_json(path)
     require(
-        all(vector["table"] in roster for vector in vectors),
-        "TPC-C vector inventory names an unknown table",
+        isinstance(golden, dict)
+        and set(golden) == {"benchmark", "canonical_schema", "vectors", "invalid_vectors"},
+        "TPC-C executable golden document has wrong fields",
     )
-    coverage_by_table: dict[str, set[str]] = defaultdict(set)
-    all_coverage: set[str] = set()
+    require(golden["benchmark"] == "tpcc", "TPC-C golden benchmark mismatch")
+    contract = contracts[golden["benchmark"]]
+    require(
+        golden["canonical_schema"] == contract["canonical_schema"],
+        "TPC-C golden canonical schema mismatch",
+    )
+    codec = TpccCodec(contract)
+    vectors = golden["vectors"]
+    require(isinstance(vectors, list) and vectors, "TPC-C valid vectors are missing")
+    valid_by_name: dict[str, dict[str, Any]] = {}
+    tables_seen: set[str] = set()
+    all_integer_values: set[int] = set()
+    float_bits: set[str] = set()
+    timestamp_values: set[str] = set()
+    has_short_char = False
+    has_utf8 = False
     for vector in vectors:
-        coverage_by_table[vector["table"]].update(vector["covers"])
-        all_coverage.update(vector["covers"])
+        require(
+            isinstance(vector, dict)
+            and set(vector)
+            == {"name", "table", "row", "expected_key_hex", "expected_value_hex"},
+            "TPC-C valid vector has wrong fields",
+        )
+        name = vector["name"]
+        require(
+            isinstance(name, str) and CANONICAL_IDENTIFIER.fullmatch(name) is not None,
+            "TPC-C valid vector name is not canonical",
+        )
+        require(name not in valid_by_name, f"duplicate TPC-C valid vector: {name}")
+        require(vector["table"] in contract["application_tables"], f"{name}: unknown table")
+        for field in ("expected_key_hex", "expected_value_hex"):
+            require(
+                isinstance(vector[field], str)
+                and re.fullmatch(r"(?:[0-9a-f]{2})*", vector[field]) is not None,
+                f"{name}: {field} is not canonical hex",
+            )
+        try:
+            key, value = codec.encode_row(vector["table"], vector["row"])
+        except CodecError as error:
+            raise VerificationError(f"TPC-C valid vector {name} failed: {error.code}: {error}") from error
+        require(key.hex() == vector["expected_key_hex"], f"{name}: expected key differs")
+        require(value.hex() == vector["expected_value_hex"], f"{name}: expected value differs")
+        valid_by_name[name] = vector
+        tables_seen.add(vector["table"])
+        table = codec.table(vector["table"])
+        columns = {column["name"]: column for column in table["columns"]}
+        for column_name, typed_value in vector["row"].items():
+            if isinstance(typed_value, int) and not isinstance(typed_value, bool):
+                all_integer_values.add(typed_value)
+            elif isinstance(typed_value, dict) and "raw_bits_hex" in typed_value:
+                float_bits.add(typed_value["raw_bits_hex"])
+            elif isinstance(typed_value, str):
+                if columns[column_name]["sql_type"] == "TIMESTAMP":
+                    timestamp_values.add(typed_value)
+                if columns[column_name]["sql_type"].startswith("CHAR("):
+                    width = int(columns[column_name]["sql_type"].split("(")[1][:-1])
+                    has_short_char |= len(typed_value) < width
+                has_utf8 |= any(ord(character) > 127 for character in typed_value)
+
     require(
-        all("representative_row" in coverage_by_table[table] for table in roster),
-        "TPC-C vector inventory lacks a representative for every table",
+        tables_seen == set(contract["application_tables"]),
+        "TPC-C executable goldens do not cover every table",
     )
-    required_coverage = {
-        "i32_min_key",
-        "i32_max_key",
-        "i64_min_key",
-        "i64_max_key",
-        "composite_key",
-        "fixed_decimal",
-        "float32",
-        "timestamp_utc",
-        "char_padding",
-        "strict_utf8",
-        "sql_null",
-        "empty_value",
-        "generated_key",
+    require(
+        {-2147483648, 2147483647, -9223372036854775808, 9223372036854775807}
+        <= all_integer_values,
+        "TPC-C executable goldens lack signed key boundaries",
+    )
+    require(
+        {"3eaaaaab", "bf800000", "7f7fffff"} <= float_bits,
+        "TPC-C executable goldens lack fractional/negative/maximum finite float32",
+    )
+    require(
+        {"1969-12-31T23:59:59Z", "1970-01-01T00:00:00Z"} <= timestamp_values,
+        "TPC-C executable goldens lack negative/zero UTC epoch cases",
+    )
+    require(has_short_char and has_utf8, "TPC-C executable goldens lack CHAR padding/UTF-8")
+    require(
+        valid_by_name["oorder_carrier_null"]["row"]["o_carrier_id"] is None
+        and valid_by_name["order_line_delivery_null"]["row"]["ol_delivery_d"] is None,
+        "TPC-C executable goldens lack nullable carrier/delivery cases",
+    )
+    require(
+        valid_by_name["new_order_empty_value"]["expected_value_hex"] == "",
+        "TPC-C new_order present value is not empty",
+    )
+
+    invalid_vectors = golden["invalid_vectors"]
+    require(isinstance(invalid_vectors, list) and invalid_vectors, "TPC-C invalid vectors missing")
+    invalid_names: set[str] = set()
+    errors_seen: set[str] = set()
+    for vector in invalid_vectors:
+        require(
+            isinstance(vector, dict)
+            and set(vector)
+            == {"name", "table", "base_vector", "mutations", "expected_error"},
+            "TPC-C invalid vector has wrong fields",
+        )
+        name = vector["name"]
+        require(
+            isinstance(name, str) and CANONICAL_IDENTIFIER.fullmatch(name) is not None,
+            "TPC-C invalid vector name is not canonical",
+        )
+        require(name not in invalid_names and name not in valid_by_name, f"duplicate vector: {name}")
+        invalid_names.add(name)
+        try:
+            row = materialize_invalid_vector(vector, valid_by_name)
+            codec.encode_row(vector["table"], row)
+        except CodecError as error:
+            require(
+                error.code == vector["expected_error"],
+                f"{name}: expected {vector['expected_error']}, got {error.code}",
+            )
+            errors_seen.add(error.code)
+        else:
+            raise VerificationError(f"TPC-C invalid vector unexpectedly encoded: {name}")
+    require(
+        {
+            "row_shape",
+            "nullability",
+            "integer_range",
+            "decimal_format",
+            "decimal_scale",
+            "decimal_range",
+            "float_non_finite",
+            "timestamp_format",
+            "text_length",
+            "utf8",
+        }
+        <= errors_seen,
+        "TPC-C invalid vectors lack required malformed categories",
+    )
+
+
+def verify_tpcc_live_fixture(contracts: dict[str, dict[str, Any]]) -> None:
+    path = PROTOCOL_ROOT / "fixtures" / "mariadb_tpcc_typed_rows.json"
+    require(
+        sha256_hex(path.read_bytes()) == TPCC_LIVE_FIXTURE_SHA256,
+        "TPC-C live fixture checksum drift",
+    )
+    fixture = load_json(path)
+    require(
+        isinstance(fixture, dict)
+        and set(fixture)
+        == {"backend", "mariadb_image", "debezium_version", "session_contract", "rows"},
+        "TPC-C live fixture has wrong root fields",
+    )
+    require(fixture["backend"] == "mariadb", "TPC-C live fixture backend mismatch")
+    require(fixture["mariadb_image"] == "mariadb:12.3", "TPC-C MariaDB fixture version drift")
+    require(
+        fixture["debezium_version"] == "3.6.1.Final",
+        "TPC-C Debezium fixture version drift",
+    )
+    require(
+        fixture["session_contract"] == "protocol/backends/mariadb.json",
+        "TPC-C live fixture session-contract reference drift",
+    )
+    require(
+        (PROTOCOL_ROOT.parent / fixture["session_contract"]).is_file(),
+        "TPC-C live fixture session contract does not exist",
+    )
+    rows = fixture["rows"]
+    require(isinstance(rows, list) and len(rows) == 11, "TPC-C live fixture must have 11 rows")
+    codec = TpccCodec(contracts["tpcc"])
+    expected_table_counts = {
+        "benchbase.warehouse": 1,
+        "benchbase.item": 1,
+        "benchbase.stock": 1,
+        "benchbase.district": 1,
+        "benchbase.customer": 1,
+        "benchbase.history": 1,
+        "benchbase.oorder": 2,
+        "benchbase.new_order": 1,
+        "benchbase.order_line": 2,
     }
+    actual_table_counts: dict[str, int] = defaultdict(int)
+    has_numeric_float = False
+    has_trimmed_char = False
+    has_nullable_null = False
+    has_nullable_present = False
+    for index, row_fixture in enumerate(rows):
+        require(
+            isinstance(row_fixture, dict)
+            and set(row_fixture)
+            == {"table", "key", "after", "expected_key_hex", "expected_value_hex", "stream_id"},
+            f"TPC-C live fixture row {index} has wrong fields",
+        )
+        require(
+            row_fixture["stream_id"] == f"1787259444600-{index}",
+            f"TPC-C live fixture row {index} stream order drift",
+        )
+        table_name = row_fixture["table"]
+        require(table_name in expected_table_counts, f"TPC-C live fixture row {index} table")
+        table = codec.table(table_name)
+        key_columns = table["key_columns"]
+        require(
+            isinstance(row_fixture["key"], dict)
+            and set(row_fixture["key"]) == set(key_columns)
+            and all(
+                row_fixture["key"][column] == row_fixture["after"][column]
+                for column in key_columns
+            ),
+            f"TPC-C live fixture row {index} key image mismatch",
+        )
+        try:
+            key, value = codec.encode_row(table_name, row_fixture["after"])
+        except CodecError as error:
+            raise VerificationError(
+                f"TPC-C live fixture row {index} failed: {error.code}: {error}"
+            ) from error
+        require(key.hex() == row_fixture["expected_key_hex"], f"live row {index} key bytes")
+        require(value.hex() == row_fixture["expected_value_hex"], f"live row {index} value bytes")
+        actual_table_counts[table_name] += 1
+        columns = {column["name"]: column for column in table["columns"]}
+        for column_name, typed_value in row_fixture["after"].items():
+            column = columns[column_name]
+            has_numeric_float |= column["sql_type"] == "FLOAT" and isinstance(
+                typed_value, (int, float)
+            )
+            if column["sql_type"].startswith("CHAR(") and isinstance(typed_value, str):
+                width = int(column["sql_type"].split("(")[1][:-1])
+                has_trimmed_char |= len(typed_value) < width
+            if column["nullable"]:
+                has_nullable_null |= typed_value is None
+                has_nullable_present |= typed_value is not None
     require(
-        required_coverage <= all_coverage,
-        "TPC-C vector inventory lacks a required boundary category",
+        dict(actual_table_counts) == expected_table_counts,
+        "TPC-C live fixture table counts differ",
     )
+    require(has_numeric_float, "TPC-C live fixture lacks numeric FLOAT")
+    require(has_trimmed_char, "TPC-C live fixture lacks trimmed CHAR")
     require(
-        "empty_value" in coverage_by_table["benchbase.new_order"],
-        "TPC-C vector inventory lacks the empty new_order value",
-    )
-    require(
-        {"i64_min_key", "i64_max_key", "generated_key"}
-        <= coverage_by_table["benchbase.history"],
-        "TPC-C vector inventory lacks history key boundaries",
-    )
-    require(
-        "sql_null" in coverage_by_table["benchbase.oorder"]
-        and "sql_null" in coverage_by_table["benchbase.order_line"],
-        "TPC-C vector inventory lacks nullable carrier/delivery cases",
+        has_nullable_null and has_nullable_present,
+        "TPC-C live fixture lacks nullable null/present rows",
     )
 
 
@@ -1259,7 +1457,8 @@ def main() -> int:
         _, schemas = load_schema_validator()
         contracts = load_adapter_contracts(schemas)
         backends = load_backend_contracts(schemas)
-        verify_tpcc_vector_inventory(contracts, schemas)
+        verify_tpcc_executable_vectors(contracts, schemas)
+        verify_tpcc_live_fixture(contracts)
         records = verify_schemas_and_examples()
         adapter_example_count = verify_adapter_record_examples(contracts, schemas)
         verify_golden_vectors()

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import re
@@ -20,6 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = ROOT / "protocol" / "schema"
 ADAPTER_ROOT = ROOT / "protocol" / "adapters"
 BACKEND_ROOT = ROOT / "protocol" / "backends"
+sys.path.insert(0, str(ROOT / "protocol" / "tools"))
+from bootstrap_adapter_registry import (  # noqa: E402
+    BootstrapAdapterError,
+    BootstrapAdapterRegistry,
+)
 
 UUID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
@@ -900,88 +904,31 @@ def length_prefix(value: bytes) -> bytes:
     return struct.pack(">I", len(value)) + value
 
 
-def canonical_ycsb_key(schema: str, table: str, key: int) -> bytes:
-    validate_identifier(schema, "schema")
-    validate_identifier(table, "table")
-    require(-0x80000000 <= key <= 0x7FFFFFFF, f"YCSB key is outside signed I32: {key}")
-    return length_prefix(schema.encode("ascii")) + length_prefix(table.encode("ascii")) + struct.pack(">i", key)
-
-
-def decode_present_field(value: str, line_number: int, field_number: int) -> bytes:
-    encoded = value[1:]
-    try:
-        decoded = base64.b64decode(encoded, validate=True)
-    except (ValueError, UnicodeEncodeError) as error:
-        raise RecordError(
-            f"scan line {line_number} FIELD{field_number} has invalid Base64: {error}"
-        ) from error
-    require(
-        base64.b64encode(decoded).decode("ascii") == encoded,
-        f"scan line {line_number} FIELD{field_number} has noncanonical Base64",
-    )
-    try:
-        decoded.decode("utf-8", "strict")
-    except UnicodeDecodeError as error:
-        raise RecordError(
-            f"scan line {line_number} FIELD{field_number} is not strict UTF-8"
-        ) from error
-    return decoded
-
-
-def canonical_ycsb_value(tokens: list[str], line_number: int) -> bytes:
-    require(len(tokens) == 10, f"scan line {line_number} does not contain ten fields")
-    result = bytearray()
-    for field_number, token in enumerate(tokens, start=1):
-        if token == "N":
-            result.append(0)
-            continue
-        require(
-            token.startswith("P"),
-            f"scan line {line_number} FIELD{field_number} lacks N/P state tag",
-        )
-        decoded = decode_present_field(token, line_number, field_number)
-        result.append(1)
-        result.extend(length_prefix(decoded))
-    return bytes(result)
-
-
-def scan_rows(path: Path, schema: str, table: str) -> list[tuple[bytes, bytes]]:
-    try:
-        text = path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError) as error:
-        raise RecordError(f"cannot read bootstrap scan {path}: {error}") from error
-
-    rows: list[tuple[bytes, bytes]] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        require(line != "", f"bootstrap scan contains an empty line at {line_number}")
-        columns = line.split("\t")
-        require(len(columns) == 11, f"scan line {line_number} has {len(columns)} columns, expected 11")
-        try:
-            key_number = int(columns[0], 10)
-        except ValueError as error:
-            raise RecordError(f"scan line {line_number} has a non-integer YCSB key") from error
-        rows.append(
-            (
-                canonical_ycsb_key(schema, table, key_number),
-                canonical_ycsb_value(columns[1:], line_number),
-            )
-        )
-
-    keys = [key for key, _ in rows]
-    require(len(keys) == len(set(keys)), "bootstrap scan contains a duplicate canonical key")
-    rows.sort(key=lambda row: row[0])
-    return rows
-
-
 def bootstrap_digest(rows: Iterable[tuple[bytes, bytes]]) -> tuple[int, str]:
     materialized = list(rows)
     require(len(materialized) <= MAX_SAFE_INTEGER, "bootstrap row count exceeds safe JSON integer")
+    keys = [key for key, _ in materialized]
+    require(len(keys) == len(set(keys)), "bootstrap state contains duplicate canonical key")
+    materialized.sort(key=lambda item: item[0])
     preimage = bytearray(BOOTSTRAP_DOMAIN)
     preimage.extend(struct.pack(">Q", len(materialized)))
     for key, value in materialized:
         preimage.extend(length_prefix(key))
         preimage.extend(length_prefix(value))
     return len(materialized), hashlib.sha256(preimage).hexdigest()
+
+
+def bootstrap_adapter_registry() -> BootstrapAdapterRegistry:
+    return BootstrapAdapterRegistry.discover(ROOT / "protocol" / "tools" / "bootstrap_adapters")
+
+
+def build_bootstrap_queries(args: argparse.Namespace) -> dict[str, Any]:
+    adapter_contract = select_adapter(args.benchmark)
+    require(
+        adapter_contract["runtime_capabilities"]["bootstrap_scan"],
+        f"adapter {args.benchmark} bootstrap scanner is not implemented",
+    )
+    return bootstrap_adapter_registry().require(args.benchmark).build_queries(adapter_contract)
 
 
 def dump_record(record: dict[str, Any]) -> None:
@@ -1031,16 +978,34 @@ def build_bootstrap_manifest(args: argparse.Namespace) -> dict[str, Any]:
         adapter["runtime_capabilities"]["bootstrap_scan"],
         f"adapter {args.benchmark} bootstrap scanner is not implemented",
     )
-    validate_identifier(args.schema, "schema")
-    validate_identifier(args.table, "table")
-    table_name = f"{args.schema}.{args.table}"
-    validate_application_roster(adapter, [table_name])
-    rows = scan_rows(Path(args.scan_file), args.schema, args.table)
+    require(args.max_rows > 0, "bootstrap max rows must be positive")
+    require(args.max_input_bytes > 0, "bootstrap max input bytes must be positive")
+    require(args.max_canonical_bytes > 0, "bootstrap max canonical bytes must be positive")
+    bootstrap_adapter = bootstrap_adapter_registry().require(adapter["benchmark"])
+    rows, counts = bootstrap_adapter.encode_scan(
+        adapter,
+        Path(args.scan_file),
+        max_rows=args.max_rows,
+        max_input_bytes=args.max_input_bytes,
+        max_canonical_bytes=args.max_canonical_bytes,
+        options={"schema": args.schema, "table": args.table},
+    )
     row_count, digest = bootstrap_digest(rows)
+    require(row_count == sum(counts.values()), "bootstrap row-count algebra mismatch")
+    require(
+        set(counts) == set(adapter["application_tables"]),
+        "bootstrap scanner count roster differs from adapter contract",
+    )
+    require(
+        all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts.values()),
+        "bootstrap scanner returned an invalid table count",
+    )
     return {
         "kind": "bootstrap_manifest",
         "run_id": run_id,
-        "table_row_counts": [{"table": table_name, "row_count": row_count}],
+        "table_row_counts": [
+            {"table": table, "row_count": counts[table]} for table in sorted(counts)
+        ],
         "canonical_state_digest": digest,
     }
 
@@ -1226,6 +1191,14 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--schema", default="benchbase")
     bootstrap.add_argument("--table", default="usertable")
     bootstrap.add_argument("--scan-file", required=True)
+    bootstrap.add_argument("--max-rows", type=int, default=1000000)
+    bootstrap.add_argument("--max-input-bytes", type=int, default=4294967296)
+    bootstrap.add_argument("--max-canonical-bytes", type=int, default=2147483648)
+
+    bootstrap_queries = subparsers.add_parser(
+        "bootstrap-queries", help="emit adapter-owned canonical scan queries"
+    )
+    bootstrap_queries.add_argument("--benchmark", required=True)
 
     adapter = subparsers.add_parser(
         "adapter-contract", help="validate and emit one shared adapter contract"
@@ -1315,6 +1288,8 @@ def main() -> int:
             dump_record(build_run_manifest(args))
         elif args.command == "bootstrap-manifest":
             dump_record(build_bootstrap_manifest(args))
+        elif args.command == "bootstrap-queries":
+            dump_record(build_bootstrap_queries(args))
         elif args.command == "adapter-contract":
             dump_record(inspect_adapter_contract(args))
         elif args.command == "backend-contract":
@@ -1336,7 +1311,13 @@ def main() -> int:
             print(f"{action}\t{lifecycle}")
         else:  # pragma: no cover - argparse owns this invariant
             raise RecordError(f"unsupported command: {args.command}")
-    except (OSError, RecordError, UnicodeError, json.JSONDecodeError) as error:
+    except (
+        OSError,
+        RecordError,
+        BootstrapAdapterError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as error:
         print(f"black-box record error: {error}", file=sys.stderr)
         return 2
     return 0

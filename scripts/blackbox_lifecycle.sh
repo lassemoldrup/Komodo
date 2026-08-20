@@ -19,6 +19,9 @@ BLACKBOX_DECLARED_ISOLATION=${BLACKBOX_DECLARED_ISOLATION:-REPEATABLE_READ}
 BLACKBOX_LOADER_BATCH_SIZE=${BLACKBOX_LOADER_BATCH_SIZE:-128}
 BLACKBOX_LOADER_SCALE_VALUE=${BLACKBOX_LOADER_SCALE_VALUE:-}
 BLACKBOX_LOADER_DECLARED_COUNTS_FILE=${BLACKBOX_LOADER_DECLARED_COUNTS_FILE:-}
+BLACKBOX_BOOTSTRAP_MAX_ROWS=${BLACKBOX_BOOTSTRAP_MAX_ROWS:-1000000}
+BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES=${BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES:-4294967296}
+BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES=${BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES:-2147483648}
 BLACKBOX_STATUS_TIMEOUT_SECONDS=${BLACKBOX_STATUS_TIMEOUT_SECONDS:-120}
 BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS=${BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS:-30}
 
@@ -380,16 +383,27 @@ blackbox_commit_fence() {
 
 blackbox_capture_bootstrap_scan() {
   local output_path=$1
-  local encoded_fields=
-  local separator=
-  local field_number
-  for field_number in $(seq 1 10); do
-    encoded_fields+="$separator IF(field${field_number} IS NULL, 'N', CONCAT('P', REPLACE(REPLACE(TO_BASE64(CONVERT(field${field_number} USING binary)), CHAR(10), ''), CHAR(13), '')))"
-    separator=,
+  local query_document
+  query_document=$(python3 "$BLACKBOX_RECORD_TOOL" bootstrap-queries \
+    --benchmark "$BLACKBOX_BENCHMARK") || return 1
+  local encoded_queries
+  encoded_queries=$(jq -er '.queries[] | @base64' <<<"$query_document") || {
+    blackbox_die "adapter bootstrap query document is malformed"
+    return 1
+  }
+  : >"$output_path"
+  local query_specs=()
+  mapfile -t query_specs <<<"$encoded_queries"
+  local encoded_query query input_bytes
+  for encoded_query in "${query_specs[@]}"; do
+    query=$(printf '%s' "$encoded_query" | base64 --decode) || return 1
+    blackbox_database_query "$(jq -er '.sql' <<<"$query")" >>"$output_path" || return 1
+    input_bytes=$(wc -c <"$output_path") || return 1
+    if (( input_bytes > BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES )); then
+      blackbox_die "bootstrap scan exceeded input byte limit"
+      return 1
+    fi
   done
-  blackbox_database_query \
-    "SELECT ycsb_key,${encoded_fields} FROM usertable ORDER BY ycsb_key" \
-    >"$output_path"
 }
 
 
@@ -400,7 +414,10 @@ blackbox_build_bootstrap_manifest() {
     --benchmark "$BLACKBOX_BENCHMARK" \
     --schema benchbase \
     --table usertable \
-    --scan-file "$scan_file"
+    --scan-file "$scan_file" \
+    --max-rows "$BLACKBOX_BOOTSTRAP_MAX_ROWS" \
+    --max-input-bytes "$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
+    --max-canonical-bytes "$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES"
 }
 
 

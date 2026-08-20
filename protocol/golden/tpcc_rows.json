@@ -1,0 +1,411 @@
+{
+  "benchmark": "tpcc",
+  "canonical_schema": "benchbase",
+  "vectors": [
+    {
+      "name": "warehouse_representative",
+      "table": "benchbase.warehouse",
+      "row": {
+        "w_id": 1,
+        "w_ytd": "300000.00",
+        "w_tax": "0.1234",
+        "w_name": "仓库",
+        "w_street_1": "",
+        "w_street_2": "Deux",
+        "w_city": "München",
+        "w_state": "C",
+        "w_zip": "12345"
+      },
+      "expected_key_hex": "0000000962656e6368626173650000000977617265686f75736500000001",
+      "expected_value_hex": "0000000001c9c38000000000000004d200000006e4bb93e5ba93000000000000000444657578000000084dc3bc6e6368656e00000002432000000009313233343520202020"
+    },
+    {
+      "name": "warehouse_decimal_key_minimum",
+      "table": "benchbase.warehouse",
+      "row": {
+        "w_id": -2147483648,
+        "w_ytd": "-9999999999.99",
+        "w_tax": "0.9999",
+        "w_name": "W",
+        "w_street_1": "one",
+        "w_street_2": "two",
+        "w_city": "city",
+        "w_state": "NY",
+        "w_zip": "123456789"
+      },
+      "expected_key_hex": "0000000962656e6368626173650000000977617265686f75736580000000",
+      "expected_value_hex": "ffffff172b5af001000000000000270f0000000157000000036f6e650000000374776f0000000463697479000000024e5900000009313233343536373839"
+    },
+    {
+      "name": "item_key_maximum",
+      "table": "benchbase.item",
+      "row": {
+        "i_id": 2147483647,
+        "i_name": "éééééééééééééééééééééééé",
+        "i_price": "999.99",
+        "i_data": "商品🙂",
+        "i_im_id": -2147483648
+      },
+      "expected_key_hex": "0000000962656e636862617365000000046974656d7fffffff",
+      "expected_value_hex": "00000030c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9000000000001869f0000000ae59586e59381f09f998280000000"
+    },
+    {
+      "name": "stock_composite_key_boundaries",
+      "table": "benchbase.stock",
+      "row": {
+        "s_w_id": -2147483648,
+        "s_i_id": 2147483647,
+        "s_quantity": 2147483647,
+        "s_ytd": "-999999.99",
+        "s_order_cnt": -2147483648,
+        "s_remote_cnt": 0,
+        "s_data": "",
+        "s_dist_01": "D01",
+        "s_dist_02": "D02",
+        "s_dist_03": "D03",
+        "s_dist_04": "D04",
+        "s_dist_05": "D05",
+        "s_dist_06": "D06",
+        "s_dist_07": "D07",
+        "s_dist_08": "D08",
+        "s_dist_09": "D09",
+        "s_dist_10": "D10"
+      },
+      "expected_key_hex": "0000000962656e6368626173650000000573746f636b800000007fffffff",
+      "expected_value_hex": "7ffffffffffffffffa0a1f0180000000000000000000000000000018443031202020202020202020202020202020202020202020000000184430322020202020202020202020202020202020202020200000001844303320202020202020202020202020202020202020202000000018443034202020202020202020202020202020202020202020000000184430352020202020202020202020202020202020202020200000001844303620202020202020202020202020202020202020202000000018443037202020202020202020202020202020202020202020000000184430382020202020202020202020202020202020202020200000001844303920202020202020202020202020202020202020202000000018443130202020202020202020202020202020202020202020"
+    },
+    {
+      "name": "district_representative",
+      "table": "benchbase.district",
+      "row": {
+        "d_w_id": 1,
+        "d_id": 2,
+        "d_ytd": "-1.00",
+        "d_tax": "0.0000",
+        "d_next_o_id": 2147483647,
+        "d_name": "D",
+        "d_street_1": "street",
+        "d_street_2": "",
+        "d_city": "東京",
+        "d_state": "Z",
+        "d_zip": "9"
+      },
+      "expected_key_hex": "0000000962656e6368626173650000000864697374726963740000000100000002",
+      "expected_value_hex": "ffffffffffffff9c00000000000000007fffffff0000000144000000067374726565740000000000000006e69db1e4baac000000025a2000000009392020202020202020"
+    },
+    {
+      "name": "customer_fraction_utf8_pre_epoch",
+      "table": "benchbase.customer",
+      "row": {
+        "c_w_id": 1,
+        "c_d_id": 2,
+        "c_id": 3,
+        "c_discount": "0.5000",
+        "c_credit": "G",
+        "c_last": "姓🙂",
+        "c_first": "",
+        "c_credit_lim": "50000.00",
+        "c_balance": "-10.00",
+        "c_ytd_payment": { "raw_bits_hex": "3eaaaaab" },
+        "c_payment_cnt": 2147483647,
+        "c_delivery_cnt": -2147483648,
+        "c_street_1": "one",
+        "c_street_2": "two",
+        "c_city": "Montréal",
+        "c_state": "Q",
+        "c_zip": "1234",
+        "c_phone": "555",
+        "c_since": "1969-12-31T23:59:59Z",
+        "c_middle": "OE",
+        "c_data": "a\u0000b🙂"
+      },
+      "expected_key_hex": "0000000962656e63686261736500000008637573746f6d6572000000010000000200000003",
+      "expected_value_hex": "000000000000138800000002472000000007e5a793f09f99820000000000000000004c4b40fffffffffffffc183eaaaaab7fffffff80000000000000036f6e650000000374776f000000094d6f6e7472c3a9616c000000025120000000093132333420202020200000001035353520202020202020202020202020ffffffffffffffff000000024f4500000007610062f09f9982"
+    },
+    {
+      "name": "customer_float_negative",
+      "table": "benchbase.customer",
+      "row": {
+        "c_w_id": 1,
+        "c_d_id": 2,
+        "c_id": 4,
+        "c_discount": "0.0000",
+        "c_credit": "BC",
+        "c_last": "LAST",
+        "c_first": "FIRST",
+        "c_credit_lim": "0.00",
+        "c_balance": "0.00",
+        "c_ytd_payment": { "raw_bits_hex": "bf800000" },
+        "c_payment_cnt": 0,
+        "c_delivery_cnt": 0,
+        "c_street_1": "",
+        "c_street_2": "",
+        "c_city": "",
+        "c_state": "",
+        "c_zip": "",
+        "c_phone": "",
+        "c_since": "2038-01-19T03:14:07Z",
+        "c_middle": "",
+        "c_data": ""
+      },
+      "expected_key_hex": "0000000962656e63686261736500000008637573746f6d6572000000010000000200000004",
+      "expected_value_hex": "0000000000000000000000024243000000044c41535400000005464952535400000000000000000000000000000000bf8000000000000000000000000000000000000000000000000000022020000000092020202020202020200000001020202020202020202020202020202020000000007fffffff00000002202000000000"
+    },
+    {
+      "name": "customer_float_maximum_finite",
+      "table": "benchbase.customer",
+      "row": {
+        "c_w_id": 1,
+        "c_d_id": 2,
+        "c_id": 5,
+        "c_discount": "0.0000",
+        "c_credit": "GC",
+        "c_last": "L",
+        "c_first": "F",
+        "c_credit_lim": "0.00",
+        "c_balance": "0.00",
+        "c_ytd_payment": { "raw_bits_hex": "7f7fffff" },
+        "c_payment_cnt": 0,
+        "c_delivery_cnt": 0,
+        "c_street_1": "",
+        "c_street_2": "",
+        "c_city": "",
+        "c_state": "AA",
+        "c_zip": "000000000",
+        "c_phone": "0000000000000000",
+        "c_since": "1970-01-01T00:00:00Z",
+        "c_middle": "OE",
+        "c_data": ""
+      },
+      "expected_key_hex": "0000000962656e63686261736500000008637573746f6d6572000000010000000200000005",
+      "expected_value_hex": "0000000000000000000000024743000000014c0000000146000000000000000000000000000000007f7fffff00000000000000000000000000000000000000000000000241410000000930303030303030303000000010303030303030303030303030303030300000000000000000000000024f4500000000"
+    },
+    {
+      "name": "history_key_minimum",
+      "table": "benchbase.history",
+      "row": {
+        "h_id": -9223372036854775808,
+        "h_c_id": 1,
+        "h_c_d_id": 2,
+        "h_c_w_id": 3,
+        "h_d_id": 4,
+        "h_w_id": 5,
+        "h_date": "1900-01-01T00:00:00Z",
+        "h_amount": "-9999.99",
+        "h_data": "history🙂"
+      },
+      "expected_key_hex": "0000000962656e63686261736500000007686973746f72798000000000000000",
+      "expected_value_hex": "0000000100000002000000030000000400000005ffffffff7c558180fffffffffff0bdc10000000b686973746f7279f09f9982"
+    },
+    {
+      "name": "history_key_maximum",
+      "table": "benchbase.history",
+      "row": {
+        "h_id": 9223372036854775807,
+        "h_c_id": -2147483648,
+        "h_c_d_id": 2147483647,
+        "h_c_w_id": 0,
+        "h_d_id": 0,
+        "h_w_id": 0,
+        "h_date": "2100-12-31T23:59:59Z",
+        "h_amount": "9999.99",
+        "h_data": ""
+      },
+      "expected_key_hex": "0000000962656e63686261736500000007686973746f72797fffffffffffffff",
+      "expected_value_hex": "800000007fffffff00000000000000000000000000000000f6678a7f00000000000f423f00000000"
+    },
+    {
+      "name": "oorder_carrier_null",
+      "table": "benchbase.oorder",
+      "row": {
+        "o_w_id": 1,
+        "o_d_id": 2,
+        "o_id": 3,
+        "o_c_id": 4,
+        "o_carrier_id": null,
+        "o_ol_cnt": 5,
+        "o_all_local": 1,
+        "o_entry_d": "1970-01-01T00:00:01Z"
+      },
+      "expected_key_hex": "0000000962656e636862617365000000066f6f72646572000000010000000200000003",
+      "expected_value_hex": "000000040000000005000000010000000000000001"
+    },
+    {
+      "name": "oorder_carrier_present",
+      "table": "benchbase.oorder",
+      "row": {
+        "o_w_id": 1,
+        "o_d_id": 2,
+        "o_id": 4,
+        "o_c_id": 5,
+        "o_carrier_id": -2147483648,
+        "o_ol_cnt": 15,
+        "o_all_local": 0,
+        "o_entry_d": "1969-12-31T23:59:59Z"
+      },
+      "expected_key_hex": "0000000962656e636862617365000000066f6f72646572000000010000000200000004",
+      "expected_value_hex": "0000000501800000000000000f00000000ffffffffffffffff"
+    },
+    {
+      "name": "new_order_empty_value",
+      "table": "benchbase.new_order",
+      "row": {
+        "no_w_id": -2147483648,
+        "no_d_id": 0,
+        "no_o_id": 2147483647
+      },
+      "expected_key_hex": "0000000962656e636862617365000000096e65775f6f7264657280000000000000007fffffff",
+      "expected_value_hex": ""
+    },
+    {
+      "name": "order_line_delivery_null",
+      "table": "benchbase.order_line",
+      "row": {
+        "ol_w_id": 1,
+        "ol_d_id": 2,
+        "ol_o_id": 3,
+        "ol_number": 1,
+        "ol_i_id": 4,
+        "ol_delivery_d": null,
+        "ol_amount": "0.00",
+        "ol_supply_w_id": 5,
+        "ol_quantity": 6,
+        "ol_dist_info": "区"
+      },
+      "expected_key_hex": "0000000962656e6368626173650000000a6f726465725f6c696e6500000001000000020000000300000001",
+      "expected_value_hex": "0000000400000000000000000000000005000000060000001ae58cba2020202020202020202020202020202020202020202020"
+    },
+    {
+      "name": "order_line_delivery_present",
+      "table": "benchbase.order_line",
+      "row": {
+        "ol_w_id": 1,
+        "ol_d_id": 2,
+        "ol_o_id": 3,
+        "ol_number": 2,
+        "ol_i_id": -2147483648,
+        "ol_delivery_d": "2000-02-29T12:34:56Z",
+        "ol_amount": "9999.99",
+        "ol_supply_w_id": 2147483647,
+        "ol_quantity": 10,
+        "ol_dist_info": "123456789012345678901234"
+      },
+      "expected_key_hex": "0000000962656e6368626173650000000a6f726465725f6c696e6500000001000000020000000300000002",
+      "expected_value_hex": "80000000010000000038bbbcf000000000000f423f7fffffff0000000a00000018313233343536373839303132333435363738393031323334"
+    }
+  ],
+  "invalid_vectors": [
+    {
+      "name": "missing_column",
+      "table": "benchbase.warehouse",
+      "base_vector": "warehouse_representative",
+      "mutations": { "set": {}, "remove": ["w_name"], "add": {} },
+      "expected_error": "row_shape"
+    },
+    {
+      "name": "extra_column",
+      "table": "benchbase.warehouse",
+      "base_vector": "warehouse_representative",
+      "mutations": { "set": {}, "remove": [], "add": { "unexpected": 1 } },
+      "expected_error": "row_shape"
+    },
+    {
+      "name": "null_nonnullable",
+      "table": "benchbase.warehouse",
+      "base_vector": "warehouse_representative",
+      "mutations": { "set": { "w_name": null }, "remove": [], "add": {} },
+      "expected_error": "nullability"
+    },
+    {
+      "name": "null_primary_key",
+      "table": "benchbase.oorder",
+      "base_vector": "oorder_carrier_null",
+      "mutations": { "set": { "o_id": null }, "remove": [], "add": {} },
+      "expected_error": "nullability"
+    },
+    {
+      "name": "i32_below_minimum",
+      "table": "benchbase.item",
+      "base_vector": "item_key_maximum",
+      "mutations": { "set": { "i_id": -2147483649 }, "remove": [], "add": {} },
+      "expected_error": "integer_range"
+    },
+    {
+      "name": "i64_above_maximum",
+      "table": "benchbase.history",
+      "base_vector": "history_key_maximum",
+      "mutations": { "set": { "h_id": 9223372036854775808 }, "remove": [], "add": {} },
+      "expected_error": "integer_range"
+    },
+    {
+      "name": "decimal_wrong_scale",
+      "table": "benchbase.warehouse",
+      "base_vector": "warehouse_representative",
+      "mutations": { "set": { "w_tax": "0.20" }, "remove": [], "add": {} },
+      "expected_error": "decimal_scale"
+    },
+    {
+      "name": "decimal_negative_zero",
+      "table": "benchbase.warehouse",
+      "base_vector": "warehouse_representative",
+      "mutations": { "set": { "w_tax": "-0.0000" }, "remove": [], "add": {} },
+      "expected_error": "decimal_format"
+    },
+    {
+      "name": "decimal_precision_overflow",
+      "table": "benchbase.item",
+      "base_vector": "item_key_maximum",
+      "mutations": { "set": { "i_price": "1000.00" }, "remove": [], "add": {} },
+      "expected_error": "decimal_range"
+    },
+    {
+      "name": "float_positive_infinity",
+      "table": "benchbase.customer",
+      "base_vector": "customer_fraction_utf8_pre_epoch",
+      "mutations": { "set": { "c_ytd_payment": { "raw_bits_hex": "7f800000" } }, "remove": [], "add": {} },
+      "expected_error": "float_non_finite"
+    },
+    {
+      "name": "float_nan",
+      "table": "benchbase.customer",
+      "base_vector": "customer_fraction_utf8_pre_epoch",
+      "mutations": { "set": { "c_ytd_payment": { "raw_bits_hex": "7fc00000" } }, "remove": [], "add": {} },
+      "expected_error": "float_non_finite"
+    },
+    {
+      "name": "timestamp_fractional_second",
+      "table": "benchbase.customer",
+      "base_vector": "customer_fraction_utf8_pre_epoch",
+      "mutations": { "set": { "c_since": "2000-01-01T00:00:00.001Z" }, "remove": [], "add": {} },
+      "expected_error": "timestamp_format"
+    },
+    {
+      "name": "timestamp_invalid_date",
+      "table": "benchbase.history",
+      "base_vector": "history_key_maximum",
+      "mutations": { "set": { "h_date": "2025-02-29T00:00:00Z" }, "remove": [], "add": {} },
+      "expected_error": "timestamp_format"
+    },
+    {
+      "name": "varchar_too_long",
+      "table": "benchbase.item",
+      "base_vector": "item_key_maximum",
+      "mutations": { "set": { "i_name": "1234567890123456789012345" }, "remove": [], "add": {} },
+      "expected_error": "text_length"
+    },
+    {
+      "name": "char_too_long",
+      "table": "benchbase.warehouse",
+      "base_vector": "warehouse_representative",
+      "mutations": { "set": { "w_state": "ABC" }, "remove": [], "add": {} },
+      "expected_error": "text_length"
+    },
+    {
+      "name": "malformed_utf8",
+      "table": "benchbase.item",
+      "base_vector": "item_key_maximum",
+      "mutations": { "set": { "i_data": { "utf8_hex": "ff" } }, "remove": [], "add": {} },
+      "expected_error": "utf8"
+    }
+  ]
+}

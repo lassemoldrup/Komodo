@@ -23,7 +23,8 @@ The contract is branch-local:
 | `backends/` | Machine-checkable database, connection/session, isolation, and application-table requirements. |
 | `schema/` | JSON Schemas for Redis records. |
 | `examples/` | Valid example records used by schema checks. |
-| `golden/` | Language-neutral codec/digest vectors and required typed-row vector inventories. |
+| `fixtures/` | Version-pinned real database/JDBC/CDC typed-row fixtures. |
+| `golden/` | Executable language-neutral row, codec, and digest vectors. |
 | `tools/verify_protocol.py` | Schema, cross-record, and golden-vector verifier. |
 
 ## Redis streams

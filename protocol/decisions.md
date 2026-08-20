@@ -211,23 +211,28 @@ the standard eight history columns are its canonical value.
 `protocol/adapters/tpcc.json` is the machine-checkable source for the complete
 column/key/value roster, all 19 result-producing BenchBase statement IDs and
 their snapshot/local/omit classification, and loader counts/relationships. The
-TPC-C adapter accepts only declared repeatable-read runs. Its runtime capability
-flags remain false until the corresponding implementations and typed codec
-goldens land atomically.
+TPC-C adapter accepts only declared repeatable-read runs. Its bootstrap scanner
+capability is enabled with the executable typed codec; client tracing and CDC
+normalization remain disabled until their corresponding integrations land.
 
 No post-run TPC-C application-invariant suite is part of this protocol or its
 result claim. Bootstrap loader cardinality and relationship validation remains
 required and is distinct from a post-workload invariant check.
 
-## D10: TPC-C golden inventory precedes typed vectors
+## D10: TPC-C executable typed vectors
 
-`protocol/golden/tpcc_row_vector_inventory.json` freezes the required row and
-boundary cases without pretending that typed byte encodings already exist.
-It covers every table, signed key boundaries, composite keys, decimals, database
-`FLOAT`, UTC timestamps, `CHAR` padding, strict UTF-8, SQL `NULL`, the empty
-`new_order` value, and the generated history key. Exact bytes and real
-MariaDB/JDBC/Debezium fixtures must satisfy this inventory before the three TPC-C
-runtime capability flags can become true.
+`protocol/golden/tpcc_rows.json` freezes typed source rows and exact key/value
+bytes for every table, signed key boundaries, composite keys, declared-scale
+decimals, finite raw database `FLOAT` bits, UTC-second timestamps, `CHAR`
+padding, strict UTF-8, SQL `NULL`, the empty `new_order` value, and the generated
+history key. Its malformed vectors fail closed in the Python, Java, and C++
+implementations. Real MariaDB/JDBC/Debezium fixtures must match these bytes
+before the corresponding TPC-C runtime capabilities can become true.
+
+The pinned real fixture is `protocol/fixtures/mariadb_tpcc_typed_rows.json`,
+captured from MariaDB 12.3 and Debezium 3.6.1 under the shared session contract.
+Its checksum, exact 11-row roster, source versions, raw row images, and expected
+bytes are verifier-enforced.
 
 ## D11: MariaDB session and schema contract
 
@@ -277,6 +282,6 @@ through `o_ol_cnt`.
 
 Loader batch size is a positive command-line/configuration value with default
 128. It is passed into generated BenchBase configuration and recorded in loader
-validation/performance artifacts, but it is not an acceptance constant. Typed
-canonical scans and the global bootstrap digest remain gated on the shared row
-codecs and real fixtures.
+validation/performance artifacts, but it is not an acceptance constant.
+Canonical scans use the same shared row contract and globally byte-sort encoded
+keys before computing the bootstrap digest.

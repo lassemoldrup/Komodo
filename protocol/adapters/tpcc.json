@@ -4,7 +4,7 @@
   "runtime_capabilities": {
     "client_trace": false,
     "cdc_normalization": false,
-    "bootstrap_scan": false
+    "bootstrap_scan": true
   },
   "declared_isolations": ["REPEATABLE_READ"],
   "transaction_types": ["NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel"],

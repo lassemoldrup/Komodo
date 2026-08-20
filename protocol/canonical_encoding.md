@@ -140,12 +140,35 @@ zero bytes. That present empty value remains distinct from an absent read or a
 delete, which carries no value payload.
 
 The adapter contract records each column's MariaDB type, nullability, and
-canonical type category. The exact fixed-decimal, database `FLOAT`, timestamp,
-`CHAR`, variable-text, and nullable-field byte encodings are not active yet.
-They must be added here together with byte vectors and real
-MariaDB/JDBC/Debezium fixtures before TPC-C runtime capability is enabled.
-`protocol/golden/tpcc_row_vector_inventory.json` is the machine-checked list of
-cases those typed vectors must cover.
+canonical type category. Non-key columns encode in exact schema order:
+
+```text
+INT                  = I32_BE(value)
+BIGINT               = I64_BE(value)
+DECIMAL(p, s)        = I64_BE(exact declared-scale unscaled value)
+FLOAT                = U32_BE(raw finite IEEE-754 binary32 bits)
+TIMESTAMP            = I64_BE(signed UTC Unix epoch seconds)
+VARCHAR(n)           = LP(strict UTF-8), at most n Unicode characters
+CHAR(n)              = LP(strict UTF-8 after right-padding with ASCII spaces
+                          to exactly n Unicode characters)
+nullable SQL NULL    = 00
+nullable present     = 01 || Encode(non-null value)
+non-nullable present = Encode(non-null value)
+```
+
+TPC-C `TIMESTAMP` columns have DDL precision zero; fractional seconds are
+invalid. Decimal input must have exactly the declared scale and fit both the SQL
+precision and signed I64. Float infinities and NaNs are invalid. Text is counted
+in Unicode characters before strict UTF-8 encoding; it is never normalized.
+
+`protocol/golden/tpcc_rows.json` contains executable typed source rows, expected
+key/value hex, and malformed vectors shared by Java, C++, and the bootstrap
+reference implementation.
+
+`protocol/fixtures/mariadb_tpcc_typed_rows.json` pins real MariaDB 12.3 and
+Debezium 3.6.1 row images for all nine tables, including numeric `FLOAT`,
+trimmed `CHAR`, nullable present/NULL, timestamps, decimals, UTF-8, and the empty
+`new_order` value. Its encoded bytes must match the executable goldens' codec.
 
 ## Read digest
 
