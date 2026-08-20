@@ -74,6 +74,55 @@ EOF
 )
 [[ $actual_order == "$expected_order" ]] || fail "deterministic rotated stage order differs"
 
+single_stage_order=$(
+  "$RUNNER" --print-stage-order --repetitions 2 --seed 20260818 \
+    --stage cdc_capture
+)
+expected_single_stage_order=$(cat <<'EOF'
+repetition,stage_order_position,stage
+1,1,cdc_capture
+2,1,cdc_capture
+EOF
+)
+[[ $single_stage_order == "$expected_single_stage_order" ]] ||
+  fail "single-stage selection differs"
+
+two_stage_order=$(
+  "$RUNNER" --print-stage-order --repetitions 2 --seed 20260818 \
+    --stage assembly_join_check --stage assembly_join
+)
+expected_two_stage_order=$(cat <<'EOF'
+repetition,stage_order_position,stage
+1,1,assembly_join
+1,2,assembly_join_check
+2,1,assembly_join_check
+2,2,assembly_join
+EOF
+)
+[[ $two_stage_order == "$expected_two_stage_order" ]] ||
+  fail "two-stage selection did not use canonical-order rotation"
+
+if "$RUNNER" --print-stage-order --stage unknown_stage \
+    >"$TEST_ROOT/unknown-stage.stdout" 2>"$TEST_ROOT/unknown-stage.stderr"; then
+  fail "unknown stage was accepted"
+fi
+grep -F 'unknown stage: unknown_stage' "$TEST_ROOT/unknown-stage.stderr" >/dev/null ||
+  fail "unknown stage diagnostic is unclear"
+
+if "$RUNNER" --print-stage-order --stage cdc_capture --stage cdc_capture \
+    >"$TEST_ROOT/duplicate-stage.stdout" 2>"$TEST_ROOT/duplicate-stage.stderr"; then
+  fail "duplicate stage was accepted"
+fi
+grep -F 'duplicate stage: cdc_capture' "$TEST_ROOT/duplicate-stage.stderr" >/dev/null ||
+  fail "duplicate stage diagnostic is unclear"
+
+if "$RUNNER" --print-stage-order --stage \
+    >"$TEST_ROOT/missing-stage.stdout" 2>"$TEST_ROOT/missing-stage.stderr"; then
+  fail "missing stage value was accepted"
+fi
+grep -F 'missing --stage value' "$TEST_ROOT/missing-stage.stderr" >/dev/null ||
+  fail "missing stage value diagnostic is unclear"
+
 verified=$(
   "$RUNNER" --smoke --verify-inputs-only \
     --baseline-root "$BASELINE" --output-root "$TEST_ROOT/empty-output"
@@ -83,6 +132,17 @@ verified=$(
       $verified == *'monitor_retained_identity_bytes=2147483648'* &&
       $verified == *'output_max_bytes=107374182400'* ]] ||
   fail 'performance capacity defaults were not reported'
+[[ $verified == *'stages=benchbase_uninstrumented,read_capture_encoding,read_capture_encoding_redis,cdc_capture,assembly_join,assembly_join_check'* ]] ||
+  fail 'default stage roster was not reported'
+
+verified=$(
+  "$RUNNER" --smoke --verify-inputs-only \
+    --baseline-root "$BASELINE" --output-root "$TEST_ROOT/selected-output" \
+    --stage assembly_join_check --stage assembly_join
+)
+[[ $verified == *'stages=assembly_join,assembly_join_check'* &&
+      $verified == *'redis_maxmemory_bytes=8589934592'* ]] ||
+  fail 'selected stage roster was not reported in canonical order'
 
 verified=$(
   "$RUNNER" --smoke --verify-inputs-only \

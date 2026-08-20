@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible six-stage black-box performance measurement coordinator.
+# Reproducible staged black-box performance measurement coordinator.
 
 set -Eeuo pipefail
 
@@ -14,7 +14,7 @@ E2E="$ROOT/scripts/e2e.sh"
 EXPECTED_BASELINE_HEAD=2224eeca0d81565e762e584a9214569a28205e3d
 ARTIFACT_PREFIX=/media/newhd/yifan/db-monitoring-builds
 
-STAGES=(
+CANONICAL_STAGES=(
   benchbase_uninstrumented
   read_capture_encoding
   read_capture_encoding_redis
@@ -22,6 +22,11 @@ STAGES=(
   assembly_join
   assembly_join_check
 )
+STAGES=()
+REQUESTED_STAGES=()
+STAGE_ROSTER=
+NEED_CURRENT_BENCHBASE=0
+NEED_MONITOR=0
 
 BASELINE_ROOT=${BLACKBOX_PERFORMANCE_BASELINE_ROOT:-}
 OUTPUT_ROOT=${BLACKBOX_PERFORMANCE_OUTPUT_ROOT:-}
@@ -74,7 +79,12 @@ usage() {
 usage: run_blackbox_performance.sh --baseline-root PATH [--output-root PATH] [OPTIONS]
 
 Options:
-  --smoke                    Run all six real stages once with the smoke configuration.
+  --smoke                    Run selected real stages once with the smoke configuration.
+  --stage NAME               Run this stage; repeat to select multiple stages (default: all).
+                             Selection uses canonical order; duplicate names are rejected.
+                             Names: benchbase_uninstrumented, read_capture_encoding,
+                             read_capture_encoding_redis, cdc_capture, assembly_join,
+                             assembly_join_check.
   --repetitions N            Measured repetitions (default: 3).
   --terminals N              BenchBase terminals (default: 4).
   --scale-factor N           YCSB scale factor (default: 10).
@@ -132,6 +142,51 @@ require_capacity_bytes() {
 }
 
 
+configure_stages() {
+  local requested canonical found
+  local selected=()
+  if (( ${#REQUESTED_STAGES[@]} == 0 )); then
+    STAGES=("${CANONICAL_STAGES[@]}")
+  else
+    for requested in "${REQUESTED_STAGES[@]}"; do
+      found=0
+      for canonical in "${CANONICAL_STAGES[@]}"; do
+        if [[ $requested == "$canonical" ]]; then
+          found=1
+          break
+        fi
+      done
+      (( found == 1 )) || die "unknown stage: $requested"
+      for canonical in "${selected[@]}"; do
+        [[ $requested != "$canonical" ]] || die "duplicate stage: $requested"
+      done
+      selected+=("$requested")
+    done
+    for canonical in "${CANONICAL_STAGES[@]}"; do
+      for requested in "${selected[@]}"; do
+        if [[ $canonical == "$requested" ]]; then
+          STAGES+=("$canonical")
+          break
+        fi
+      done
+    done
+  fi
+  local IFS=,
+  STAGE_ROSTER=${STAGES[*]}
+  for canonical in "${STAGES[@]}"; do
+    case "$canonical" in
+      read_capture_encoding|read_capture_encoding_redis)
+        NEED_CURRENT_BENCHBASE=1
+        ;;
+      assembly_join|assembly_join_check)
+        NEED_CURRENT_BENCHBASE=1
+        NEED_MONITOR=1
+        ;;
+    esac
+  done
+}
+
+
 parse_arguments() {
   while (( $# > 0 )); do
     case "$1" in
@@ -141,6 +196,10 @@ parse_arguments() {
         ;;
       --output-root)
         OUTPUT_ROOT=${2:?missing --output-root value}
+        shift 2
+        ;;
+      --stage)
+        REQUESTED_STAGES+=("${2:?missing --stage value}")
         shift 2
         ;;
       --repetitions)
@@ -228,6 +287,7 @@ parse_arguments() {
     DURATION_SECONDS=2
     COOLDOWN_SECONDS=0
   fi
+  configure_stages
   require_positive_integer repetitions "$REPETITIONS"
   require_positive_integer terminals "$TERMINALS"
   require_positive_integer scale-factor "$SCALE_FACTOR"
@@ -652,31 +712,40 @@ build_artifacts() {
     mvn "${common_maven[@]}" "-DbuildDirectory=$baseline_build"
   ) >"$OUTPUT_ROOT/build-baseline.log" 2>&1
 
-  record_command "$build_commands" mvn "${common_maven[@]}" "-DbuildDirectory=$current_build"
-  (
-    cd "$CURRENT_BENCHBASE_ROOT"
-    mvn "${common_maven[@]}" "-DbuildDirectory=$current_build"
-  ) >"$OUTPUT_ROOT/build-current.log" 2>&1
+  if (( NEED_CURRENT_BENCHBASE == 1 )); then
+    record_command "$build_commands" mvn "${common_maven[@]}" "-DbuildDirectory=$current_build"
+    (
+      cd "$CURRENT_BENCHBASE_ROOT"
+      mvn "${common_maven[@]}" "-DbuildDirectory=$current_build"
+    ) >"$OUTPUT_ROOT/build-current.log" 2>&1
+  fi
 
-  record_command "$build_commands" cmake -S "$ROOT/monitor" -B "$monitor_build" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release "-DCO_CHECKER_ROOT=$CO_CHECKER_ROOT"
-  cmake -S "$ROOT/monitor" -B "$monitor_build" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release "-DCO_CHECKER_ROOT=$CO_CHECKER_ROOT" \
-    >"$OUTPUT_ROOT/build-monitor-configure.log" 2>&1
-  record_command "$build_commands" cmake --build "$monitor_build"
-  cmake --build "$monitor_build" >"$OUTPUT_ROOT/build-monitor.log" 2>&1
+  if (( NEED_MONITOR == 1 )); then
+    record_command "$build_commands" cmake -S "$ROOT/monitor" -B "$monitor_build" -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release "-DCO_CHECKER_ROOT=$CO_CHECKER_ROOT"
+    cmake -S "$ROOT/monitor" -B "$monitor_build" -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release "-DCO_CHECKER_ROOT=$CO_CHECKER_ROOT" \
+      >"$OUTPUT_ROOT/build-monitor-configure.log" 2>&1
+    record_command "$build_commands" cmake --build "$monitor_build"
+    cmake --build "$monitor_build" >"$OUTPUT_ROOT/build-monitor.log" 2>&1
+  fi
 
-  local baseline_jars current_jars
+  local baseline_jars
   mapfile -t baseline_jars < <(find "$baseline_build" -type f -name benchbase.jar | sort)
-  mapfile -t current_jars < <(find "$current_build" -type f -name benchbase.jar | sort)
   (( ${#baseline_jars[@]} == 1 )) || die "expected one historical benchbase.jar"
-  (( ${#current_jars[@]} == 1 )) || die "expected one current benchbase.jar"
   BASELINE_DIST=$(dirname "${baseline_jars[0]}")
-  CURRENT_DIST=$(dirname "${current_jars[0]}")
-  MONITOR_BIN="$monitor_build/blackbox_run_monitor"
   [[ -f $BASELINE_DIST/benchbase.jar ]] || die "historical BenchBase distribution is missing"
-  [[ -f $CURRENT_DIST/benchbase.jar ]] || die "current BenchBase distribution is missing"
-  [[ -x $MONITOR_BIN ]] || die "Release monitor is missing"
+  if (( NEED_CURRENT_BENCHBASE == 1 )); then
+    local current_jars
+    mapfile -t current_jars < <(find "$current_build" -type f -name benchbase.jar | sort)
+    (( ${#current_jars[@]} == 1 )) || die "expected one current benchbase.jar"
+    CURRENT_DIST=$(dirname "${current_jars[0]}")
+    [[ -f $CURRENT_DIST/benchbase.jar ]] || die "current BenchBase distribution is missing"
+  fi
+  if (( NEED_MONITOR == 1 )); then
+    MONITOR_BIN="$monitor_build/blackbox_run_monitor"
+    [[ -x $MONITOR_BIN ]] || die "Release monitor is missing"
+  fi
 }
 
 
@@ -860,7 +929,7 @@ write_trial_metadata() {
     "$SI_MONITORING_DIRTY" "$CURRENT_BENCHBASE_DIRTY" "$BASELINE_DIRTY" "$CO_CHECKER_DIRTY" \
     "$SMOKE" "$REPETITIONS" "$REDIS_MAXMEMORY_BYTES" \
     "$MONITOR_MAX_PENDING_CLIENT_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
-    "$OUTPUT_MAX_BYTES" <<'PY'
+    "$OUTPUT_MAX_BYTES" "$STAGE_ROSTER" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -903,6 +972,7 @@ document = {
     "monitor_max_pending_client_bytes": int(values[24]),
     "monitor_max_retained_identity_bytes": int(values[25]),
     "output_max_bytes": int(values[26]),
+    "configured_stages": values[27].split(","),
 }
 path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -1580,14 +1650,21 @@ finalize_reports() {
     --raw-output "$raw" \
     --overhead-output "$overhead" \
     --artifact-index-output "$artifact_index"
-  record_command "$commands" python3 "$ANALYZER" summarize-trials \
-    --input-csv "$raw" --baseline-stage benchbase_uninstrumented \
-    --output-csv "$summary" --output-json "$OUTPUT_ROOT/summary_statistics.json"
-  python3 "$ANALYZER" summarize-trials \
-    --input-csv "$raw" \
-    --baseline-stage benchbase_uninstrumented \
-    --output-csv "$summary" \
+  local summarize_arguments=(
+    summarize-trials
+    --input-csv "$raw"
+    --output-csv "$summary"
     --output-json "$OUTPUT_ROOT/summary_statistics.json"
+  )
+  local stage
+  for stage in "${STAGES[@]}"; do
+    if [[ $stage == benchbase_uninstrumented ]]; then
+      summarize_arguments+=(--baseline-stage benchbase_uninstrumented)
+      break
+    fi
+  done
+  record_command "$commands" python3 "$ANALYZER" "${summarize_arguments[@]}"
+  python3 "$ANALYZER" "${summarize_arguments[@]}"
   record_command "$commands" python3 "$REPORTER" checksums \
     --root "$OUTPUT_ROOT" --output "$OUTPUT_ROOT/SHA256SUMS"
   python3 "$REPORTER" checksums \
@@ -1606,10 +1683,10 @@ main() {
   verify_canonical_container
   verify_inputs
   if (( VERIFY_INPUTS_ONLY == 1 )); then
-    printf 'verified baseline=%s output=%s redis_maxmemory_bytes=%s monitor_pending_client_bytes=%s monitor_retained_identity_bytes=%s output_max_bytes=%s\n' \
-      "$BASELINE_HEAD" "$OUTPUT_ROOT" "$REDIS_MAXMEMORY_BYTES" \
-      "$MONITOR_MAX_PENDING_CLIENT_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
-      "$OUTPUT_MAX_BYTES"
+    printf 'verified baseline=%s output=%s stages=%s redis_maxmemory_bytes=%s monitor_pending_client_bytes=%s monitor_retained_identity_bytes=%s output_max_bytes=%s\n' \
+      "$BASELINE_HEAD" "$OUTPUT_ROOT" "$STAGE_ROSTER" \
+      "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
+      "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" "$OUTPUT_MAX_BYTES"
     return 0
   fi
 

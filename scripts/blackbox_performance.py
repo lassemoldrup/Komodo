@@ -584,7 +584,7 @@ def _trial_cells(
 def summarize_trials(
     rows: Sequence[Mapping[str, Any]],
     *,
-    baseline_stage: str,
+    baseline_stage: str | None = None,
     stage_column: str = "stage",
     metrics: Sequence[str] | None = None,
     higher_is_better_metrics: Iterable[str] = (),
@@ -592,7 +592,8 @@ def summarize_trials(
     """Summarize repeated trials with median headline, range, MAD, and overhead."""
 
     stages, metric_order, cells = _trial_cells(rows, stage_column, metrics)
-    _require(baseline_stage in stages, f"baseline stage {baseline_stage!r} is absent")
+    if baseline_stage is not None:
+        _require(baseline_stage in stages, f"baseline stage {baseline_stage!r} is absent")
     explicit_higher = set(higher_is_better_metrics)
     summaries: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -630,27 +631,39 @@ def summarize_trials(
     for stage in stages:
         for metric in metric_order:
             summary = summaries[(stage, metric)]
-            baseline_median = summaries[(baseline_stage, metric)]["median"]
             median = summary["median"]
-            higher_better = _is_higher_better(metric, explicit_higher)
-            if higher_better:
-                direction = "decrease_from_baseline"
-                formula = "100 * (baseline_median - stage_median) / baseline_median"
-                numerator_sign = -1.0
+            if baseline_stage is None:
+                overhead: float | str = ""
+                direction = ""
+                formula = ""
             else:
-                direction = "increase_from_baseline"
-                formula = "100 * (stage_median - baseline_median) / baseline_median"
-                numerator_sign = 1.0
-
-            if isinstance(median, (int, float)) and isinstance(baseline_median, (int, float)):
-                if baseline_median == 0:
-                    overhead: float | str = NA
+                baseline_median = summaries[(baseline_stage, metric)]["median"]
+                higher_better = _is_higher_better(metric, explicit_higher)
+                if higher_better:
+                    direction = "decrease_from_baseline"
+                    formula = "100 * (baseline_median - stage_median) / baseline_median"
+                    numerator_sign = -1.0
                 else:
-                    overhead = numerator_sign * (median - baseline_median) / baseline_median * 100.0
-            elif median == NA or baseline_median == NA:
-                overhead = NA
-            else:
-                overhead = ""
+                    direction = "increase_from_baseline"
+                    formula = "100 * (stage_median - baseline_median) / baseline_median"
+                    numerator_sign = 1.0
+
+                if isinstance(median, (int, float)) and isinstance(
+                    baseline_median, (int, float)
+                ):
+                    if baseline_median == 0:
+                        overhead = NA
+                    else:
+                        overhead = (
+                            numerator_sign
+                            * (median - baseline_median)
+                            / baseline_median
+                            * 100.0
+                        )
+                elif median == NA or baseline_median == NA:
+                    overhead = NA
+                else:
+                    overhead = ""
             summary.update(
                 {
                     "overhead_vs_baseline_percent": overhead,
@@ -1113,14 +1126,19 @@ def _summarize_command(args: argparse.Namespace) -> None:
     if output_csv is not None:
         _write_csv(output_csv, summary, TRIAL_SUMMARY_FIELDS)
     if output_json is not None:
+        overhead_formulas = (
+            {
+                "higher_is_better": "100 * (baseline_median - stage_median) / baseline_median",
+                "lower_is_better": "100 * (stage_median - baseline_median) / baseline_median",
+            }
+            if args.baseline_stage is not None
+            else {}
+        )
         _write_json(
             output_json,
             {
                 "baseline_stage": args.baseline_stage,
-                "overhead_formulas": {
-                    "higher_is_better": "100 * (baseline_median - stage_median) / baseline_median",
-                    "lower_is_better": "100 * (stage_median - baseline_median) / baseline_median",
-                },
+                "overhead_formulas": overhead_formulas,
                 "summary": summary,
             },
         )
@@ -1202,7 +1220,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     summarize = subparsers.add_parser("summarize-trials", help="summarize repeated raw trial CSV rows")
     summarize.add_argument("--input-csv", required=True)
-    summarize.add_argument("--baseline-stage", required=True)
+    summarize.add_argument(
+        "--baseline-stage",
+        help="optional stage used for overhead columns; omit for baseline-free summaries",
+    )
     summarize.add_argument("--stage-column", default="stage")
     summarize.add_argument("--metric", action="append", default=[])
     summarize.add_argument("--higher-is-better", action="append", default=[])

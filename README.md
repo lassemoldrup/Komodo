@@ -268,10 +268,10 @@ docker exec db-monitoring-dev bash -lc '
 '
 ```
 
-The smoke target executes every real stage once with two terminals, scale one,
-one second of warmup, and two requested measurement seconds. The measured target
-uses three rotated repetitions, four terminals, scale ten, five seconds of
-warmup, and twenty requested measurement seconds:
+By default, the smoke target executes every real stage once with two terminals,
+scale one, one second of warmup, and two requested measurement seconds. The
+measured target uses three rotated repetitions, four terminals, scale ten, five
+seconds of warmup, and twenty requested measurement seconds:
 
 ```bash
 docker exec db-monitoring-dev bash -lc '
@@ -282,6 +282,25 @@ docker exec db-monitoring-dev bash -lc '
     PERFORMANCE_OUTPUT_ROOT=/media/newhd/yifan/db-monitoring-builds/blackbox-performance/run-20260818
 '
 ```
+
+Pass `--stage NAME` directly to `scripts/run_blackbox_performance.sh` once per
+stage to run only a subset. Selection is set-like: names must be unique, the
+selected roster is normalized to canonical order, and each repetition rotates
+only that roster. Omitting `--stage` retains the six-stage behavior. For
+example, this runs only the two monitor configurations:
+
+```bash
+./scripts/run_blackbox_performance.sh \
+  --baseline-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/worktrees/benchbase-2224eec \
+  --output-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/monitor-only \
+  --stage assembly_join \
+  --stage assembly_join_check
+```
+
+Selected-stage runs record their roster in each trial's metadata and in
+`stage_order.csv`. Their aggregate statistics remain available without the
+uninstrumented baseline; baseline-relative summary cells are blank, and
+`overhead.csv` includes only comparisons for which both stages were selected.
 
 `PERFORMANCE_BASELINE_ROOT` overrides the worktree path. An output root must be
 below `/media/newhd/yifan/db-monitoring-builds` and must not already contain files. Normal measured

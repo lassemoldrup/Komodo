@@ -74,7 +74,13 @@ def status_records(run_id: str, audited: bool) -> list[object]:
 
 
 class ReportTest(unittest.TestCase):
-    def write_trial(self, root: Path, stage: str, position: int) -> None:
+    def write_trial(
+        self,
+        root: Path,
+        stage: str,
+        position: int,
+        configured_stages: tuple[str, ...] | None = None,
+    ) -> None:
         trial = root / "trials" / "repetition-01" / f"{position:02d}-{stage}"
         trial.mkdir(parents=True)
         run_id = f"00000000-0000-0000-0000-{position:012d}"
@@ -105,6 +111,8 @@ class ReportTest(unittest.TestCase):
             "co_checker_head": "c" * 40,
             "smoke": True,
         }
+        if configured_stages is not None:
+            metadata["configured_stages"] = list(configured_stages)
         benchbase = {
             "measured_count": 100,
             "elapsed_time_nanoseconds": 2_000_000_000,
@@ -228,6 +236,56 @@ class ReportTest(unittest.TestCase):
             attributions = {row["attribution"] for row in overhead_rows}
             self.assertIn("redis_publication_increment", attributions)
             self.assertIn("checking_boundary_increment", attributions)
+
+    def test_aggregate_accepts_one_selected_stage_without_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            roster = ("cdc_capture",)
+            self.write_trial(root, roster[0], 1, roster)
+
+            raw = root / "raw_trials.csv"
+            overhead = root / "overhead.csv"
+            rows = report.write_raw_trials(root, raw)
+            report.write_overhead(rows, overhead)
+
+            self.assertEqual([row["stage"] for row in rows], list(roster))
+            with raw.open(encoding="utf-8", newline="") as stream:
+                raw_rows = list(csv.DictReader(stream))
+            self.assertEqual(
+                raw_rows[0]["configured_stages_json"], '["cdc_capture"]'
+            )
+            with overhead.open(encoding="utf-8", newline="") as stream:
+                self.assertEqual(list(csv.DictReader(stream)), [])
+
+    def test_aggregate_emits_only_available_two_stage_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            roster = ("assembly_join", "assembly_join_check")
+            for position, stage in enumerate(roster, start=1):
+                self.write_trial(root, stage, position, roster)
+
+            rows = report.write_raw_trials(root, root / "raw_trials.csv")
+            overhead = root / "overhead.csv"
+            report.write_overhead(rows, overhead)
+
+            with overhead.open(encoding="utf-8", newline="") as stream:
+                overhead_rows = list(csv.DictReader(stream))
+            self.assertEqual(len(overhead_rows), len(report.OVERHEAD_METRICS))
+            self.assertEqual(
+                {row["attribution"] for row in overhead_rows},
+                {"checking_boundary_increment"},
+            )
+
+    def test_aggregate_rejects_invalid_selected_stage_rosters(self) -> None:
+        for roster, message in (
+            (("cdc_capture", "cdc_capture"), "duplicates"),
+            (("unknown_stage",), "unknown stage"),
+        ):
+            with self.subTest(roster=roster), tempfile.TemporaryDirectory() as directory_name:
+                root = Path(directory_name)
+                self.write_trial(root, "cdc_capture", 1, roster)
+                with self.assertRaisesRegex(report.ReportError, message):
+                    report.write_raw_trials(root, root / "raw_trials.csv")
 
     def test_capture_summary_merges_types_and_keeps_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

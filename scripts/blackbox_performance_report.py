@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble six-stage performance artifacts without interpreting partial runs as verdicts."""
+"""Assemble selected performance-stage artifacts without interpreting verdicts."""
 
 from __future__ import annotations
 
@@ -562,7 +562,17 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
 
     row: dict[str, Any] = {field: "" for field in IDENTITY_FIELDS}
     for key, value in metadata.items():
-        row[normalize_name(str(key))] = value
+        normalized_key = normalize_name(str(key))
+        if normalized_key == "configured_stages":
+            require(
+                isinstance(value, list),
+                f"configured performance stages are not an array: {trial_dir}",
+            )
+            row["configured_stages_json"] = json.dumps(
+                value, ensure_ascii=False, separators=(",", ":")
+            )
+        else:
+            row[normalized_key] = value
     row["artifact_dir"] = str(trial_dir.resolve())
 
     benchbase = load_json(trial_dir / "benchbase_metrics.json", required=True)
@@ -709,11 +719,56 @@ def find_trial_dirs(root: Path) -> list[Path]:
     return result
 
 
+def configured_stage_roster(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    rosters: list[tuple[str, ...]] = []
+    for row in rows:
+        raw_roster = row.get("configured_stages_json", "")
+        if raw_roster in (None, ""):
+            # Artifacts created before selectable stages always ran all six.
+            roster = STAGES
+        else:
+            require(
+                isinstance(raw_roster, str),
+                "configured performance stage roster is not JSON text",
+            )
+            try:
+                parsed = json.loads(raw_roster)
+            except json.JSONDecodeError as error:
+                raise ReportError("configured performance stage roster is malformed") from error
+            require(
+                isinstance(parsed, list) and parsed,
+                "configured performance stage roster is empty or not an array",
+            )
+            require(
+                all(isinstance(stage, str) and stage in STAGES for stage in parsed),
+                "configured performance stage roster contains an unknown stage",
+            )
+            roster = tuple(parsed)
+            require(
+                len(roster) == len(set(roster)),
+                "configured performance stage roster contains duplicates",
+            )
+            canonical = tuple(stage for stage in STAGES if stage in roster)
+            require(
+                roster == canonical,
+                "configured performance stage roster is not in canonical order",
+            )
+        rosters.append(roster)
+    require(
+        len(set(rosters)) == 1,
+        "configured performance stage roster differs across trials",
+    )
+    return rosters[0]
+
+
 def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
     rows = [trial_row(path) for path in find_trial_dirs(root)]
+    stage_roster = configured_stage_roster(rows)
     stages = {str(row["stage"]) for row in rows}
-    missing = set(STAGES) - stages
-    require(not missing, "raw trials are missing stages: " + ", ".join(sorted(missing)))
+    require(
+        stages == set(stage_roster),
+        "raw trial stages differ from the configured roster",
+    )
     row_counts = {row["bootstrap_row_count"] for row in rows}
     digests = {row["bootstrap_canonical_state_digest"] for row in rows}
     require(len(row_counts) == 1, "loaded row counts differ across performance trials")
@@ -730,7 +785,7 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
         repetitions == expected_repetitions,
         "raw trial repetitions differ from the configured roster",
     )
-    for stage in STAGES:
+    for stage in stage_roster:
         stage_rows = [row for row in rows if row["stage"] == stage]
         require(
             len(stage_rows) == len(expected_repetitions),
@@ -773,20 +828,22 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
             f"trial invariant differs across runs: {field}",
         )
     random_seed = int(rows[0]["random_seed"])
-    expected_positions = set(range(1, len(STAGES) + 1))
+    expected_positions = set(range(1, len(stage_roster) + 1))
     for repetition in sorted(expected_repetitions):
         repetition_rows = [
             row for row in rows if int(row["repetition"]) == repetition
         ]
         positions = {int(row["stage_order_position"]) for row in repetition_rows}
         require(
-            len(repetition_rows) == len(STAGES) and positions == expected_positions,
+            len(repetition_rows) == len(stage_roster) and positions == expected_positions,
             f"repetition {repetition} stage-order positions are incomplete or duplicated",
         )
-        offset = (random_seed + repetition - 1) % len(STAGES)
+        offset = (random_seed + repetition - 1) % len(stage_roster)
         for row in repetition_rows:
             position = int(row["stage_order_position"])
-            expected_stage = STAGES[(offset + position - 1) % len(STAGES)]
+            expected_stage = stage_roster[
+                (offset + position - 1) % len(stage_roster)
+            ]
             require(
                 row["stage"] == expected_stage,
                 f"repetition {repetition} stage-order rotation differs at position {position}",
@@ -895,40 +952,40 @@ def comparison_rows(
 def write_overhead(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
     output_rows: list[dict[str, Any]] = []
     baseline = "benchbase_uninstrumented"
-    for stage in STAGES:
-        output_rows.extend(comparison_rows(rows, baseline, stage, "cumulative_vs_baseline"))
-    output_rows.extend(
-        comparison_rows(
-            rows,
+    available_stages = {str(row.get("stage", "")) for row in rows}
+    if baseline in available_stages:
+        for stage in STAGES:
+            if stage in available_stages:
+                output_rows.extend(
+                    comparison_rows(rows, baseline, stage, "cumulative_vs_baseline")
+                )
+    comparisons = (
+        (
             "benchbase_uninstrumented",
             "read_capture_encoding",
             "read_capture_encoding_increment",
-        )
-    )
-    output_rows.extend(
-        comparison_rows(
-            rows,
+        ),
+        (
             "benchbase_uninstrumented",
             "cdc_capture",
             "cdc_capture_increment",
-        )
-    )
-    output_rows.extend(
-        comparison_rows(
-            rows,
+        ),
+        (
             "read_capture_encoding",
             "read_capture_encoding_redis",
             "redis_publication_increment",
-        )
-    )
-    output_rows.extend(
-        comparison_rows(
-            rows,
+        ),
+        (
             "assembly_join",
             "assembly_join_check",
             "checking_boundary_increment",
-        )
+        ),
     )
+    for comparison_stage, stage, attribution in comparisons:
+        if {comparison_stage, stage}.issubset(available_stages):
+            output_rows.extend(
+                comparison_rows(rows, comparison_stage, stage, attribution)
+            )
     fields = (
         "comparison_stage",
         "stage",

@@ -526,6 +526,73 @@ class TrialSummaryTest(unittest.TestCase):
         self.assertEqual(summary[0]["median"], 11.0)
         self.assertEqual(summary[1]["median"], 10.0)
 
+    def test_trials_without_baseline_keep_descriptive_statistics(self) -> None:
+        rows = [
+            {"stage": "assembly_join", "trial": "1", "throughput": "100"},
+            {"stage": "assembly_join", "trial": "2", "throughput": "120"},
+            {
+                "stage": "assembly_join_check",
+                "trial": "1",
+                "throughput": "90",
+            },
+            {
+                "stage": "assembly_join_check",
+                "trial": "2",
+                "throughput": "110",
+            },
+        ]
+        summary = performance.summarize_trials(rows)
+        by_stage = {row["stage"]: row for row in summary}
+        self.assertEqual(by_stage["assembly_join"]["median"], 110.0)
+        self.assertEqual(by_stage["assembly_join_check"]["median"], 100.0)
+        for row in summary:
+            self.assertEqual(row["overhead_vs_baseline_percent"], "")
+            self.assertEqual(row["overhead_direction"], "")
+            self.assertEqual(row["overhead_formula"], "")
+
+    def test_explicit_absent_trial_baseline_is_rejected(self) -> None:
+        rows = [{"stage": "assembly_join", "trial": "1", "throughput": "100"}]
+        with self.assertRaisesRegex(
+            performance.PerformanceDataError, "baseline stage 'missing' is absent"
+        ):
+            performance.summarize_trials(rows, baseline_stage="missing")
+
+    def test_summarize_command_allows_baseline_free_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            input_csv = root / "trials.csv"
+            output_csv = root / "summary.csv"
+            output_json = root / "summary.json"
+            input_csv.write_text(
+                "stage,trial,throughput\n"
+                "assembly_join,1,100\n"
+                "assembly_join_check,1,90\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(TOOL),
+                    "summarize-trials",
+                    "--input-csv",
+                    str(input_csv),
+                    "--output-csv",
+                    str(output_csv),
+                    "--output-json",
+                    str(output_json),
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            document = json.loads(output_json.read_text(encoding="utf-8"))
+            self.assertIsNone(document["baseline_stage"])
+            self.assertEqual(document["overhead_formulas"], {})
+            with output_csv.open(encoding="utf-8", newline="") as stream:
+                for row in csv.DictReader(stream):
+                    self.assertEqual(row["overhead_vs_baseline_percent"], "")
+
     def test_bounded_copy_is_limited_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             root = Path(directory_name)
