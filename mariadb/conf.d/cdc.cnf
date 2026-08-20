@@ -6,6 +6,16 @@
 server_id                        = 1
 log_basename                     = mariadb
 
+# --- Text/session contract ------------------------------------------------
+# These server defaults are repeated and verified on every workload
+# connection by the client adapter. The binary collation makes canonical text
+# equality independent of locale; UTC removes host-time-zone dependence; the
+# SQL mode preserves declared CHAR width on reads.
+character_set_server             = utf8mb4
+collation_server                 = utf8mb4_bin
+default_time_zone                = +00:00
+sql_mode                         = STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH
+
 # --- Isolation -------------------------------------------------------------
 # [pin] Textbook Snapshot Isolation: a transaction writing a row changed since
 # its snapshot is ABORTED with ER_CHECKREAD (1020) rather than blocking, i.e.

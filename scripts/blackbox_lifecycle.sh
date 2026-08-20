@@ -13,6 +13,8 @@ BLACKBOX_DB_PORT=${BLACKBOX_DB_PORT:-3306}
 BLACKBOX_DB_USER=${BLACKBOX_DB_USER:-app}
 BLACKBOX_DB_PASSWORD=${BLACKBOX_DB_PASSWORD:-app_pw}
 BLACKBOX_BACKEND_SOURCE_ID=${BLACKBOX_BACKEND_SOURCE_ID:-mariadb-main}
+BLACKBOX_BACKEND=${BLACKBOX_BACKEND:-mariadb}
+BLACKBOX_BENCHMARK=${BLACKBOX_BENCHMARK:-ycsb}
 BLACKBOX_DECLARED_ISOLATION=${BLACKBOX_DECLARED_ISOLATION:-REPEATABLE_READ}
 BLACKBOX_STATUS_TIMEOUT_SECONDS=${BLACKBOX_STATUS_TIMEOUT_SECONDS:-120}
 BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS=${BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS:-30}
@@ -144,6 +146,7 @@ blackbox_database() {
     --password="$BLACKBOX_DB_PASSWORD" \
     --database=benchbase \
     --default-character-set=utf8mb4 \
+    --init-command="${BLACKBOX_SET_NAMES_SQL:-SET NAMES utf8mb4 COLLATE utf8mb4_bin}" \
     --batch \
     --raw \
     --skip-column-names \
@@ -153,6 +156,70 @@ blackbox_database() {
 
 blackbox_database_query() {
   blackbox_database --execute "$1"
+}
+
+
+blackbox_adapter_contract() {
+  python3 "$BLACKBOX_RECORD_TOOL" adapter-contract --benchmark "$BLACKBOX_BENCHMARK"
+}
+
+
+blackbox_backend_contract() {
+  python3 "$BLACKBOX_RECORD_TOOL" backend-contract --backend "$BLACKBOX_BACKEND"
+}
+
+
+blackbox_capture_schema_metadata() {
+  blackbox_database_query "
+    SELECT 'SETTING', 'server.character_set', @@GLOBAL.character_set_server
+    UNION ALL SELECT 'SETTING', 'server.collation', @@GLOBAL.collation_server
+    UNION ALL SELECT 'SETTING', 'server.time_zone', @@GLOBAL.time_zone
+    UNION ALL SELECT 'SETTING', 'server.sql_mode', @@GLOBAL.sql_mode
+    UNION ALL SELECT 'SETTING', 'server.transaction_isolation', @@GLOBAL.transaction_isolation
+    UNION ALL SELECT 'SETTING', 'server.snapshot_isolation', @@GLOBAL.innodb_snapshot_isolation
+    UNION ALL SELECT 'SETTING', 'session.character_set_client', @@SESSION.character_set_client
+    UNION ALL SELECT 'SETTING', 'session.character_set_connection', @@SESSION.character_set_connection
+    UNION ALL SELECT 'SETTING', 'session.character_set_results', @@SESSION.character_set_results
+    UNION ALL SELECT 'SETTING', 'session.collation_connection', @@SESSION.collation_connection
+    UNION ALL SELECT 'SETTING', 'session.time_zone', @@SESSION.time_zone
+    UNION ALL SELECT 'SETTING', 'session.sql_mode', @@SESSION.sql_mode
+    UNION ALL SELECT 'SETTING', 'session.transaction_isolation', @@SESSION.transaction_isolation
+    UNION ALL SELECT 'SETTING', 'session.snapshot_isolation', @@SESSION.innodb_snapshot_isolation"
+  blackbox_database_query "
+    SELECT 'DATABASE', SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME
+      FROM information_schema.SCHEMATA
+     WHERE SCHEMA_NAME = 'benchbase'"
+  blackbox_database_query "
+    SELECT 'TABLE', CONCAT(TABLE_SCHEMA, '.', TABLE_NAME), ENGINE, TABLE_COLLATION
+      FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = 'benchbase'
+     ORDER BY TABLE_NAME"
+  blackbox_database_query "
+    SELECT 'COLUMN', CONCAT(TABLE_SCHEMA, '.', TABLE_NAME), COLUMN_NAME,
+           ORDINAL_POSITION, LOWER(DATA_TYPE), IS_NULLABLE,
+           COALESCE(CAST(NUMERIC_PRECISION AS CHAR), '-'),
+           COALESCE(CAST(NUMERIC_SCALE AS CHAR), '-'),
+           COALESCE(CAST(CHARACTER_MAXIMUM_LENGTH AS CHAR), '-'),
+           COALESCE(CAST(DATETIME_PRECISION AS CHAR), '-'),
+           COALESCE(CHARACTER_SET_NAME, '-'), COALESCE(COLLATION_NAME, '-'),
+           COALESCE(NULLIF(EXTRA, ''), '-')
+      FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = 'benchbase'
+     ORDER BY TABLE_NAME, ORDINAL_POSITION"
+  blackbox_database_query "
+    SELECT 'PRIMARY', CONCAT(TABLE_SCHEMA, '.', TABLE_NAME), COLUMN_NAME,
+           ORDINAL_POSITION
+      FROM information_schema.KEY_COLUMN_USAGE
+     WHERE TABLE_SCHEMA = 'benchbase' AND CONSTRAINT_NAME = 'PRIMARY'
+     ORDER BY TABLE_NAME, ORDINAL_POSITION"
+}
+
+
+blackbox_verify_schema_metadata() {
+  blackbox_capture_schema_metadata |
+    python3 "$BLACKBOX_RECORD_TOOL" schema-check \
+      --backend "$BLACKBOX_BACKEND" \
+      --benchmark "$BLACKBOX_BENCHMARK"
 }
 
 
@@ -188,6 +255,7 @@ blackbox_build_run_manifest() {
     --run-id "$BLACKBOX_ACTIVE_RUN_ID"
     --backend-source-id "$BLACKBOX_BACKEND_SOURCE_ID"
     --declared-isolation "$BLACKBOX_DECLARED_ISOLATION"
+    --benchmark "$BLACKBOX_BENCHMARK"
   )
   local session_id
   for session_id in "${BLACKBOX_SESSION_IDS[@]}"; do
@@ -234,6 +302,7 @@ blackbox_build_bootstrap_manifest() {
   local scan_file=$1
   python3 "$BLACKBOX_RECORD_TOOL" bootstrap-manifest \
     --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --benchmark "$BLACKBOX_BENCHMARK" \
     --schema benchbase \
     --table usertable \
     --scan-file "$scan_file"

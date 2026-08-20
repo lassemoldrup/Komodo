@@ -1,21 +1,8 @@
--- Create every modeled table before Debezium starts, but deliberately leave
--- application state empty. The BenchBase loader is captured as the bootstrap
--- CDC prefix; pre-connector seed rows would make that prefix unverifiable.
+-- Create the benchmark-neutral control tables before Debezium starts. Compose
+-- mounts exactly one selected adapter schema as the next init script.
 USE benchbase;
 
-CREATE TABLE usertable (
-  ycsb_key INT NOT NULL PRIMARY KEY,
-  field1   VARCHAR(100) NULL,
-  field2   VARCHAR(100) NULL,
-  field3   VARCHAR(100) NULL,
-  field4   VARCHAR(100) NULL,
-  field5   VARCHAR(100) NULL,
-  field6   VARCHAR(100) NULL,
-  field7   VARCHAR(100) NULL,
-  field8   VARCHAR(100) NULL,
-  field9   VARCHAR(100) NULL,
-  field10  VARCHAR(100) NULL
-) ENGINE=InnoDB CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+ALTER DATABASE benchbase CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 -- Each lifecycle fence is inserted and committed in its own transaction by
 -- scripts/e2e.sh. The composite primary key makes a repeated phase explicit.

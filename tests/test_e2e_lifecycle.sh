@@ -54,13 +54,62 @@ while (( $# > 0 )); do
   shift
 done
 case "$query" in
+  *"'SETTING'"*)
+    cat <<'METADATA'
+SETTING	server.character_set	utf8mb4
+SETTING	server.collation	utf8mb4_bin
+SETTING	server.time_zone	+00:00
+SETTING	server.sql_mode	STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH
+SETTING	server.transaction_isolation	REPEATABLE-READ
+SETTING	server.snapshot_isolation	1
+SETTING	session.character_set_client	utf8mb4
+SETTING	session.character_set_connection	utf8mb4
+SETTING	session.character_set_results	utf8mb4
+SETTING	session.collation_connection	utf8mb4_bin
+SETTING	session.time_zone	+00:00
+SETTING	session.sql_mode	STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH
+SETTING	session.transaction_isolation	REPEATABLE-READ
+SETTING	session.snapshot_isolation	1
+METADATA
+    ;;
+  *"information_schema.SCHEMATA"*)
+    printf 'DATABASE\tbenchbase\tutf8mb4\tutf8mb4_bin\n'
+    ;;
   *"information_schema.TABLES"*)
-    printf 'checker_run_fence\nsession_txn\nusertable\n'
+    printf 'TABLE\tbenchbase.checker_run_fence\tInnoDB\tutf8mb4_bin\n'
+    printf 'TABLE\tbenchbase.session_txn\tInnoDB\tutf8mb4_bin\n'
+    printf 'TABLE\tbenchbase.usertable\tInnoDB\tutf8mb4_bin\n'
+    ;;
+  *"information_schema.COLUMNS"*)
+    cat <<'METADATA'
+COLUMN	benchbase.checker_run_fence	run_id	1	char	NO	-	-	36	-	ascii	ascii_bin	-
+COLUMN	benchbase.checker_run_fence	phase	2	varchar	NO	-	-	32	-	ascii	ascii_bin	-
+COLUMN	benchbase.checker_run_fence	nonce	3	char	NO	-	-	36	-	ascii	ascii_bin	-
+COLUMN	benchbase.session_txn	session_id	1	varchar	NO	-	-	64	-	ascii	ascii_bin	-
+COLUMN	benchbase.session_txn	txn_id	2	bigint	NO	19	0	-	-	-	-	-
+COLUMN	benchbase.usertable	ycsb_key	1	int	NO	10	0	-	-	-	-	-
+COLUMN	benchbase.usertable	field1	2	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field2	3	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field3	4	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field4	5	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field5	6	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field6	7	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field7	8	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field8	9	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field9	10	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+COLUMN	benchbase.usertable	field10	11	varchar	YES	-	-	100	-	utf8mb4	utf8mb4_bin	-
+METADATA
+    ;;
+  *"information_schema.KEY_COLUMN_USAGE"*)
+    printf 'PRIMARY\tbenchbase.checker_run_fence\trun_id\t1\n'
+    printf 'PRIMARY\tbenchbase.checker_run_fence\tphase\t2\n'
+    printf 'PRIMARY\tbenchbase.session_txn\tsession_id\t1\n'
+    printf 'PRIMARY\tbenchbase.usertable\tycsb_key\t1\n'
     ;;
   *"COUNT(*) FROM session_txn"*)
     cat "$MARKER_ROWS_FILE"
     ;;
-  *"COUNT(*) FROM usertable"*|*"COUNT(*) FROM checker_run_fence"*)
+  *"COUNT(*) FROM "*"usertable"*|*"COUNT(*) FROM checker_run_fence"*)
     echo 0
     ;;
   *"@@innodb_snapshot_isolation"*)
@@ -123,6 +172,8 @@ case "$command" in
 import json, sys
 record = json.loads(sys.argv[1])
 if record["kind"] == "run_manifest":
+    assert record["benchmark"] == "ycsb"
+    assert record["application_table_allowlist"] == ["benchbase.usertable"]
     assert record["transaction_marker_table"] == "benchbase.session_txn"
     assert record["result_scope"] == "point_transaction_soww"
 print(record["kind"])
@@ -391,6 +442,7 @@ run_case() {
   local capture_metrics=${10:-0}
   local retained_identity_bytes=${11:-}
   local pending_client_bytes=${12:-}
+  local benchmark=${13:-ycsb}
   local case_root="$TEST_ROOT/$name"
   mkdir -p "$case_root"
   write_test_programs "$case_root"
@@ -435,6 +487,7 @@ run_case() {
       BLACKBOX_MONITOR_METRICS_PATH="$metrics_path" \
       BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$pending_client_bytes" \
       BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$retained_identity_bytes" \
+      BLACKBOX_BENCHMARK="$benchmark" \
       BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="${EXPECTED_REDIS_MAXMEMORY_BYTES:-}" \
       BLACKBOX_RUN_ID_PATH="$run_id_path" \
       BLACKBOX_BOOTSTRAP_MANIFEST_PATH="$bootstrap_manifest_path" \
@@ -478,6 +531,14 @@ final_line=$(line_of 'status:FINAL' "$CASE_LOG")
 (( loader_line < bootstrap_line && bootstrap_line < load_fence_line )) || fail 'bootstrap manifest/fence order is wrong'
 (( load_fence_line < load_ack_line && load_ack_line < workload_line )) || fail 'workload bypassed LOAD acknowledgement'
 (( workload_line < end_fence_line && end_fence_line < final_line )) || fail 'END/final order is wrong'
+
+run_case tpcc_runtime_gate 0 0 0 0 0 0 '' audited 0 '' '' tpcc
+[[ $CASE_STATUS != 0 ]] || fail 'incomplete TPC-C runtime unexpectedly entered the lifecycle'
+if grep -q '^stack:database$' "$CASE_LOG"; then
+  fail 'incomplete TPC-C runtime performed destructive stack startup'
+fi
+grep -q 'adapter tpcc runtime is incomplete' "$CASE_ROOT/stderr" ||
+  fail 'incomplete TPC-C runtime did not report its capability gate'
 
 run_case audited_metrics 0 0 0 0 0 0 '' audited 1
 [[ $CASE_STATUS == 0 ]] ||

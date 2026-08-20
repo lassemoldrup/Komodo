@@ -53,7 +53,9 @@ services:
       - "3306:3306"
     volumes:
       - ./mariadb/conf.d:/etc/mysql/conf.d:ro
-      - ./mariadb/initdb:/docker-entrypoint-initdb.d:ro
+      - ./mariadb/initdb/01-users.sql:/docker-entrypoint-initdb.d/01-users.sql:ro
+      - ./mariadb/initdb/02-schema.sql:/docker-entrypoint-initdb.d/02-common-schema.sql:ro
+      - ${BLACKBOX_ADAPTER_SCHEMA_FILE:-./mariadb/initdb/adapters/ycsb.sql}:/docker-entrypoint-initdb.d/03-application-schema.sql:ro
     # tmpfs datadir: throwaway harness; keeps disk I/O out of the measured
     # workload. Everything is lost on container stop, which is what we want.
     tmpfs:

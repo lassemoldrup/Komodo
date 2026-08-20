@@ -466,6 +466,10 @@ VARIABLES` against an unconfigured `mariadb:12.3`.
 | `max_binlog_size` | 1G | 256M | smaller files on a tmpfs datadir |
 | `expire_logs_days` | 10 | 1 | same |
 | `server_id` | – | 1 | required for binlog |
+| `character_set_server` | image default | `utf8mb4` | canonical strict UTF-8 text |
+| `collation_server` | image default | `utf8mb4_bin` | binary text comparison |
+| `default_time_zone` | `SYSTEM` | `+00:00` | host-independent timestamps |
+| `sql_mode` | image default | pinned contract | strict writes and full-width `CHAR` reads |
 
 MariaDB's `REPEATABLE READ` + `innodb_snapshot_isolation=ON` is already SI and
 already the 12.3 default, so no isolation change is needed there. That pair,
@@ -509,7 +513,8 @@ system of record.
 ```
 docker-compose.yml                        # profiles: mariadb | yugabyte | oracle
 mariadb/conf.d/cdc.cnf                    # binlog, isolation, durability, throughput
-mariadb/initdb/*.sql                      # accounts + schema
+mariadb/initdb/*.sql                      # accounts + benchmark-neutral controls
+mariadb/initdb/adapters/*.sql             # one selected application schema
 yugabyte/init.sql, init.sh                # schema first, HYBRID_TIME slot last
 oracle/startdb.d/                         # ARCHIVELOG, suppl. logging, user, schema
 debezium/application*.properties          # one per backend
@@ -524,10 +529,12 @@ scripts/bench.sh, sql.sh, status.sh
 monitor/                                  # C++ CDC reader, assembler, fixtures, tests
 ```
 
-The audited MariaDB path uses an initially empty `benchbase.usertable`,
-`benchbase.checker_run_fence`, and `benchbase.session_txn`, all created before
-CDC starts. The `registers` table remains the exploratory workload table for the
-other backend profiles.
+The audited MariaDB path creates the selected adapter's exact initially empty
+application-table roster plus `benchbase.checker_run_fence` and
+`benchbase.session_txn` before CDC starts. `BLACKBOX_BENCHMARK` selects the
+adapter contract and matching init SQL; the default remains `ycsb`. The
+`registers` table remains the exploratory workload table for the other backend
+profiles.
 
 ## Credentials
 

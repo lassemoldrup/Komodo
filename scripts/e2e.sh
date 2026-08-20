@@ -83,6 +83,19 @@ require_configuration() {
   blackbox_require_command pgrep
   blackbox_require_command pkill
 
+  BLACKBOX_ADAPTER_CONTRACT=$(blackbox_adapter_contract) || return 1
+  BLACKBOX_BACKEND_CONTRACT=$(blackbox_backend_contract) || return 1
+  BLACKBOX_SET_NAMES_SQL=$(jq -er '.session_requirements.set_names' \
+    <<<"$BLACKBOX_BACKEND_CONTRACT") || {
+    blackbox_die "backend contract lacks a valid session SET NAMES statement"
+    return 1
+  }
+  BLACKBOX_ADAPTER_SCHEMA_FILE="$ROOT/mariadb/initdb/adapters/${BLACKBOX_BENCHMARK}.sql"
+  if [[ ! -f $BLACKBOX_ADAPTER_SCHEMA_FILE ]]; then
+    blackbox_die "selected adapter schema file is missing: $BLACKBOX_ADAPTER_SCHEMA_FILE"
+    return 1
+  fi
+
   : "${BLACKBOX_LOADER_COMMAND:?set BLACKBOX_LOADER_COMMAND to the non-DDL BenchBase loader command}"
   : "${BLACKBOX_WORKLOAD_COMMAND:?set BLACKBOX_WORKLOAD_COMMAND to the BenchBase workload command}"
   : "${BLACKBOX_EXPECTED_SESSION_IDS:?set BLACKBOX_EXPECTED_SESSION_IDS to a comma-separated worker roster}"
@@ -139,7 +152,9 @@ require_configuration() {
   BLACKBOX_ACTIVE_RUN_ID=$(blackbox_new_uuid)
   export BLACKBOX_ACTIVE_RUN_ID
   export BLACKBOX_REDIS_HOST BLACKBOX_REDIS_PORT BLACKBOX_DB_HOST BLACKBOX_DB_PORT
-  export BLACKBOX_BACKEND_SOURCE_ID BLACKBOX_DECLARED_ISOLATION
+  export BLACKBOX_BACKEND BLACKBOX_BENCHMARK BLACKBOX_BACKEND_SOURCE_ID
+  export BLACKBOX_DECLARED_ISOLATION BLACKBOX_SET_NAMES_SQL
+  export BLACKBOX_ADAPTER_SCHEMA_FILE
   export BLACKBOX_EXPECTED_SESSION_IDS
   export BLACKBOX_PROCESSING_MODE BLACKBOX_MONITOR_METRICS_PATH
   export BLACKBOX_RUN_ID_PATH BLACKBOX_BOOTSTRAP_MANIFEST_PATH
@@ -239,29 +254,37 @@ wait_for_cdc_streaming() {
 
 
 verify_fresh_schema() {
-  local tables
-  tables=$(blackbox_database_query \
-    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'benchbase' ORDER BY TABLE_NAME")
-  if [[ $tables != $'checker_run_fence\nsession_txn\nusertable' ]]; then
-    blackbox_die "benchbase schema is not the exact application/control schema"
+  if ! blackbox_verify_schema_metadata; then
+    blackbox_die "server/session/database schema differs from the selected contracts"
     return 1
   fi
 
-  local application_rows fence_rows marker_rows snapshot_isolation
-  application_rows=$(blackbox_database_query "SELECT COUNT(*) FROM usertable")
+  local application_table_lines
+  application_table_lines=$(jq -er '.application_tables[]' \
+    <<<"$BLACKBOX_ADAPTER_CONTRACT") || {
+    blackbox_die "selected adapter contract has an invalid table roster"
+    return 1
+  }
+  local application_tables=()
+  mapfile -t application_tables <<<"$application_table_lines"
+  local qualified_table table application_rows
+  for qualified_table in "${application_tables[@]}"; do
+    table=${qualified_table#benchbase.}
+    application_rows=$(blackbox_database_query "SELECT COUNT(*) FROM \`$table\`") || return 1
+    application_rows=${application_rows//[[:space:]]/}
+    if [[ $application_rows != 0 ]]; then
+      blackbox_die "fresh-stack enforcement found rows in $qualified_table"
+      return 1
+    fi
+  done
+
+  local fence_rows marker_rows
   fence_rows=$(blackbox_database_query "SELECT COUNT(*) FROM checker_run_fence")
   marker_rows=$(blackbox_database_query "SELECT COUNT(*) FROM session_txn")
-  snapshot_isolation=$(blackbox_database_query "SELECT @@innodb_snapshot_isolation")
-  application_rows=${application_rows//[[:space:]]/}
   fence_rows=${fence_rows//[[:space:]]/}
   marker_rows=${marker_rows//[[:space:]]/}
-  snapshot_isolation=${snapshot_isolation//[[:space:]]/}
-  if [[ $application_rows != 0 || $fence_rows != 0 || $marker_rows != 0 ]]; then
+  if [[ $fence_rows != 0 || $marker_rows != 0 ]]; then
     blackbox_die "fresh-stack enforcement found pre-CDC rows"
-    return 1
-  fi
-  if [[ $snapshot_isolation != 1 ]]; then
-    blackbox_die "MariaDB innodb_snapshot_isolation is not enabled"
     return 1
   fi
 
