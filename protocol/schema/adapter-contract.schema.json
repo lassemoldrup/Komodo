@@ -59,6 +59,8 @@
         "transaction_type",
         "procedure",
         "statement_id",
+        "trace_statement_id",
+        "trace_projection",
         "table",
         "classification",
         "result_shape",
@@ -69,6 +71,16 @@
         "transaction_type": { "$ref": "common.schema.json#/$defs/adapterName" },
         "procedure": { "$ref": "common.schema.json#/$defs/adapterName" },
         "statement_id": { "$ref": "common.schema.json#/$defs/adapterName" },
+        "trace_statement_id": {
+          "oneOf": [
+            { "$ref": "common.schema.json#/$defs/adapterName" },
+            { "type": "null" }
+          ]
+        },
+        "trace_projection": {
+          "type": "string",
+          "enum": ["full_row", "omitted"]
+        },
         "table": { "$ref": "common.schema.json#/$defs/tableName" },
         "classification": {
           "type": "string",

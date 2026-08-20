@@ -360,7 +360,7 @@ def verify_transaction_fixture(document: dict[str, Any], codec: TpccCodec) -> li
                 )
 
     transactions = document["transactions"]
-    require(isinstance(transactions, list) and len(transactions) == 11, "fixture transaction count")
+    require(isinstance(transactions, list) and len(transactions) == 12, "fixture transaction count")
     expected_names = [
         "run_start",
         "bootstrap_rows",
@@ -368,10 +368,11 @@ def verify_transaction_fixture(document: dict[str, Any], codec: TpccCodec) -> li
         "payment_shape",
         "new_order_shape",
         "delivery_shape",
-        "marker_only",
+        "order_status_marker_only",
         "primary_key_change",
         "insert_then_delete",
         "net_no_change",
+        "stock_level_marker_only",
         "end_fence",
     ]
     require([item.get("name") for item in transactions] == expected_names, "fixture transaction names")

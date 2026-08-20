@@ -171,11 +171,23 @@ trimmed `CHAR`, nullable present/NULL, timestamps, decimals, UTF-8, and the empt
 `new_order` value. Its encoded bytes must match the executable goldens' codec.
 
 `protocol/fixtures/mariadb_tpcc_transactions.json` pins the raw startup-schema
-prefix and 11 BEGIN/row/END transactions covering bootstrap, fences, marker-only
-work, Payment/NewOrder/Delivery write shapes, primary-key changes,
+prefix and 12 BEGIN/row/END transactions covering bootstrap, fences, two
+marker-only workload transactions, Payment/NewOrder/Delivery write shapes,
+primary-key changes,
 insert-then-delete, and net-no-change writes. The protocol verifier independently
 parses and normalizes those raw envelopes before comparing their expected
 classification, correlation, fences, final writes, and bootstrap manifest.
+
+`protocol/fixtures/mariadb_tpcc_client_txns.json` pins eight `ClientTxn` records
+against the eight workload markers in that raw fixture. Five semantic records
+cover the exact transaction roster, snapshot and local sources, multiple rows
+from one statement, nullable values, and a present row whose canonical value is
+empty. Three explicitly synthetic diagnostic clients supply the remaining CDC
+halves for reconciliation and carry no reads. The separate discarded-attempt
+vector covers Absent framing without publishing or correlating it, and the
+Delivery empty-result assertion requires zero emitted events. The verifier
+independently recomputes every row encoding, read digest, marker correlation,
+and final session rolling digest.
 
 ## Read digest
 

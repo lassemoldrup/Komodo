@@ -75,6 +75,8 @@ struct AdapterResultSetContract {
   std::string_view empty_result;
   std::span<const std::string_view> semantics_ignored;
   std::optional<std::string_view> omission_reason;
+  std::optional<std::string_view> trace_statement_id;
+  std::string_view trace_projection;
 
   bool operator==(const AdapterResultSetContract &) const = default;
 };

@@ -234,7 +234,7 @@ class BlackboxRecordTest(unittest.TestCase):
             ["NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel"],
         )
         self.assertEqual(len(contract["application_tables"]), 9)
-        self.assertFalse(contract["runtime_capabilities"]["client_trace"])
+        self.assertTrue(contract["runtime_capabilities"]["client_trace"])
         self.assertTrue(contract["runtime_capabilities"]["bootstrap_scan"])
         self.assertIsInstance(contract["runtime_capabilities"]["cdc_normalization"], bool)
 
@@ -257,9 +257,9 @@ class BlackboxRecordTest(unittest.TestCase):
         self.assertTrue(tpcc["bootstrap_ready"])
         self.assertTrue(tpcc["monitor_ready"])
         self.assertEqual(tpcc["missing_for_monitor"], [])
-        self.assertFalse(tpcc["client_ready"])
-        self.assertFalse(tpcc["end_to_end_ready"])
-        self.assertIn("client_trace", tpcc["missing_for_end_to_end"])
+        self.assertTrue(tpcc["client_ready"])
+        self.assertTrue(tpcc["end_to_end_ready"])
+        self.assertEqual(tpcc["missing_for_end_to_end"], [])
 
     def test_backend_contract_exposes_pinned_mariadb_session(self) -> None:
         result = self.run_tool("backend-contract", "--backend", "mariadb")
@@ -470,7 +470,7 @@ class BlackboxRecordTest(unittest.TestCase):
         )
         self.assertIn("must match [A-Za-z]", result.stderr)
 
-    def test_run_manifest_fails_closed_for_incomplete_tpcc_runtime(self) -> None:
+    def test_run_manifest_accepts_ready_tpcc_runtime(self) -> None:
         result = self.run_tool(
             "run-manifest",
             "--run-id",
@@ -483,12 +483,14 @@ class BlackboxRecordTest(unittest.TestCase):
             "tpcc",
             "--session-id",
             "tpcc/worker/1",
-            expected_status=2,
         )
-        self.assertIn("adapter tpcc runtime is incomplete", result.stderr)
-        self.assertIn("client_trace", result.stderr)
-        self.assertNotIn("cdc_normalization", result.stderr)
-        self.assertNotIn("bootstrap_scan", result.stderr)
+        manifest = json.loads(result.stdout)
+        self.assertEqual(manifest["benchmark"], "tpcc")
+        self.assertEqual(manifest["expected_session_ids"], ["tpcc/worker/1"])
+        contract = json.loads((ROOT / "protocol/adapters/tpcc.json").read_text())
+        self.assertEqual(
+            manifest["application_table_allowlist"], contract["application_tables"]
+        )
 
     def test_empty_tpcc_bootstrap_uses_full_roster_and_empty_digest(self) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8") as scan:

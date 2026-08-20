@@ -1,0 +1,721 @@
+{
+  "adapter_contract": "protocol/adapters/tpcc.json",
+  "backend": "mariadb",
+  "backend_contract": "protocol/backends/mariadb.json",
+  "discarded_attempt_reads": [
+    {
+      "discarded": true,
+      "name": "new_order_invalid_item",
+      "published": false,
+      "read_digest": "7f48e9fbe9842e729ba774ada6dd23f6d7b5fd8a7d2686ab248abdc05a72d105",
+      "read_provenance": [
+        {
+          "event_seq": 0,
+          "key": null,
+          "row_name": "customer_after_payment",
+          "statement_id": "stmtGetCustSQL",
+          "table": "benchbase.customer",
+          "trace_statement_id": "stmtGetCustFullSQL"
+        },
+        {
+          "event_seq": 1,
+          "key": null,
+          "row_name": "warehouse_after_payment",
+          "statement_id": "stmtGetWhseSQL",
+          "table": "benchbase.warehouse",
+          "trace_statement_id": "stmtGetWhseFullSQL"
+        },
+        {
+          "event_seq": 2,
+          "key": {
+            "i_id": 999999
+          },
+          "row_name": null,
+          "statement_id": "stmtGetItemSQL",
+          "table": "benchbase.item",
+          "trace_statement_id": "stmtGetItemFullSQL"
+        }
+      ],
+      "reads": [
+        {
+          "event_seq": 0,
+          "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAhjdXN0b21lcgAAAAEAAAABAAAAAQ==",
+          "source": "snapshot",
+          "value_bytes_base64": "AAAAAAAAE4gAAAACRyAAAAAH5aeT8J+ZggAAAAAAAAAAAExLQP////////u0P4zMzQAAAAIAAAAAAAAAA29uZQAAAAN0d28AAAAJTW9udHLDqWFsAAAAAlEgAAAACTEyMzQgICAgIAAAABA1NTUgICAgICAgICAgICAgAAAAAGqG9HAAAAACT0UAAAAHYQBi8J+Zgg==",
+          "value_state": "present"
+        },
+        {
+          "event_seq": 1,
+          "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAl3YXJlaG91c2UAAAAB",
+          "source": "snapshot",
+          "value_bytes_base64": "AAAAAAHJw+QAAAAAAAAE0gAAAAjku5PlupMgIAAAAAAAAAAERGV1eAAAAAhNw7xuY2hlbgAAAAJDIAAAAAkxMjM0NSAgICA=",
+          "value_state": "present"
+        },
+        {
+          "event_seq": 2,
+          "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAARpdGVtAA9CPw==",
+          "source": "snapshot",
+          "value_state": "absent"
+        }
+      ],
+      "txn_type": "NewOrder"
+    }
+  ],
+  "empty_result_assertions": [
+    {
+      "emitted_reads": [],
+      "name": "delivery_empty_district",
+      "returned_row_count": 0,
+      "statement_id": "delivGetOrderIdSQL",
+      "txn_type": "Delivery"
+    }
+  ],
+  "jdbc_driver_version": "3.5.1",
+  "mariadb_image": "mariadb:12.3",
+  "raw_transaction_fixture": {
+    "path": "protocol/fixtures/mariadb_tpcc_transactions.json",
+    "sha256": "1a527bbda98d921d24a7e4a1751be9602e27341f56f8f2fc995c0b97bd5322b7"
+  },
+  "row_catalog": [
+    {
+      "name": "warehouse_after_payment",
+      "row": {
+        "w_city": "München",
+        "w_id": 1,
+        "w_name": "仓库  ",
+        "w_state": "C",
+        "w_street_1": "",
+        "w_street_2": "Deux",
+        "w_tax": "0.1234",
+        "w_ytd": "300001.00",
+        "w_zip": "12345"
+      },
+      "table": "benchbase.warehouse"
+    },
+    {
+      "name": "district_after_payment",
+      "row": {
+        "d_city": "東京",
+        "d_id": 1,
+        "d_name": "D",
+        "d_next_o_id": 3,
+        "d_state": "Z",
+        "d_street_1": "street",
+        "d_street_2": "",
+        "d_tax": "0.0000",
+        "d_w_id": 1,
+        "d_ytd": "0.00",
+        "d_zip": "9"
+      },
+      "table": "benchbase.district"
+    },
+    {
+      "name": "customer_before_payment",
+      "row": {
+        "c_balance": "-10.00",
+        "c_city": "Montréal",
+        "c_credit": "G",
+        "c_credit_lim": "50000.00",
+        "c_d_id": 1,
+        "c_data": "a\u0000b🙂",
+        "c_delivery_cnt": 0,
+        "c_discount": "0.5000",
+        "c_first": "",
+        "c_id": 1,
+        "c_last": "姓🙂",
+        "c_middle": "OE",
+        "c_payment_cnt": 1,
+        "c_phone": "555",
+        "c_since": "2026-08-20T12:34:56Z",
+        "c_state": "Q",
+        "c_street_1": "one",
+        "c_street_2": "two",
+        "c_w_id": 1,
+        "c_ytd_payment": 0.1,
+        "c_zip": "1234"
+      },
+      "table": "benchbase.customer"
+    },
+    {
+      "name": "customer_after_payment",
+      "row": {
+        "c_balance": "-11.00",
+        "c_city": "Montréal",
+        "c_credit": "G",
+        "c_credit_lim": "50000.00",
+        "c_d_id": 1,
+        "c_data": "a\u0000b🙂",
+        "c_delivery_cnt": 0,
+        "c_discount": "0.5000",
+        "c_first": "",
+        "c_id": 1,
+        "c_last": "姓🙂",
+        "c_middle": "OE",
+        "c_payment_cnt": 2,
+        "c_phone": "555",
+        "c_since": "2026-08-20T12:34:56Z",
+        "c_state": "Q",
+        "c_street_1": "one",
+        "c_street_2": "two",
+        "c_w_id": 1,
+        "c_ytd_payment": 1.1,
+        "c_zip": "1234"
+      },
+      "table": "benchbase.customer"
+    },
+    {
+      "name": "item_snapshot",
+      "row": {
+        "i_data": "商品🙂",
+        "i_id": 1,
+        "i_im_id": 7,
+        "i_name": "ééé",
+        "i_price": "999.99"
+      },
+      "table": "benchbase.item"
+    },
+    {
+      "name": "new_order_before_delivery",
+      "row": {
+        "no_d_id": 1,
+        "no_o_id": 1,
+        "no_w_id": 1
+      },
+      "table": "benchbase.new_order"
+    },
+    {
+      "name": "oorder_before_delivery",
+      "row": {
+        "o_all_local": 1,
+        "o_c_id": 1,
+        "o_carrier_id": null,
+        "o_d_id": 1,
+        "o_entry_d": "2026-08-20T12:35:00Z",
+        "o_id": 1,
+        "o_ol_cnt": 1,
+        "o_w_id": 1
+      },
+      "table": "benchbase.oorder"
+    },
+    {
+      "name": "customer_after_delivery",
+      "row": {
+        "c_balance": "-10.00",
+        "c_city": "Montréal",
+        "c_credit": "G",
+        "c_credit_lim": "50000.00",
+        "c_d_id": 1,
+        "c_data": "a\u0000b🙂",
+        "c_delivery_cnt": 1,
+        "c_discount": "0.5000",
+        "c_first": "",
+        "c_id": 1,
+        "c_last": "姓🙂",
+        "c_middle": "OE",
+        "c_payment_cnt": 2,
+        "c_phone": "555",
+        "c_since": "2026-08-20T12:34:56Z",
+        "c_state": "Q",
+        "c_street_1": "one",
+        "c_street_2": "two",
+        "c_w_id": 1,
+        "c_ytd_payment": 1.1,
+        "c_zip": "1234"
+      },
+      "table": "benchbase.customer"
+    },
+    {
+      "name": "order_status_order",
+      "row": {
+        "o_all_local": 1,
+        "o_c_id": 1,
+        "o_carrier_id": null,
+        "o_d_id": 1,
+        "o_entry_d": "2026-08-20T12:37:00Z",
+        "o_id": 3,
+        "o_ol_cnt": 2,
+        "o_w_id": 1
+      },
+      "table": "benchbase.oorder"
+    },
+    {
+      "name": "order_status_line_one",
+      "row": {
+        "ol_amount": "1.00",
+        "ol_d_id": 1,
+        "ol_delivery_d": null,
+        "ol_dist_info": "line1",
+        "ol_i_id": 1,
+        "ol_number": 1,
+        "ol_o_id": 3,
+        "ol_quantity": 1,
+        "ol_supply_w_id": 1,
+        "ol_w_id": 1
+      },
+      "table": "benchbase.order_line"
+    },
+    {
+      "name": "order_status_line_two",
+      "row": {
+        "ol_amount": "2.00",
+        "ol_d_id": 1,
+        "ol_delivery_d": null,
+        "ol_dist_info": "line2",
+        "ol_i_id": 1,
+        "ol_number": 2,
+        "ol_o_id": 3,
+        "ol_quantity": 2,
+        "ol_supply_w_id": 1,
+        "ol_w_id": 1
+      },
+      "table": "benchbase.order_line"
+    },
+    {
+      "name": "district_after_new_order",
+      "row": {
+        "d_city": "東京",
+        "d_id": 1,
+        "d_name": "D",
+        "d_next_o_id": 4,
+        "d_state": "Z",
+        "d_street_1": "street",
+        "d_street_2": "",
+        "d_tax": "0.0000",
+        "d_w_id": 1,
+        "d_ytd": "0.00",
+        "d_zip": "9"
+      },
+      "table": "benchbase.district"
+    }
+  ],
+  "run_manifest": {
+    "application_table_allowlist": [
+      "benchbase.warehouse",
+      "benchbase.item",
+      "benchbase.stock",
+      "benchbase.district",
+      "benchbase.customer",
+      "benchbase.history",
+      "benchbase.oorder",
+      "benchbase.new_order",
+      "benchbase.order_line"
+    ],
+    "backend": "mariadb",
+    "backend_source_id": "mariadb-main",
+    "benchmark": "tpcc",
+    "control_table_allowlist": [
+      "benchbase.checker_run_fence"
+    ],
+    "declared_isolation": "REPEATABLE_READ",
+    "expected_session_ids": [
+      "tpcc/worker/1"
+    ],
+    "kind": "run_manifest",
+    "result_scope": "point_transaction_soww",
+    "run_id": "87654321-4321-4321-8321-cba987654322",
+    "transaction_marker_table": "benchbase.session_txn"
+  },
+  "semantic_transactions": [
+    {
+      "cdc_transaction": "payment_shape",
+      "client_txn": {
+        "attempt_id": "20000000-0000-4000-8000-000000000001",
+        "correlation_id": {
+          "run_id": "87654321-4321-4321-8321-cba987654322",
+          "session_id": "tpcc/worker/1",
+          "txn_id": 1
+        },
+        "correlation_kind": "session_txn",
+        "kind": "client_txn",
+        "logical_txn_id": "10000000-0000-4000-8000-000000000001",
+        "read_count": 3,
+        "read_digest": "2ea67408a9b8cffa4002e0d7c25f6281bca4cf6f58e88affaf61a0667e78d225",
+        "reads": [
+          {
+            "event_seq": 0,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAl3YXJlaG91c2UAAAAB",
+            "source": "local",
+            "value_bytes_base64": "AAAAAAHJw+QAAAAAAAAE0gAAAAjku5PlupMgIAAAAAAAAAAERGV1eAAAAAhNw7xuY2hlbgAAAAJDIAAAAAkxMjM0NSAgICA=",
+            "value_state": "present"
+          },
+          {
+            "event_seq": 1,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAhkaXN0cmljdAAAAAEAAAAB",
+            "source": "local",
+            "value_bytes_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAMAAAABRAAAAAZzdHJlZXQAAAAAAAAABuadseS6rAAAAAJaIAAAAAk5ICAgICAgICA=",
+            "value_state": "present"
+          },
+          {
+            "event_seq": 2,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAhjdXN0b21lcgAAAAEAAAABAAAAAQ==",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAAAAE4gAAAACRyAAAAAH5aeT8J+ZggAAAAAAAAAAAExLQP////////wYPczMzQAAAAEAAAAAAAAAA29uZQAAAAN0d28AAAAJTW9udHLDqWFsAAAAAlEgAAAACTEyMzQgICAgIAAAABA1NTUgICAgICAgICAgICAgAAAAAGqG9HAAAAACT0UAAAAHYQBi8J+Zgg==",
+            "value_state": "present"
+          }
+        ],
+        "run_id": "87654321-4321-4321-8321-cba987654322",
+        "session_id": "tpcc/worker/1",
+        "session_seq": 1,
+        "txn_type": "Payment"
+      },
+      "fixture_role": "semantic",
+      "name": "payment_reads",
+      "read_provenance": [
+        {
+          "event_seq": 0,
+          "row_name": "warehouse_after_payment",
+          "statement_id": "payGetWhseSQL",
+          "table": "benchbase.warehouse",
+          "trace_statement_id": "payGetWhseFullSQL"
+        },
+        {
+          "event_seq": 1,
+          "row_name": "district_after_payment",
+          "statement_id": "payGetDistSQL",
+          "table": "benchbase.district",
+          "trace_statement_id": "payGetDistFullSQL"
+        },
+        {
+          "event_seq": 2,
+          "row_name": "customer_before_payment",
+          "statement_id": "payGetCustSQL",
+          "table": "benchbase.customer",
+          "trace_statement_id": "payGetCustFullSQL"
+        }
+      ]
+    },
+    {
+      "cdc_transaction": "new_order_shape",
+      "client_txn": {
+        "attempt_id": "20000000-0000-4000-8000-000000000002",
+        "correlation_id": {
+          "run_id": "87654321-4321-4321-8321-cba987654322",
+          "session_id": "tpcc/worker/1",
+          "txn_id": 2
+        },
+        "correlation_kind": "session_txn",
+        "kind": "client_txn",
+        "logical_txn_id": "10000000-0000-4000-8000-000000000002",
+        "read_count": 3,
+        "read_digest": "636722dfcda5e1f1880c50a1b45697567eb729f5724499c95a603a9ed905efa7",
+        "reads": [
+          {
+            "event_seq": 0,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAhjdXN0b21lcgAAAAEAAAABAAAAAQ==",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAAAAE4gAAAACRyAAAAAH5aeT8J+ZggAAAAAAAAAAAExLQP////////u0P4zMzQAAAAIAAAAAAAAAA29uZQAAAAN0d28AAAAJTW9udHLDqWFsAAAAAlEgAAAACTEyMzQgICAgIAAAABA1NTUgICAgICAgICAgICAgAAAAAGqG9HAAAAACT0UAAAAHYQBi8J+Zgg==",
+            "value_state": "present"
+          },
+          {
+            "event_seq": 1,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAl3YXJlaG91c2UAAAAB",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAAHJw+QAAAAAAAAE0gAAAAjku5PlupMgIAAAAAAAAAAERGV1eAAAAAhNw7xuY2hlbgAAAAJDIAAAAAkxMjM0NSAgICA=",
+            "value_state": "present"
+          },
+          {
+            "event_seq": 2,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAARpdGVtAAAAAQ==",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAABsOpw6nDqQAAAAAAAYafAAAACuWVhuWTgfCfmYIAAAAH",
+            "value_state": "present"
+          }
+        ],
+        "run_id": "87654321-4321-4321-8321-cba987654322",
+        "session_id": "tpcc/worker/1",
+        "session_seq": 2,
+        "txn_type": "NewOrder"
+      },
+      "fixture_role": "semantic",
+      "name": "new_order_reads",
+      "read_provenance": [
+        {
+          "event_seq": 0,
+          "row_name": "customer_after_payment",
+          "statement_id": "stmtGetCustSQL",
+          "table": "benchbase.customer",
+          "trace_statement_id": "stmtGetCustFullSQL"
+        },
+        {
+          "event_seq": 1,
+          "row_name": "warehouse_after_payment",
+          "statement_id": "stmtGetWhseSQL",
+          "table": "benchbase.warehouse",
+          "trace_statement_id": "stmtGetWhseFullSQL"
+        },
+        {
+          "event_seq": 2,
+          "row_name": "item_snapshot",
+          "statement_id": "stmtGetItemSQL",
+          "table": "benchbase.item",
+          "trace_statement_id": "stmtGetItemFullSQL"
+        }
+      ]
+    },
+    {
+      "cdc_transaction": "delivery_shape",
+      "client_txn": {
+        "attempt_id": "20000000-0000-4000-8000-000000000003",
+        "correlation_id": {
+          "run_id": "87654321-4321-4321-8321-cba987654322",
+          "session_id": "tpcc/worker/1",
+          "txn_id": 3
+        },
+        "correlation_kind": "session_txn",
+        "kind": "client_txn",
+        "logical_txn_id": "10000000-0000-4000-8000-000000000003",
+        "read_count": 2,
+        "read_digest": "e778bca604e560692b517fec2c414d560d1fe3ae21d22dc8705f86f0293f4575",
+        "reads": [
+          {
+            "event_seq": 0,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAluZXdfb3JkZXIAAAABAAAAAQAAAAE=",
+            "source": "snapshot",
+            "value_bytes_base64": "",
+            "value_state": "present"
+          },
+          {
+            "event_seq": 1,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAZvb3JkZXIAAAABAAAAAQAAAAE=",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAQAAAAABAAAAAQAAAABqhvR0",
+            "value_state": "present"
+          }
+        ],
+        "run_id": "87654321-4321-4321-8321-cba987654322",
+        "session_id": "tpcc/worker/1",
+        "session_seq": 3,
+        "txn_type": "Delivery"
+      },
+      "fixture_role": "semantic",
+      "name": "delivery_reads",
+      "read_provenance": [
+        {
+          "event_seq": 0,
+          "row_name": "new_order_before_delivery",
+          "statement_id": "delivGetOrderIdSQL",
+          "table": "benchbase.new_order",
+          "trace_statement_id": "delivGetOrderIdFullSQL"
+        },
+        {
+          "event_seq": 1,
+          "row_name": "oorder_before_delivery",
+          "statement_id": "delivGetCustIdSQL",
+          "table": "benchbase.oorder",
+          "trace_statement_id": "delivGetCustIdFullSQL"
+        }
+      ]
+    },
+    {
+      "cdc_transaction": "order_status_marker_only",
+      "client_txn": {
+        "attempt_id": "20000000-0000-4000-8000-000000000004",
+        "correlation_id": {
+          "run_id": "87654321-4321-4321-8321-cba987654322",
+          "session_id": "tpcc/worker/1",
+          "txn_id": 4
+        },
+        "correlation_kind": "session_txn",
+        "kind": "client_txn",
+        "logical_txn_id": "10000000-0000-4000-8000-000000000004",
+        "read_count": 4,
+        "read_digest": "a7445d293e9a689255d1c45d9fde52fc7d1d1a6d076d655ccf5e19499c09b19a",
+        "reads": [
+          {
+            "event_seq": 0,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAhjdXN0b21lcgAAAAEAAAABAAAAAQ==",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAAAAE4gAAAACRyAAAAAH5aeT8J+ZggAAAAAAAAAAAExLQP////////wYP4zMzQAAAAIAAAABAAAAA29uZQAAAAN0d28AAAAJTW9udHLDqWFsAAAAAlEgAAAACTEyMzQgICAgIAAAABA1NTUgICAgICAgICAgICAgAAAAAGqG9HAAAAACT0UAAAAHYQBi8J+Zgg==",
+            "value_state": "present"
+          },
+          {
+            "event_seq": 1,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAZvb3JkZXIAAAABAAAAAQAAAAM=",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAQAAAAACAAAAAQAAAABqhvTs",
+            "value_state": "present"
+          },
+          {
+            "event_seq": 2,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAApvcmRlcl9saW5lAAAAAQAAAAEAAAADAAAAAQ==",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAQAAAAAAAAAAZAAAAAEAAAABAAAAGGxpbmUxICAgICAgICAgICAgICAgICAgIA==",
+            "value_state": "present"
+          },
+          {
+            "event_seq": 3,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAApvcmRlcl9saW5lAAAAAQAAAAEAAAADAAAAAg==",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAQAAAAAAAAAAyAAAAAEAAAACAAAAGGxpbmUyICAgICAgICAgICAgICAgICAgIA==",
+            "value_state": "present"
+          }
+        ],
+        "run_id": "87654321-4321-4321-8321-cba987654322",
+        "session_id": "tpcc/worker/1",
+        "session_seq": 4,
+        "txn_type": "OrderStatus"
+      },
+      "fixture_role": "semantic",
+      "name": "order_status_multirow_reads",
+      "read_provenance": [
+        {
+          "event_seq": 0,
+          "row_name": "customer_after_delivery",
+          "statement_id": "payGetCustSQL",
+          "table": "benchbase.customer",
+          "trace_statement_id": "payGetCustFullSQL"
+        },
+        {
+          "event_seq": 1,
+          "row_name": "order_status_order",
+          "statement_id": "ordStatGetNewestOrdSQL",
+          "table": "benchbase.oorder",
+          "trace_statement_id": "ordStatGetNewestOrdFullSQL"
+        },
+        {
+          "event_seq": 2,
+          "row_name": "order_status_line_one",
+          "statement_id": "ordStatGetOrderLinesSQL",
+          "table": "benchbase.order_line",
+          "trace_statement_id": "ordStatGetOrderLinesFullSQL"
+        },
+        {
+          "event_seq": 3,
+          "row_name": "order_status_line_two",
+          "statement_id": "ordStatGetOrderLinesSQL",
+          "table": "benchbase.order_line",
+          "trace_statement_id": "ordStatGetOrderLinesFullSQL"
+        }
+      ]
+    },
+    {
+      "cdc_transaction": "stock_level_marker_only",
+      "client_txn": {
+        "attempt_id": "20000000-0000-4000-8000-000000000008",
+        "correlation_id": {
+          "run_id": "87654321-4321-4321-8321-cba987654322",
+          "session_id": "tpcc/worker/1",
+          "txn_id": 8
+        },
+        "correlation_kind": "session_txn",
+        "kind": "client_txn",
+        "logical_txn_id": "10000000-0000-4000-8000-000000000008",
+        "read_count": 1,
+        "read_digest": "376b04a2c33d3bc987f6a1383f3f0e0a2bd6a24e4fed62095a4cbb37e9b291ca",
+        "reads": [
+          {
+            "event_seq": 0,
+            "key_bytes_base64": "AAAACWJlbmNoYmFzZQAAAAhkaXN0cmljdAAAAAEAAAAB",
+            "source": "snapshot",
+            "value_bytes_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAQAAAABRAAAAAZzdHJlZXQAAAAAAAAABuadseS6rAAAAAJaIAAAAAk5ICAgICAgICA=",
+            "value_state": "present"
+          }
+        ],
+        "run_id": "87654321-4321-4321-8321-cba987654322",
+        "session_id": "tpcc/worker/1",
+        "session_seq": 8,
+        "txn_type": "StockLevel"
+      },
+      "fixture_role": "semantic",
+      "name": "stock_level_reads",
+      "read_provenance": [
+        {
+          "event_seq": 0,
+          "row_name": "district_after_new_order",
+          "statement_id": "stockGetDistOrderIdSQL",
+          "table": "benchbase.district",
+          "trace_statement_id": "stockGetDistOrderIdFullSQL"
+        }
+      ]
+    }
+  ],
+  "session_done": {
+    "ambiguous_attempts": 0,
+    "definitively_aborted_attempts": 0,
+    "final_session_seq": 8,
+    "kind": "session_done",
+    "logical_transactions_started": 8,
+    "physical_attempts_started": 8,
+    "published_transactions": 8,
+    "retry_attempts": 0,
+    "rolling_correlation_digest": "699b84297ea710470bd144fd5c287d31f385f801f1009ab2db295f42e38cc9a3",
+    "run_id": "87654321-4321-4321-8321-cba987654322",
+    "session_id": "tpcc/worker/1",
+    "successful_transactions": 8,
+    "terminal_aborted_transactions": 0
+  },
+  "synthetic_join_clients": [
+    {
+      "cdc_transaction": "primary_key_change",
+      "client_txn": {
+        "attempt_id": "20000000-0000-4000-8000-000000000005",
+        "correlation_id": {
+          "run_id": "87654321-4321-4321-8321-cba987654322",
+          "session_id": "tpcc/worker/1",
+          "txn_id": 5
+        },
+        "correlation_kind": "session_txn",
+        "kind": "client_txn",
+        "logical_txn_id": "10000000-0000-4000-8000-000000000005",
+        "read_count": 0,
+        "read_digest": "3f251669e36904bc1a3bc472991c9ff89f7f23f6b98bad9dd33f0e66884a06ce",
+        "reads": [],
+        "run_id": "87654321-4321-4321-8321-cba987654322",
+        "session_id": "tpcc/worker/1",
+        "session_seq": 5,
+        "txn_type": "Payment"
+      },
+      "fixture_role": "synthetic_diagnostic",
+      "name": "primary_key_change_join",
+      "read_provenance": []
+    },
+    {
+      "cdc_transaction": "insert_then_delete",
+      "client_txn": {
+        "attempt_id": "20000000-0000-4000-8000-000000000006",
+        "correlation_id": {
+          "run_id": "87654321-4321-4321-8321-cba987654322",
+          "session_id": "tpcc/worker/1",
+          "txn_id": 6
+        },
+        "correlation_kind": "session_txn",
+        "kind": "client_txn",
+        "logical_txn_id": "10000000-0000-4000-8000-000000000006",
+        "read_count": 0,
+        "read_digest": "3f251669e36904bc1a3bc472991c9ff89f7f23f6b98bad9dd33f0e66884a06ce",
+        "reads": [],
+        "run_id": "87654321-4321-4321-8321-cba987654322",
+        "session_id": "tpcc/worker/1",
+        "session_seq": 6,
+        "txn_type": "Payment"
+      },
+      "fixture_role": "synthetic_diagnostic",
+      "name": "insert_then_delete_join",
+      "read_provenance": []
+    },
+    {
+      "cdc_transaction": "net_no_change",
+      "client_txn": {
+        "attempt_id": "20000000-0000-4000-8000-000000000007",
+        "correlation_id": {
+          "run_id": "87654321-4321-4321-8321-cba987654322",
+          "session_id": "tpcc/worker/1",
+          "txn_id": 7
+        },
+        "correlation_kind": "session_txn",
+        "kind": "client_txn",
+        "logical_txn_id": "10000000-0000-4000-8000-000000000007",
+        "read_count": 0,
+        "read_digest": "3f251669e36904bc1a3bc472991c9ff89f7f23f6b98bad9dd33f0e66884a06ce",
+        "reads": [],
+        "run_id": "87654321-4321-4321-8321-cba987654322",
+        "session_id": "tpcc/worker/1",
+        "session_seq": 7,
+        "txn_type": "NewOrder"
+      },
+      "fixture_role": "synthetic_diagnostic",
+      "name": "net_no_change_join",
+      "read_provenance": []
+    }
+  ]
+}

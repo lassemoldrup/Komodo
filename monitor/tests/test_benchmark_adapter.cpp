@@ -224,6 +224,15 @@ void checkSharedAdapterContract(const std::string_view benchmark) {
       BLACKBOX_CHECK(*actual.omission_reason ==
                      expected.at("omission_reason").get<std::string>());
     }
+    if (expected.at("trace_statement_id").is_null()) {
+      BLACKBOX_CHECK(!actual.trace_statement_id.has_value());
+    } else {
+      BLACKBOX_REQUIRE(actual.trace_statement_id.has_value());
+      BLACKBOX_CHECK(*actual.trace_statement_id ==
+                     expected.at("trace_statement_id").get<std::string>());
+    }
+    BLACKBOX_CHECK(actual.trace_projection ==
+                   expected.at("trace_projection").get<std::string>());
   }
 
   for (const auto &cardinality : contract.at("loader").at("cardinalities")) {
@@ -293,21 +302,14 @@ void checkRegistryValidationAndCapabilities() {
       blackbox::AdapterRuntimeCapabilities{.client_trace = false,
                                            .cdc_normalization = true,
                                            .bootstrap_scan = true});
-  expectError(
-      [&] {
-        tpcc.validateRunConfiguration(
-            "REPEATABLE_READ", roster,
-            blackbox::AdapterRuntimeCapabilities{.client_trace = true,
-                                                 .cdc_normalization = true,
-                                                 .bootstrap_scan = true});
-      },
-      MonitorErrorCode::BranchContractMismatch);
+  const auto all_capabilities = blackbox::AdapterRuntimeCapabilities{
+      .client_trace = true, .cdc_normalization = true, .bootstrap_scan = true};
+  tpcc.validateRunConfiguration("REPEATABLE_READ", roster, all_capabilities);
+  BLACKBOX_CHECK(tpcc.runtimeCapabilities().complete());
 
   const auto &ycsb = BenchmarkAdapterRegistry::require("ycsb");
   BLACKBOX_CHECK(ycsb.runtimeCapabilities().complete());
   std::vector<std::string> ycsb_roster{"benchbase.usertable"};
-  const auto all_capabilities = blackbox::AdapterRuntimeCapabilities{
-      .client_trace = true, .cdc_normalization = true, .bootstrap_scan = true};
   ycsb.validateRunConfiguration("REPEATABLE_READ", ycsb_roster,
                                 all_capabilities);
   ycsb.validateRunConfiguration("READ_COMMITTED", ycsb_roster,

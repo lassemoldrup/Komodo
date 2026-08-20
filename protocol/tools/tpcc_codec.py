@@ -233,15 +233,11 @@ class TpccCodec:
         encoded = self.encode_nonnull(column, value, label)
         return (b"\x01" + encoded) if column["nullable"] else encoded
 
-    def encode_row(self, table_name: str, row: dict[str, Any]) -> tuple[bytes, bytes]:
+    def encode_key(self, table_name: str, key_values: dict[str, Any]) -> bytes:
         table = self.table(table_name)
-        if not isinstance(row, dict):
-            fail("row_shape", f"{table_name} row is not an object")
-        columns = table["columns"]
-        expected_columns = [column["name"] for column in columns]
-        if len(row) != len(expected_columns) or set(row) != set(expected_columns):
-            fail("row_shape", f"{table_name} row columns differ from table contract")
-        columns_by_name = {column["name"]: column for column in columns}
+        if not isinstance(key_values, dict) or set(key_values) != set(table["key_columns"]):
+            fail("row_shape", f"{table_name} key columns differ from table contract")
+        columns_by_name = {column["name"]: column for column in table["columns"]}
         schema_name, table_separator, unqualified_table = table_name.partition(".")
         if table_separator != ".":  # pragma: no cover - adapter schema already checks this
             fail("row_shape", f"unqualified table name: {table_name}")
@@ -251,14 +247,32 @@ class TpccCodec:
         )
         for column_name in table["key_columns"]:
             column = columns_by_name[column_name]
-            if row[column_name] is None:
+            if key_values[column_name] is None:
                 fail("nullability", f"{table_name}.{column_name} primary key is null")
-            key.extend(self.encode_nonnull(column, row[column_name], f"{table_name}.{column_name}"))
+            key.extend(
+                self.encode_nonnull(
+                    column, key_values[column_name], f"{table_name}.{column_name}"
+                )
+            )
+        return bytes(key)
+
+    def encode_row(self, table_name: str, row: dict[str, Any]) -> tuple[bytes, bytes]:
+        table = self.table(table_name)
+        if not isinstance(row, dict):
+            fail("row_shape", f"{table_name} row is not an object")
+        columns = table["columns"]
+        expected_columns = [column["name"] for column in columns]
+        if len(row) != len(expected_columns) or set(row) != set(expected_columns):
+            fail("row_shape", f"{table_name} row columns differ from table contract")
+        columns_by_name = {column["name"]: column for column in columns}
+        key = self.encode_key(
+            table_name, {column_name: row[column_name] for column_name in table["key_columns"]}
+        )
         value = bytearray()
         for column_name in table["value_columns"]:
             column = columns_by_name[column_name]
             value.extend(self.encode_column(column, row[column_name], f"{table_name}.{column_name}"))
-        return bytes(key), bytes(value)
+        return key, bytes(value)
 
 
 def materialize_invalid_vector(

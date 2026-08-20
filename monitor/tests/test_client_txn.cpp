@@ -1,5 +1,6 @@
 #include "blackbox/client_txn.h"
 
+#include "blackbox/canonical_tpcc_codec.h"
 #include "blackbox/canonical_ycsb_codec.h"
 
 #include "test_support.h"
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -44,6 +46,23 @@ constexpr std::string_view session_id = "ycsb/worker/1";
   std::ostringstream contents;
   contents << input.rdbuf();
   return contents.str();
+}
+
+[[nodiscard]] Json loadTpccClientFixture() {
+  return Json::parse(
+      readFile(std::filesystem::path(BLACKBOX_PROTOCOL_FIXTURE_DIR) /
+               "mariadb_tpcc_client_txns.json"));
+}
+
+[[nodiscard]] ClientTxnParser tpccParser(const Json &fixture) {
+  std::vector<std::string> sessions;
+  for (const auto &session :
+       fixture.at("run_manifest").at("expected_session_ids")) {
+    sessions.push_back(session.get<std::string>());
+  }
+  return ClientTxnParser(
+      fixture.at("run_manifest").at("run_id").get<std::string>(),
+      std::move(sessions), blackbox::BenchmarkAdapterRegistry::require("tpcc"));
 }
 
 [[nodiscard]] ClientTxnParser parser() {
@@ -589,8 +608,130 @@ void testAdapterOwnedTransactionMembership() {
       .source = ClientReadSource::Snapshot,
   }});
   read_record["txn_type"] = "NewOrder";
-  expectError(tpcc_parser, read_record.dump(),
-              MonitorErrorCode::BranchContractMismatch);
+  BLACKBOX_CHECK(tpcc_parser.parse(read_record.dump()).reads[0].state ==
+                 ClientValueState::Absent);
+}
+
+void testTpccClientFixtureAndFailures() {
+  const auto fixture = loadTpccClientFixture();
+  const auto tpcc_parser = tpccParser(fixture);
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  std::set<std::string> transaction_types;
+  std::size_t local_reads = 0U;
+  std::size_t empty_present_values = 0U;
+  std::size_t multirow_transactions = 0U;
+  std::set<std::uint64_t> session_sequences;
+
+  const auto check_transactions = [&](const Json &transactions,
+                                      const bool semantic) {
+    for (const auto &entry : transactions) {
+      const auto &record = entry.at("client_txn");
+      const auto parsed = tpcc_parser.parse(record.dump());
+      BLACKBOX_CHECK(parsed.correlation_id.txn_id == parsed.session_seq);
+      BLACKBOX_CHECK(session_sequences.insert(parsed.session_seq).second);
+      BLACKBOX_CHECK(parsed.reads.size() == record.at("read_count"));
+      transaction_types.insert(parsed.txn_type);
+      if (parsed.reads.size() > 1U) {
+        ++multirow_transactions;
+      }
+      if (semantic) {
+        BLACKBOX_REQUIRE(entry.at("read_provenance").size() ==
+                         parsed.reads.size());
+      } else {
+        BLACKBOX_CHECK(parsed.reads.empty());
+      }
+      for (std::size_t index = 0; index < parsed.reads.size(); ++index) {
+        const auto &read = parsed.reads[index];
+        const auto table =
+            entry.at("read_provenance")[index].at("table").get<std::string>();
+        const auto *codec = adapter.rowCodec(table);
+        BLACKBOX_REQUIRE(codec != nullptr);
+        codec->validateKey(read.key);
+        if (read.value.has_value()) {
+          codec->validatePresentValue(*read.value);
+          if (read.value->empty()) {
+            ++empty_present_values;
+          }
+        }
+        if (read.source == ClientReadSource::Local) {
+          ++local_reads;
+        }
+      }
+    }
+  };
+  check_transactions(fixture.at("semantic_transactions"), true);
+  check_transactions(fixture.at("synthetic_join_clients"), false);
+  BLACKBOX_CHECK(session_sequences ==
+                 std::set<std::uint64_t>({1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U}));
+  BLACKBOX_CHECK(transaction_types ==
+                 std::set<std::string>({"NewOrder", "Payment", "OrderStatus",
+                                        "Delivery", "StockLevel"}));
+  BLACKBOX_CHECK(local_reads == 2U);
+  BLACKBOX_CHECK(empty_present_values == 1U);
+  BLACKBOX_CHECK(multirow_transactions >= 4U);
+  BLACKBOX_CHECK(
+      fixture.at("empty_result_assertions")[0].at("emitted_reads").empty());
+
+  auto discarded = fixture.at("semantic_transactions")[1].at("client_txn");
+  const auto &discarded_vector = fixture.at("discarded_attempt_reads")[0];
+  discarded["reads"] = discarded_vector.at("reads");
+  discarded["read_count"] = discarded_vector.at("reads").size();
+  discarded["read_digest"] = discarded_vector.at("read_digest");
+  const auto parsed_discarded = tpcc_parser.parse(discarded.dump());
+  BLACKBOX_REQUIRE(parsed_discarded.reads.size() == 3U);
+  BLACKBOX_CHECK(parsed_discarded.reads.back().state ==
+                 ClientValueState::Absent);
+  BLACKBOX_CHECK(!parsed_discarded.reads.back().value.has_value());
+  BLACKBOX_CHECK(discarded_vector.at("discarded").get<bool>());
+  BLACKBOX_CHECK(!discarded_vector.at("published").get<bool>());
+
+  const auto history = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "history",
+      Json{{"h_id", 9223372036854775807LL},
+           {"h_c_id", 1},
+           {"h_c_d_id", 1},
+           {"h_c_w_id", 1},
+           {"h_d_id", 1},
+           {"h_w_id", 1},
+           {"h_date", "2026-08-20T12:34:57Z"},
+           {"h_amount", "10.00"},
+           {"h_data", "history"}});
+  const ClientRead history_read{.event_seq = 0U,
+                                .key = history.key,
+                                .state = ClientValueState::Present,
+                                .value = history.value,
+                                .source = ClientReadSource::Snapshot};
+  auto history_record = fixture.at("semantic_transactions")[0].at("client_txn");
+  history_record["reads"] = Json::array({readJson(history_read)});
+  history_record["read_count"] = 1;
+  history_record["read_digest"] =
+      blackbox::computeClientReadDigest(std::span(&history_read, 1U));
+  BLACKBOX_CHECK(tpcc_parser.parse(history_record.dump()).reads[0].key ==
+                 history.key);
+
+  auto unknown_transaction =
+      fixture.at("semantic_transactions")[0].at("client_txn");
+  unknown_transaction["txn_type"] = "UnknownTpcc";
+  expectError(tpcc_parser, unknown_transaction.dump(),
+              MonitorErrorCode::UnsupportedTransaction);
+
+  auto unknown_table = fixture.at("semantic_transactions")[0].at("client_txn");
+  unknown_table["reads"][0]["key_bytes_base64"] =
+      encodeBase64(CanonicalYcsbCodec::encodeKey("benchbase", "usertable", 1));
+  unknown_table["reads"][0]["value_state"] = "absent";
+  unknown_table["reads"][0].erase("value_bytes_base64");
+  expectError(tpcc_parser, unknown_table.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+
+  auto wrong_value = fixture.at("semantic_transactions")[0].at("client_txn");
+  wrong_value["reads"][0]["value_bytes_base64"] = "AA==";
+  expectError(tpcc_parser, wrong_value.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+
+  auto wrong_digest = fixture.at("semantic_transactions")[0].at("client_txn");
+  wrong_digest["read_digest"] = std::string(64U, '0');
+  expectError(tpcc_parser, wrong_digest.dump(),
+              MonitorErrorCode::ClientReadDigestMismatch);
 }
 
 } // namespace
@@ -605,5 +746,6 @@ int runClientTxnTests() {
   testCounterValidation();
   testLimitsAndConfiguration();
   testAdapterOwnedTransactionMembership();
+  testTpccClientFixtureAndFailures();
   return 0;
 }

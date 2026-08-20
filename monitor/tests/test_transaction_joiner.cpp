@@ -9,6 +9,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <optional>
@@ -49,6 +51,16 @@ using Json = nlohmann::json;
 constexpr std::string_view run_id = "00112233-4455-6677-8899-aabbccddeeff";
 constexpr std::string_view session_one = "ycsb/worker/1";
 constexpr std::string_view session_two = "ycsb/worker/2";
+
+[[nodiscard]] Json loadTpccClientFixture() {
+  const auto path = std::filesystem::path(BLACKBOX_PROTOCOL_FIXTURE_DIR) /
+                    "mariadb_tpcc_client_txns.json";
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    throw std::runtime_error("failed to open TPC-C client fixture");
+  }
+  return Json::parse(input);
+}
 
 [[nodiscard]] TransactionJoinerConfig
 config(const TransactionJoinerLimits limits = {}) {
@@ -1007,12 +1019,20 @@ void testTpccCompositeAndHistoryWritesUseGenericJoiner() {
 
   TransactionJoiner joiner(tpccConfig());
   openTpccWorkload(joiner);
-  auto client = Json::parse(clientPayload(session_one, 1U, 1U, 1U));
-  client["txn_type"] = "NewOrder";
+  auto client =
+      loadTpccClientFixture().at("semantic_transactions")[1].at("client_txn");
+  client["run_id"] = run_id;
+  client["session_id"] = session_one;
+  client["session_seq"] = 1;
+  client["logical_txn_id"] = uuid(1U, '1');
+  client["attempt_id"] = uuid(1U, '2');
+  client["correlation_id"] =
+      Json{{"run_id", run_id}, {"session_id", session_one}, {"txn_id", 1}};
   joiner.acceptClientPayload(client.dump());
   joiner.acceptCdcTransaction(workload(2U, session_one, 1U, std::move(writes)));
   const auto metrics = joiner.metrics();
   BLACKBOX_CHECK(metrics.joined_workload_transactions == 1U);
+  BLACKBOX_CHECK(metrics.joined_read_events == 3U);
   BLACKBOX_CHECK(metrics.joined_write_events == 2U);
   BLACKBOX_CHECK(metrics.checker.workload_transactions == 1U);
 

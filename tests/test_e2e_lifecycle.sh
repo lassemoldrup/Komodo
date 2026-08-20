@@ -602,14 +602,6 @@ if grep -q '^fence:LOAD_FINISHED$' "$CASE_LOG"; then
   fail 'canonical scan/count mismatch advanced to LOAD_FINISHED'
 fi
 
-run_case tpcc_runtime_gate 0 0 0 0 0 0 '' audited 0 '' '' tpcc
-[[ $CASE_STATUS != 0 ]] || fail 'incomplete TPC-C runtime unexpectedly entered the lifecycle'
-if grep -q '^stack:database$' "$CASE_LOG"; then
-  fail 'incomplete TPC-C runtime performed destructive stack startup'
-fi
-grep -q 'adapter tpcc runtime is incomplete' "$CASE_ROOT/stderr" ||
-  fail 'incomplete TPC-C runtime did not report its capability gate'
-
 run_case audited_metrics 0 0 0 0 0 0 '' audited 1
 [[ $CASE_STATUS == 0 ]] ||
   fail "audited metrics lifecycle exited $CASE_STATUS: $(cat "$CASE_ROOT/stderr")"

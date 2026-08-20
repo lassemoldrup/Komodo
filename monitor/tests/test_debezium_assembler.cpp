@@ -1005,7 +1005,7 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_CHECK(fixture.at("backend") == "mariadb");
   BLACKBOX_CHECK(fixture.at("mariadb_image") == "mariadb:12.3");
   BLACKBOX_REQUIRE(fixture.at("startup_schema").size() == 26U);
-  BLACKBOX_REQUIRE(fixture.at("transactions").size() == 11U);
+  BLACKBOX_REQUIRE(fixture.at("transactions").size() == 12U);
 
   DebeziumTxnAssembler assembler(tpccAssemblerConfig(fixture));
   std::vector<CdcTransaction> actual;
@@ -1069,10 +1069,10 @@ void checkCapturedTpccTransactionsAndFailures() {
     }
   }
   const auto metrics = assembler.metrics();
-  BLACKBOX_CHECK(metrics.completed_transactions == 11U);
+  BLACKBOX_CHECK(metrics.completed_transactions == 12U);
   BLACKBOX_CHECK(metrics.completed_run_control_transactions == 3U);
   BLACKBOX_CHECK(metrics.completed_bootstrap_transactions == 1U);
-  BLACKBOX_CHECK(metrics.completed_workload_transactions == 7U);
+  BLACKBOX_CHECK(metrics.completed_workload_transactions == 8U);
   BLACKBOX_CHECK(metrics.normalized_write_events == expected_write_count);
   BLACKBOX_CHECK(
       tables.size() ==

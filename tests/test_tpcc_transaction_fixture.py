@@ -38,7 +38,7 @@ class TpccTransactionFixtureTest(unittest.TestCase):
 
     def test_independent_normalizer_matches_all_captured_transactions(self) -> None:
         normalized = TRANSACTIONS.verify_transaction_fixture(self.document, self.codec)
-        self.assertEqual(len(normalized), 11)
+        self.assertEqual(len(normalized), 12)
         self.assertEqual(normalized[1]["kind"], "BOOTSTRAP_APP")
         self.assertEqual(normalized[3]["correlation_id"]["txn_id"], 1)
         self.assertEqual(normalized[6]["writes"], [])
@@ -48,6 +48,7 @@ class TpccTransactionFixtureTest(unittest.TestCase):
         )
         self.assertEqual(normalized[8]["writes"][0]["state"], "absent")
         self.assertEqual(normalized[9]["writes"][0]["state"], "present")
+        self.assertEqual(normalized[10]["writes"], [])
 
     def test_raw_end_count_mutation_is_not_self_validating(self) -> None:
         document = copy.deepcopy(self.document)

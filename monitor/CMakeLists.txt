@@ -206,7 +206,15 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures/mariadb_tpcc_transactions.json
   )
   set_tests_properties(blackbox_tpcc_transaction_fixture_checksum PROPERTIES
-    PASS_REGULAR_EXPRESSION "dce6938991d7cb9b088b079c9ef3bcc03fe9dffe5ed63a92aa2c33777e797044"
+    PASS_REGULAR_EXPRESSION "1a527bbda98d921d24a7e4a1751be9602e27341f56f8f2fc995c0b97bd5322b7"
+  )
+  add_test(
+    NAME blackbox_tpcc_client_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+            ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures/mariadb_tpcc_client_txns.json
+  )
+  set_tests_properties(blackbox_tpcc_client_fixture_checksum PROPERTIES
+    PASS_REGULAR_EXPRESSION "4089177ea3460074819ef1599147266dca115515df9c845c279832a17e5762d3"
   )
   add_test(
     NAME blackbox_cdc_replay_snapshot_schema_fixture

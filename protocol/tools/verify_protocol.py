@@ -23,6 +23,7 @@ except ImportError as error:  # pragma: no cover - exercised by environment setu
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tpcc_codec import CodecError, TpccCodec, materialize_invalid_vector  # noqa: E402
+from tpcc_client_fixture import ClientFixtureError, verify_client_fixture  # noqa: E402
 from tpcc_transaction_fixture import (  # noqa: E402
     TransactionFixtureError,
     verify_transaction_fixture,
@@ -74,7 +75,10 @@ TPCC_LIVE_FIXTURE_SHA256 = (
     "fa4f72247f42eb5062082a964b118acdbd54a99c991c7ae4aeda99bcc267bb82"
 )
 TPCC_TRANSACTION_FIXTURE_SHA256 = (
-    "dce6938991d7cb9b088b079c9ef3bcc03fe9dffe5ed63a92aa2c33777e797044"
+    "1a527bbda98d921d24a7e4a1751be9602e27341f56f8f2fc995c0b97bd5322b7"
+)
+TPCC_CLIENT_FIXTURE_SHA256 = (
+    "4089177ea3460074819ef1599147266dca115515df9c845c279832a17e5762d3"
 )
 MARIADB_SQL_MODE = (
     "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,"
@@ -165,6 +169,27 @@ TPCC_RESULT_SET_CONTRACT = {
         "aggregate_scalar",
         "aggregate_scalar",
     ),
+}
+TPCC_TRACE_STATEMENTS = {
+    ("NewOrder", "stmtGetCustSQL"): "stmtGetCustFullSQL",
+    ("NewOrder", "stmtGetWhseSQL"): "stmtGetWhseFullSQL",
+    ("NewOrder", "stmtGetDistSQL"): None,
+    ("NewOrder", "stmtGetItemSQL"): "stmtGetItemFullSQL",
+    ("NewOrder", "stmtGetStockSQL"): None,
+    ("Payment", "payGetWhseSQL"): "payGetWhseFullSQL",
+    ("Payment", "payGetDistSQL"): "payGetDistFullSQL",
+    ("Payment", "payGetCustSQL"): "payGetCustFullSQL",
+    ("Payment", "payGetCustCdataSQL"): "payGetCustCdataFullSQL",
+    ("Payment", "customerByNameSQL"): "customerByNameFullSQL",
+    ("OrderStatus", "ordStatGetNewestOrdSQL"): "ordStatGetNewestOrdFullSQL",
+    ("OrderStatus", "ordStatGetOrderLinesSQL"): "ordStatGetOrderLinesFullSQL",
+    ("OrderStatus", "payGetCustSQL"): "payGetCustFullSQL",
+    ("OrderStatus", "customerByNameSQL"): "customerByNameFullSQL",
+    ("Delivery", "delivGetOrderIdSQL"): "delivGetOrderIdFullSQL",
+    ("Delivery", "delivGetCustIdSQL"): "delivGetCustIdFullSQL",
+    ("Delivery", "delivSumOrderAmountSQL"): None,
+    ("StockLevel", "stockGetDistOrderIdSQL"): "stockGetDistOrderIdFullSQL",
+    ("StockLevel", "stockGetCountStockSQL"): None,
 }
 
 
@@ -572,6 +597,18 @@ def validate_adapter_contract(contract: dict[str, Any], label: str) -> None:
             (classification == "omit") == (omission_reason is not None),
             f"{label}: omission classification/reason mismatch",
         )
+        if classification == "omit":
+            require(
+                result_set["trace_statement_id"] is None
+                and result_set["trace_projection"] == "omitted",
+                f"{label}: omitted result unexpectedly has a trace SQL variant",
+            )
+        else:
+            require(
+                isinstance(result_set["trace_statement_id"], str)
+                and result_set["trace_projection"] == "full_row",
+                f"{label}: captured result lacks a full-row trace SQL variant",
+            )
         require(
             classification == "omit"
             or result_set["result_shape"] != "aggregate_scalar",
@@ -655,14 +692,15 @@ def verify_tpcc_contract(contract: dict[str, Any]) -> None:
         "TPC-C isolation contract is not repeatable read only",
     )
     require(
-        contract["runtime_capabilities"]["client_trace"] is False
+        contract["runtime_capabilities"]["client_trace"] is True
         and contract["runtime_capabilities"]["bootstrap_scan"] is True,
         "TPC-C runtime capabilities differ from implemented boundaries",
     )
     readiness = adapter_runtime_readiness(contract)
     require(readiness["bootstrap_ready"], "TPC-C bootstrap scanner is not ready")
     require(readiness["monitor_ready"], "TPC-C monitor normalization is not ready")
-    require(not readiness["end_to_end_ready"], "TPC-C must remain end-to-end gated")
+    require(readiness["client_ready"], "TPC-C client tracing is not ready")
+    require(readiness["end_to_end_ready"], "TPC-C end-to-end path is not ready")
     table_contract_bytes = json.dumps(
         contract["tables"],
         ensure_ascii=False,
@@ -686,6 +724,14 @@ def verify_tpcc_contract(contract: dict[str, Any]) -> None:
     require(
         actual_result_sets == TPCC_RESULT_SET_CONTRACT,
         "TPC-C statement capture/omit matrix differs from BenchBase procedures",
+    )
+    actual_trace_statements = {
+        (item["transaction_type"], item["statement_id"]): item["trace_statement_id"]
+        for item in contract["result_sets"]
+    }
+    require(
+        actual_trace_statements == TPCC_TRACE_STATEMENTS,
+        "TPC-C full-row trace SQL variant identities differ from BenchBase procedures",
     )
 
     tables = {table["name"]: table for table in contract["tables"]}
@@ -1122,14 +1168,14 @@ def verify_tpcc_transaction_fixture(contracts: dict[str, dict[str, Any]]) -> Non
         "TPC-C transaction fixture contract reference is missing",
     )
     require(
-        fixture["run_id"] == "87654321-4321-4321-8321-cba987654321",
+        fixture["run_id"] == "87654321-4321-4321-8321-cba987654322",
         "TPC-C transaction fixture run ID drift",
     )
     try:
         normalized = verify_transaction_fixture(fixture, TpccCodec(contracts["tpcc"]))
     except (TransactionFixtureError, CodecError) as error:
         raise VerificationError(f"TPC-C transaction fixture failed: {error}") from error
-    require(len(normalized) == 11, "TPC-C transaction normalization count differs")
+    require(len(normalized) == 12, "TPC-C transaction normalization count differs")
     require(
         [transaction["kind"] for transaction in normalized]
         == [
@@ -1143,9 +1189,79 @@ def verify_tpcc_transaction_fixture(contracts: dict[str, dict[str, Any]]) -> Non
             "WORKLOAD_MARKED",
             "WORKLOAD_MARKED",
             "WORKLOAD_MARKED",
+            "WORKLOAD_MARKED",
             "RUN_CONTROL",
         ],
         "TPC-C transaction classifications differ",
+    )
+
+
+def verify_tpcc_client_fixture(
+    contracts: dict[str, dict[str, Any]], schemas: list[dict[str, Any]]
+) -> None:
+    path = PROTOCOL_ROOT / "fixtures" / "mariadb_tpcc_client_txns.json"
+    require(
+        sha256_hex(path.read_bytes()) == TPCC_CLIENT_FIXTURE_SHA256,
+        "TPC-C client fixture checksum drift",
+    )
+    fixture = load_json(path)
+    require(
+        isinstance(fixture, dict)
+        and set(fixture)
+        == {
+            "adapter_contract",
+            "backend",
+            "backend_contract",
+            "discarded_attempt_reads",
+            "empty_result_assertions",
+            "jdbc_driver_version",
+            "mariadb_image",
+            "raw_transaction_fixture",
+            "row_catalog",
+            "run_manifest",
+            "semantic_transactions",
+            "session_done",
+            "synthetic_join_clients",
+        },
+        "TPC-C client fixture has wrong root fields",
+    )
+    require(
+        fixture["backend"] == "mariadb"
+        and fixture["mariadb_image"] == "mariadb:12.3"
+        and fixture["jdbc_driver_version"] == "3.5.1",
+        "TPC-C client fixture source version drift",
+    )
+    require(
+        fixture["adapter_contract"] == "protocol/adapters/tpcc.json"
+        and fixture["backend_contract"] == "protocol/backends/mariadb.json",
+        "TPC-C client fixture contract reference drift",
+    )
+    raw_reference = fixture["raw_transaction_fixture"]
+    require(
+        raw_reference
+        == {
+            "path": "protocol/fixtures/mariadb_tpcc_transactions.json",
+            "sha256": TPCC_TRANSACTION_FIXTURE_SHA256,
+        },
+        "TPC-C client fixture raw transaction reference drift",
+    )
+    raw_path = PROTOCOL_ROOT.parent / raw_reference["path"]
+    require(sha256_hex(raw_path.read_bytes()) == raw_reference["sha256"], "raw fixture checksum")
+    raw_fixture = load_json(raw_path)
+    validator = schema_validator(schemas, "records.schema.json")
+    verify_record_schema(validator, fixture["run_manifest"], "TPC-C client RunManifest")
+    for entry in [*fixture["semantic_transactions"], *fixture["synthetic_join_clients"]]:
+        verify_record_schema(validator, entry["client_txn"], f"TPC-C {entry['name']} ClientTxn")
+    verify_record_schema(validator, fixture["session_done"], "TPC-C fixture SessionDone")
+    try:
+        clients = verify_client_fixture(fixture, TpccCodec(contracts["tpcc"]), raw_fixture)
+    except (ClientFixtureError, CodecError) as error:
+        raise VerificationError(f"TPC-C client fixture failed: {error}") from error
+    require(len(clients) == 8, "TPC-C client fixture accepted-client count differs")
+    require(
+        len(fixture["semantic_transactions"]) == 5
+        and len(fixture["synthetic_join_clients"]) == 3,
+        "TPC-C client fixture semantic/synthetic split differs",
     )
 
 
@@ -1545,6 +1661,7 @@ def main() -> int:
         verify_tpcc_executable_vectors(contracts, schemas)
         verify_tpcc_live_fixture(contracts)
         verify_tpcc_transaction_fixture(contracts)
+        verify_tpcc_client_fixture(contracts, schemas)
         records = verify_schemas_and_examples()
         adapter_example_count = verify_adapter_record_examples(contracts, schemas)
         verify_golden_vectors()

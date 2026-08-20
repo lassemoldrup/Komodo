@@ -291,9 +291,9 @@ keys before computing the bootstrap digest.
 Runtime capability flags are interpreted by boundary rather than collapsed into
 one ambiguous ready bit. `monitor_ready` requires both CDC normalization and
 bootstrap scanning. `end_to_end_ready` additionally requires client tracing.
-Consequently, the TPC-C monitor path may admit captured normalization fixtures
-while the live workload remains fail-closed until the BenchBase trace adapter is
-also enabled.
+Consequently, a monitor path may become ready from captured normalization
+fixtures while the live workload remains fail-closed until its client trace
+adapter is independently enabled. TPC-C now satisfies both boundaries.
 
 Before `LOAD_FINISHED` can be acknowledged, the monitor's final normalized
 bootstrap map is independently counted, globally key-sorted, and hashed with the
@@ -307,3 +307,30 @@ BEGIN/row/END entries retain workload markers; independent reference and C++
 normalizers must agree on control/bootstrap/workload classification, marker
 filtering, correlation, repeated-write collapse, primary-key splits, touched
 net-no-change keys, deletes, and the final bootstrap digest.
+
+## D14: TPC-C trace SQL variants and client evidence
+
+The ordinary BenchBase statement IDs and SQL remain unchanged. Each of the 15
+captured TPC-C result sets owns a stable opt-in `trace_statement_id` whose SQL
+returns the complete canonical row; the four locking/aggregate omissions have
+no trace variant and remain `trace_projection=omitted`. The adapter contract
+must enumerate all 19 original statements and this exact 15/4 coverage split.
+
+Committed client fixtures must be reachable executions and keep the wire
+`ClientTxn` shape unchanged. In particular, no standard committed TPC-C
+transaction can contain an exact-key Absent read: those misses abort and their
+attempt-local buffers are discarded, while an empty Delivery predicate emits no
+synthetic event. Absent encoding/digest coverage therefore uses an explicitly
+discarded, never-published attempt vector rather than inventing committed
+evidence. `client_trace` becomes true only after production instrumentation and
+all statement paths pass. TPC-C passed that gate, so its client, monitor, and
+end-to-end readiness flags are now true.
+
+The shared evidence inventory is
+`protocol/fixtures/mariadb_tpcc_client_txns.json`. Its five semantic clients map
+Payment, NewOrder, Delivery, OrderStatus, and StockLevel to real captured marker
+transactions 1, 2, 3, 4, and 8 respectively. Separate clients 5 through 7 are
+explicitly labeled synthetic diagnostics and exist only to pair with the
+captured primary-key-change, insert/delete, and net-no-change CDC shapes. The
+single `SessionDone` counts all eight accepted clients; discarded-attempt reads
+are excluded from both publication and reconciliation.
