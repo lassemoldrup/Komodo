@@ -301,8 +301,10 @@ Selected-stage runs record their roster in each trial's metadata and in
 `stage_order.csv`. Their aggregate statistics remain available without the
 uninstrumented baseline; baseline-relative summary cells are blank, and
 `overhead.csv` includes only comparisons for which both stages were selected.
-`headline_results.md` contains the selected stages only and leaves baseline
-loss unavailable when the baseline was not selected.
+`headline_results.md` contains only selected BenchBase-throughput stages and
+leaves baseline loss unavailable when the baseline was not selected. The two
+monitor stages are intentionally excluded; whole-process monitor throughput
+must be measured separately and belongs in a monitor-specific table.
 
 `PERFORMANCE_BASELINE_ROOT` overrides the worktree path. An output root must be
 below `/media/newhd/yifan/db-monitoring-builds` and must not already contain files. Normal measured
@@ -348,11 +350,12 @@ checksummed directory per raw trial. The aggregate deliverables are
 `headline_results.md`, its machine-readable `headline_results.csv`,
 `raw_trials.csv`, `summary_statistics.csv` (median, min, max, and MAD without
 outlier removal), `overhead.csv`, `artifact_index.csv`, and the root
-`SHA256SUMS`. The headline table reports stage medians: throughput in requests
-per second, mean and p95 latency in microseconds, and throughput loss relative
-to the uninstrumented baseline in percent. Every throughput value is BenchBase
-application throughput, including the assembly/join and full-checking rows; it
-is not monitor processing throughput. The CSV retains unrounded numeric values
+`SHA256SUMS`. The headline table reports BenchBase-stage medians: throughput in
+requests per second, mean and p95 latency in microseconds, and throughput loss
+relative to the uninstrumented baseline in percent. Assembly/join and
+full-checking are excluded because their primary throughput belongs in a
+separate monitor table once that benchmark is generated. The CSV retains
+unrounded numeric values
 and canonical stage identifiers; the Markdown applies concise display rounding
 and human stage labels. Existing output roots can be backfilled without
 rereading captured streams:

@@ -301,7 +301,10 @@ class ReportTest(unittest.TestCase):
                     "throughput_loss_vs_baseline_percent",
                 ],
             )
-            self.assertEqual([row["stage"] for row in rows], list(report.STAGES))
+            self.assertEqual(
+                [row["stage"] for row in rows],
+                list(report.BENCHBASE_HEADLINE_STAGES),
+            )
             self.assertEqual(rows[0]["throughput_requests_per_second_median"], "990")
             self.assertEqual(rows[0]["throughput_loss_vs_baseline_percent"], "")
             self.assertEqual(
@@ -318,12 +321,10 @@ class ReportTest(unittest.TestCase):
                 "| Capture/encoding | 980.0 req/s | 102.0 µs | 152 µs | 1.01% |",
                 markdown,
             )
-            self.assertIn(
-                "| Full checking | 940.0 req/s | 106.0 µs | 156 µs | 5.05% |",
-                markdown,
-            )
+            self.assertNotIn("Assembly/join", markdown)
+            self.assertNotIn("Full checking", markdown)
 
-    def test_headline_selected_stages_without_baseline_leave_loss_blank(self) -> None:
+    def test_headline_excludes_monitor_stages(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             root = Path(directory_name)
             roster = ("assembly_join", "assembly_join_check")
@@ -337,19 +338,29 @@ class ReportTest(unittest.TestCase):
 
             with csv_output.open(encoding="utf-8", newline="") as stream:
                 rows = list(csv.DictReader(stream))
-            self.assertEqual([row["stage"] for row in rows], list(roster))
-            self.assertEqual(
-                [row["throughput_loss_vs_baseline_percent"] for row in rows],
-                ["", ""],
-            )
+            self.assertEqual(rows, [])
             markdown = markdown_output.read_text(encoding="utf-8")
+            self.assertNotIn("Assembly/join", markdown)
+            self.assertNotIn("Full checking", markdown)
+
+    def test_headline_selected_benchbase_stage_without_baseline_has_no_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            roster = ("cdc_capture",)
+            self.write_trial(root, roster[0], 1, roster)
+            raw = root / "raw_trials.csv"
+            report.write_raw_trials(root, raw)
+            csv_output = root / "headline_results.csv"
+            markdown_output = root / "headline_results.md"
+            report.write_headline(raw, csv_output, markdown_output)
+
+            with csv_output.open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual([row["stage"] for row in rows], ["cdc_capture"])
+            self.assertEqual(rows[0]["throughput_loss_vs_baseline_percent"], "")
             self.assertIn(
-                "| Assembly/join | 990.0 req/s | 101.0 µs | 151 µs | — |",
-                markdown,
-            )
-            self.assertIn(
-                "| Full checking | 980.0 req/s | 102.0 µs | 152 µs | — |",
-                markdown,
+                "| CDC only | 990.0 req/s | 101.0 µs | 151 µs | — |",
+                markdown_output.read_text(encoding="utf-8"),
             )
 
     def test_headline_uses_exact_medians_across_repetitions(self) -> None:
@@ -393,7 +404,7 @@ class ReportTest(unittest.TestCase):
                     "latency_p95_microseconds": "20",
                 },
                 {
-                    "stage": "assembly_join_check",
+                    "stage": "cdc_capture",
                     "throughput_requests_per_second": "110",
                     "latency_mean_microseconds": "11",
                     "latency_p95_microseconds": "21",

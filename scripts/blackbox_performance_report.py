@@ -54,13 +54,18 @@ HEADLINE_CSV_FIELDS = (
     "throughput_loss_vs_baseline_percent",
 )
 
+BENCHBASE_HEADLINE_STAGES = (
+    "benchbase_uninstrumented",
+    "read_capture_encoding",
+    "read_capture_encoding_redis",
+    "cdc_capture",
+)
+
 HEADLINE_STAGE_LABELS = {
     "benchbase_uninstrumented": "Uninstrumented baseline",
     "read_capture_encoding": "Capture/encoding",
     "read_capture_encoding_redis": "Capture + Redis",
     "cdc_capture": "CDC only",
-    "assembly_join": "Assembly/join",
-    "assembly_join_check": "Full checking",
 }
 
 
@@ -1008,7 +1013,7 @@ def headline_rows(raw_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
     )
 
     result: list[dict[str, Any]] = []
-    for stage in STAGES:
+    for stage in BENCHBASE_HEADLINE_STAGES:
         if stage not in medians:
             continue
         stage_medians = medians[stage]
