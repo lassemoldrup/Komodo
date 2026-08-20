@@ -987,18 +987,20 @@ void testAdapterManifestSemanticsAreValidatedAtAdmission() {
 void testTpccControllerUsesGenericJoinAndReconciliation() {
   RunController controller(tpccManifest());
   openTpccWorkload(controller);
-  auto client = Json::parse(clientPayload(1U));
+  auto client = Json::parse(clientPayload(1U, {}, 2U));
   client["txn_type"] = "NewOrder";
   controller.acceptClientPayload(client.dump());
   const auto encoded = blackbox::CanonicalTpccCodec::encodeRow(
       "benchbase", "new_order",
       Json{{"no_w_id", 1}, {"no_d_id", 2}, {"no_o_id", 3}});
   controller.acceptCdcTransaction(
-      workload(2U, 1U,
+      workload(2U, 2U,
                {NormalizedWrite{.key = encoded.key,
                                 .state = NormalizedValueState::Present,
                                 .value = encoded.value}}));
-  controller.acceptClientPayload(donePayload(1U));
+  controller.acceptClientPayload(donePayloadForProgress(
+      1U, 2U, 1U, 0U, 1U, 1U,
+      {SessionMarkerEntry{.session_seq = 1U, .txn_id = 2U}}));
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
   controller.onInputIdle();
   BLACKBOX_CHECK(controller.terminal());
@@ -1007,6 +1009,8 @@ void testTpccControllerUsesGenericJoinAndReconciliation() {
   BLACKBOX_CHECK(
       controller.finalReconciliation()->joined_workload_transactions == 1U);
   BLACKBOX_CHECK(controller.joinerMetrics().joined_write_events == 1U);
+  BLACKBOX_CHECK(controller.joinerMetrics().unmatched_client_records == 0U);
+  BLACKBOX_CHECK(controller.joinerMetrics().unmatched_workload_cdc_slots == 0U);
 }
 
 void testCapturedTpccControllerReconciliation() {
@@ -1018,6 +1022,23 @@ void testCapturedTpccControllerReconciliation() {
                  fixture.at("run_id"));
   auto transactions = assembleTpccFixture(fixture);
   BLACKBOX_REQUIRE(transactions.size() == 12U);
+  const auto new_order_client = std::find_if(
+      client_fixture.at("semantic_transactions").begin(),
+      client_fixture.at("semantic_transactions").end(), [](const Json &entry) {
+        return entry.at("client_txn").at("txn_type") == "NewOrder";
+      });
+  BLACKBOX_REQUIRE(new_order_client !=
+                   client_fixture.at("semantic_transactions").end());
+  BLACKBOX_CHECK(new_order_client->at("cdc_transaction") == "new_order_shape");
+  BLACKBOX_CHECK(new_order_client->at("client_txn").at("read_count") == 3U);
+  BLACKBOX_CHECK(
+      new_order_client->at("client_txn").at("correlation_id").at("txn_id") ==
+      2U);
+  const auto new_order_cdc = std::find_if(
+      fixture.at("transactions").begin(), fixture.at("transactions").end(),
+      [](const Json &entry) { return entry.at("name") == "new_order_shape"; });
+  BLACKBOX_REQUIRE(new_order_cdc != fixture.at("transactions").end());
+  BLACKBOX_CHECK(new_order_cdc->at("expected").at("writes").size() == 6U);
   RunController controller(blackbox::ProtocolRecordParser{}.parseRunManifest(
       client_fixture.at("run_manifest").dump()));
   discardStatuses(controller);
@@ -1075,6 +1096,8 @@ void testCapturedTpccControllerReconciliation() {
   BLACKBOX_CHECK(metrics.marker_only_workload_transactions == 2U);
   BLACKBOX_CHECK(metrics.client_first_matches == 4U);
   BLACKBOX_CHECK(metrics.cdc_first_matches == 4U);
+  BLACKBOX_CHECK(metrics.joined_read_events == 13U);
+  BLACKBOX_CHECK(metrics.joined_write_events == 18U);
   BLACKBOX_CHECK(metrics.released_bootstrap_transactions == 1U);
   BLACKBOX_CHECK(metrics.released_phase_anchor_transactions == 1U);
   BLACKBOX_CHECK(metrics.unmatched_client_records == 0U);

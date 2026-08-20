@@ -1,3 +1,4 @@
+#include "blackbox/canonical_tpcc_codec.h"
 #include "blackbox/canonical_ycsb_codec.h"
 #include "blackbox/cdc_error.h"
 #include "blackbox/cdc_types.h"
@@ -6,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -1001,7 +1003,7 @@ void checkAttemptGapsAndContiguousFrames() {
 }
 
 void checkCapturedTpccTransactionsAndFailures() {
-  const auto fixture = loadTpccTransactionFixture();
+  auto fixture = loadTpccTransactionFixture();
   BLACKBOX_CHECK(fixture.at("backend") == "mariadb");
   BLACKBOX_CHECK(fixture.at("mariadb_image") == "mariadb:12.3");
   BLACKBOX_REQUIRE(fixture.at("startup_schema").size() == 26U);
@@ -1093,6 +1095,73 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_CHECK(actual[order_status_index].writes.empty());
   BLACKBOX_CHECK(order_status->at("raw_entries").size() == 3U);
 
+  const auto new_order = std::find_if(
+      fixture.at("transactions").begin(), fixture.at("transactions").end(),
+      [](const Json &transaction) {
+        return transaction.at("name") == "new_order_shape";
+      });
+  BLACKBOX_REQUIRE(new_order != fixture.at("transactions").end());
+  const auto new_order_index = static_cast<std::size_t>(
+      std::distance(fixture.at("transactions").begin(), new_order));
+  BLACKBOX_REQUIRE(new_order_index < actual.size());
+  const auto raw_row_count = [&](const std::string_view table,
+                                 const std::string_view operation) {
+    return static_cast<std::size_t>(std::count_if(
+        new_order->at("raw_entries").begin(),
+        new_order->at("raw_entries").end(), [&](const Json &entry) {
+          const auto envelope = entryEnvelope(entry);
+          return envelope.contains("op") &&
+                 envelope.at("source").at("table") == table &&
+                 envelope.at("op") == operation;
+        }));
+  };
+  BLACKBOX_CHECK(raw_row_count("stock", "u") == 2U);
+  BLACKBOX_CHECK(raw_row_count("district", "u") == 1U);
+  BLACKBOX_CHECK(raw_row_count("oorder", "c") == 1U);
+  BLACKBOX_CHECK(raw_row_count("new_order", "c") == 1U);
+  BLACKBOX_CHECK(raw_row_count("order_line", "c") == 2U);
+  BLACKBOX_CHECK(raw_row_count("session_txn", "u") == 1U);
+
+  const auto expected_table_count = [&](const std::string_view table) {
+    return static_cast<std::size_t>(std::count_if(
+        new_order->at("expected").at("writes").begin(),
+        new_order->at("expected").at("writes").end(),
+        [&](const Json &write) { return write.at("table") == table; }));
+  };
+  BLACKBOX_REQUIRE(actual[new_order_index].writes.size() == 6U);
+  BLACKBOX_CHECK(expected_table_count("benchbase.stock") == 1U);
+  BLACKBOX_CHECK(expected_table_count("benchbase.district") == 1U);
+  BLACKBOX_CHECK(expected_table_count("benchbase.oorder") == 1U);
+  BLACKBOX_CHECK(expected_table_count("benchbase.new_order") == 1U);
+  BLACKBOX_CHECK(expected_table_count("benchbase.order_line") == 2U);
+  BLACKBOX_CHECK(expected_table_count("benchbase.session_txn") == 0U);
+
+  const auto first_stock =
+      entryEnvelope(tpccRowEntry(fixture, "new_order_shape", "stock", 0U));
+  const auto second_stock =
+      entryEnvelope(tpccRowEntry(fixture, "new_order_shape", "stock", 1U));
+  BLACKBOX_CHECK(first_stock.at("after") == second_stock.at("before"));
+  BLACKBOX_CHECK(first_stock.at("before") == second_stock.at("after"));
+  const auto final_stock = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "stock", second_stock.at("after"));
+  const auto stock_write = std::find_if(
+      actual[new_order_index].writes.begin(),
+      actual[new_order_index].writes.end(),
+      [&](const auto &write) { return write.key == final_stock.key; });
+  BLACKBOX_REQUIRE(stock_write != actual[new_order_index].writes.end());
+  BLACKBOX_CHECK(stock_write->state == NormalizedValueState::Present);
+  BLACKBOX_REQUIRE(stock_write->value.has_value());
+  BLACKBOX_CHECK(*stock_write->value == final_stock.value);
+
+  const auto empty_new_order = std::find_if(
+      new_order->at("expected").at("writes").begin(),
+      new_order->at("expected").at("writes").end(), [](const Json &write) {
+        return write.at("table") == "benchbase.new_order";
+      });
+  BLACKBOX_REQUIRE(empty_new_order !=
+                   new_order->at("expected").at("writes").end());
+  BLACKBOX_CHECK(empty_new_order->at("value_hex") == "");
+
   {
     auto invalid = fixture;
     auto &entry = tpccRowEntry(invalid, "payment_shape", "warehouse");
@@ -1155,6 +1224,43 @@ void checkCapturedTpccTransactionsAndFailures() {
     auto &entry = tpccRowEntry(invalid, "payment_shape", "warehouse");
     auto envelope = entryEnvelope(entry);
     envelope["after"]["w_ytd"] = "not-a-decimal";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CanonicalEncodingFailed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "new_order_shape", "stock");
+    auto key = entryKey(entry);
+    key.erase("s_i_id");
+    setEntryKey(entry, key);
+    expectError(tpccRawEntries(invalid),
+                CdcErrorCode::PrimaryKeyImageIncomplete,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "new_order_shape", "stock");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"].erase("s_quantity");
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "new_order_shape", "stock", 1U);
+    auto envelope = entryEnvelope(entry);
+    envelope["before"]["s_quantity"] = 40;
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "new_order_shape", "order_line");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"]["ol_amount"] = "not-a-decimal";
     setEntryEnvelope(entry, envelope);
     expectError(tpccRawEntries(invalid), CdcErrorCode::CanonicalEncodingFailed,
                 tpccAssemblerConfig(invalid), false);

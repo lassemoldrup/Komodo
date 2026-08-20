@@ -802,6 +802,103 @@ void testOrderStatusFixtureProjection() {
   BLACKBOX_CHECK(done.at("published_transactions") == 8);
 }
 
+void testNewOrderFixtureProjectionAndDiscardedAttempt() {
+  const auto fixture = loadTpccClientFixture();
+  const auto tpcc_parser = tpccParser(fixture);
+  const auto &transactions = fixture.at("semantic_transactions");
+  const auto found = std::find_if(
+      transactions.begin(), transactions.end(), [](const Json &entry) {
+        return entry.at("client_txn").at("txn_type") == "NewOrder";
+      });
+  BLACKBOX_REQUIRE(found != transactions.end());
+
+  const auto parsed = tpcc_parser.parse(found->at("client_txn").dump());
+  BLACKBOX_CHECK(parsed.txn_type == "NewOrder");
+  BLACKBOX_CHECK(parsed.session_seq == 2U);
+  BLACKBOX_CHECK(parsed.correlation_id.txn_id == 2U);
+  BLACKBOX_CHECK(
+      parsed.read_digest ==
+      "636722dfcda5e1f1880c50a1b45697567eb729f5724499c95a603a9ed905efa7");
+  BLACKBOX_REQUIRE(parsed.reads.size() == 3U);
+  for (std::size_t index = 0; index < parsed.reads.size(); ++index) {
+    BLACKBOX_CHECK(parsed.reads[index].event_seq == index);
+    BLACKBOX_CHECK(parsed.reads[index].state == ClientValueState::Present);
+    BLACKBOX_CHECK(parsed.reads[index].source == ClientReadSource::Snapshot);
+    BLACKBOX_REQUIRE(parsed.reads[index].value.has_value());
+  }
+
+  const auto &provenance = found->at("read_provenance");
+  BLACKBOX_REQUIRE(provenance.size() == parsed.reads.size());
+  const std::array<std::string_view, 3> expected_tables = {
+      "benchbase.customer", "benchbase.warehouse", "benchbase.item"};
+  const std::array<std::string_view, 3> expected_statements = {
+      "stmtGetCustFullSQL", "stmtGetWhseFullSQL", "stmtGetItemFullSQL"};
+  std::set<std::string> observed_tables;
+  for (std::size_t index = 0; index < provenance.size(); ++index) {
+    BLACKBOX_CHECK(provenance[index].at("event_seq") == index);
+    BLACKBOX_CHECK(provenance[index].at("table") == expected_tables[index]);
+    BLACKBOX_CHECK(provenance[index].at("trace_statement_id") ==
+                   expected_statements[index]);
+    observed_tables.insert(provenance[index].at("table").get<std::string>());
+  }
+  BLACKBOX_CHECK(
+      observed_tables ==
+      std::set<std::string>(
+          {"benchbase.customer", "benchbase.warehouse", "benchbase.item"}));
+  BLACKBOX_CHECK(!observed_tables.contains("benchbase.district"));
+  BLACKBOX_CHECK(!observed_tables.contains("benchbase.stock"));
+
+  const auto &discarded = fixture.at("discarded_attempt_reads");
+  BLACKBOX_REQUIRE(discarded.size() == 1U);
+  const auto &invalid_item = discarded[0];
+  BLACKBOX_CHECK(invalid_item.at("name") == "new_order_invalid_item");
+  BLACKBOX_CHECK(invalid_item.at("txn_type") == "NewOrder");
+  BLACKBOX_CHECK(invalid_item.at("discarded").get<bool>());
+  BLACKBOX_CHECK(!invalid_item.at("published").get<bool>());
+  BLACKBOX_CHECK(
+      invalid_item.at("read_digest") ==
+      "7f48e9fbe9842e729ba774ada6dd23f6d7b5fd8a7d2686ab248abdc05a72d105");
+
+  auto discarded_record = found->at("client_txn");
+  discarded_record["reads"] = invalid_item.at("reads");
+  discarded_record["read_count"] = invalid_item.at("reads").size();
+  discarded_record["read_digest"] = invalid_item.at("read_digest");
+  const auto parsed_discarded = tpcc_parser.parse(discarded_record.dump());
+  BLACKBOX_REQUIRE(parsed_discarded.reads.size() == 3U);
+  BLACKBOX_CHECK(parsed_discarded.reads[2].state == ClientValueState::Absent);
+  BLACKBOX_CHECK(!parsed_discarded.reads[2].value.has_value());
+  const auto *item_codec =
+      blackbox::BenchmarkAdapterRegistry::require("tpcc").rowCodec(
+          "benchbase.item");
+  BLACKBOX_REQUIRE(item_codec != nullptr);
+  item_codec->validateKey(parsed_discarded.reads[2].key);
+  BLACKBOX_CHECK(parsed_discarded.reads[2].key ==
+                 blackbox::CanonicalTpccCodec::encodeKey(
+                     "benchbase", "item", Json{{"i_id", 999999}}));
+
+  for (const auto field : {"semantic_transactions", "synthetic_join_clients"}) {
+    for (const auto &entry : fixture.at(field)) {
+      BLACKBOX_CHECK(entry.at("client_txn").at("read_digest") !=
+                     invalid_item.at("read_digest"));
+    }
+  }
+
+  auto missing_value = found->at("client_txn");
+  missing_value["reads"][2].erase("value_bytes_base64");
+  expectError(tpcc_parser, missing_value.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto missing_event = found->at("client_txn");
+  missing_event["reads"][1].erase("event_seq");
+  expectError(tpcc_parser, missing_event.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto wrong_item_value = found->at("client_txn");
+  wrong_item_value["reads"][2]["value_bytes_base64"] = "AA==";
+  expectError(tpcc_parser, wrong_item_value.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+}
+
 } // namespace
 
 int runClientTxnTests() {
@@ -816,5 +913,6 @@ int runClientTxnTests() {
   testAdapterOwnedTransactionMembership();
   testTpccClientFixtureAndFailures();
   testOrderStatusFixtureProjection();
+  testNewOrderFixtureProjectionAndDiscardedAttempt();
   return 0;
 }

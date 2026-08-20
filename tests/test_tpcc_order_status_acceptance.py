@@ -533,6 +533,18 @@ class TpccOrderStatusAcceptanceDriverTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("must be a positive integer", result.stderr)
 
+    def test_print_config_enforces_benchbase_random_seed_range(self) -> None:
+        for seed in ("-2147483648", "2147483647"):
+            with self.subTest(seed=seed):
+                result = self.run_driver("--print-config", "--random-seed", seed)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["random_seed"], int(seed))
+        for seed in ("-2147483649", "2147483648"):
+            with self.subTest(seed=seed):
+                result = self.run_driver("--print-config", "--random-seed", seed)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("signed 32-bit", result.stderr)
+
     def test_live_preflight_uses_default_docker_without_unbound_variable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

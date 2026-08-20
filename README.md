@@ -255,23 +255,34 @@ run retains its raw CDC, client, and status streams plus Compose state and
 container logs before teardown. These runs generate fresh run IDs and do not
 replace or modify the checked-in captured CDC fixtures.
 
-Run the focused audited TPC-C OrderStatus acceptance against a fresh stack with:
+Run the focused audited TPC-C transaction acceptances against a fresh stack with:
 
 ```bash
 ./tests/run_tpcc_order_status_acceptance.sh \
   --benchbase-dist /path/to/benchbase-mariadb \
   --monitor-bin /path/to/blackbox_run_monitor \
   --output-dir /path/to/new-output-directory
+
+./tests/run_tpcc_new_order_acceptance.sh \
+  --benchbase-dist /path/to/benchbase-mariadb \
+  --monitor-bin /path/to/blackbox_run_monitor \
+  --output-dir /path/to/another-new-output-directory
 ```
 
-The default run uses one warehouse, one terminal, RR, seed 3, and weights
+The OrderStatus default uses one warehouse, one terminal, RR, seed 3, and weights
 `0,0,100,0,0`. It retains a machine-readable run configuration, independent
 customer last-name cardinalities, client/status stream captures, the CDC tail
 strictly after `LOAD_FINISHED_SEEN`, monitor metrics, and an acceptance report.
-Every control has a command-line or `BLACKBOX_TPCC_ORDER_STATUS_*` environment
-form; `--print-config` validates and prints the resolved non-destructive run
-configuration. The live driver is destructive to the repository Compose stack
-and tears that stack down unless `--keep-stack` is explicitly selected.
+Every control has a command-line or corresponding
+`BLACKBOX_TPCC_ORDER_STATUS_*`/`BLACKBOX_TPCC_NEW_ORDER_*` environment form;
+`--print-config` validates and prints the resolved non-destructive run
+configuration. NewOrder defaults to one warehouse, two terminals, RR, seed 144,
+and weights `100,0,0,0,0`; its report reconciles invalid-item aborts, retries,
+repeated item/stock keys, and exact application writes. A remote item cannot be
+selected with one warehouse, so that path remains fixture-only and the live
+report records `remote_item_live_applicable=false`. The live drivers are
+destructive to the repository Compose stack and tear that stack down unless
+`--keep-stack` is explicitly selected.
 
 ## Performance measurement
 
