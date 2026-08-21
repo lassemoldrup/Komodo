@@ -95,6 +95,7 @@ class ReportTest(unittest.TestCase):
             "field_size": 32,
             "loader_threads": 1,
             "loader_batch_size": 128,
+            "loader_timestamp_utc": "2000-01-01T00:00:00Z",
             "warmup_seconds": 1,
             "requested_duration_seconds": 2,
             "random_seed": 20260818,
@@ -219,6 +220,8 @@ class ReportTest(unittest.TestCase):
                     "joined_workload_transactions": 100,
                     "joined_read_events": 50,
                     "joined_write_events": 50,
+                    "unmatched_client_records": 0,
+                    "unmatched_workload_cdc_slots": 0,
                     "released_bootstrap_write_events": 1000,
                     "released_ordered_events": 1100,
                 },
@@ -232,6 +235,241 @@ class ReportTest(unittest.TestCase):
                 json.dumps(monitor), encoding="utf-8"
             )
         report.write_checksums(trial, trial / "SHA256SUMS")
+
+    def write_tpcc_trial(self, root: Path) -> Path:
+        stage = "assembly_join_check"
+        self.write_trial(root, stage, 1, (stage,))
+        trial = root / "trials" / "repetition-01" / f"01-{stage}"
+        metadata_path = trial / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata.update(
+            {
+                "benchmark": "tpcc",
+                "scale_factor": None,
+                "warehouses": 1,
+                "transaction_mix": [45, 43, 4, 4, 4],
+                "drain_timeout_seconds": 30,
+                "high_water_threshold_percent": 70,
+                "resource_interval_seconds": 1,
+                "cooldown_seconds": 2,
+                "compose_timeout_seconds": 300,
+                "loader_timeout_seconds": 600,
+                "trial_timeout_seconds": 1800,
+                "status_timeout_seconds": 900,
+                "baseline_profile": "current_evidence_disabled_compatibility",
+                "bootstrap_scan_max_rows": 1000000,
+                "bootstrap_scan_max_input_bytes": 4294967296,
+                "bootstrap_scan_max_canonical_bytes": 2147483648,
+                "monitor_max_assembler_active_transactions": 1024,
+                "monitor_max_assembler_events_per_transaction": 100000,
+                "monitor_max_assembler_active_bytes": 268435456,
+                "monitor_max_assembler_completed_transactions": 10000000,
+                "monitor_max_assembler_retained_identity_bytes": 268435456,
+                "monitor_max_pending_client_records": 1000000,
+                "monitor_max_pending_cdc_slots": 1000000,
+                "monitor_max_pending_cdc_bytes": 268435456,
+                "monitor_max_retained_identity_records": 10000000,
+                "monitor_max_events_per_transaction": 101000,
+                "monitor_max_checker_state_bytes": 536870912,
+            }
+        )
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        counts = [
+            {"table": "benchbase.warehouse", "row_count": 1},
+            {"table": "benchbase.district", "row_count": 10},
+            {"table": "benchbase.customer", "row_count": 30000},
+            {"table": "benchbase.history", "row_count": 30000},
+            {"table": "benchbase.oorder", "row_count": 30000},
+            {"table": "benchbase.new_order", "row_count": 9000},
+            {"table": "benchbase.order_line", "row_count": 300000},
+            {"table": "benchbase.item", "row_count": 100000},
+            {"table": "benchbase.stock", "row_count": 100000},
+        ]
+        bootstrap_path = trial / "bootstrap_manifest.json"
+        bootstrap = json.loads(bootstrap_path.read_text(encoding="utf-8"))
+        bootstrap["table_row_counts"] = counts
+        bootstrap_path.write_text(json.dumps(bootstrap), encoding="utf-8")
+        loader_path = trial / "loader_validation.json"
+        loader = json.loads(loader_path.read_text(encoding="utf-8"))
+        loader.update(
+            {
+                "benchmark": "tpcc",
+                "declaration_available": True,
+                "scale_parameter": {"name": "warehouses", "value": 1},
+                "declared_table_row_counts": counts,
+                "expected_table_row_counts": counts,
+                "observed_table_row_counts": counts,
+            }
+        )
+        loader_path.write_text(json.dumps(loader), encoding="utf-8")
+
+        names = ("NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel")
+        counters = {
+            "logical_transactions_started": 20,
+            "successful_transactions": 20,
+            "terminal_aborted_transactions": 0,
+            "physical_attempts_started": 20,
+            "definitively_aborted_attempts": 0,
+            "retry_attempts": 0,
+            "retryable_failure_events": 0,
+            "error_transactions": 0,
+            "unknown_status_transactions": 0,
+            "ambiguous_attempts": 0,
+            "retry_different_events": 0,
+        }
+        transaction_types = {
+            name: {
+                **counters,
+                "successful_transactions_per_second": 10,
+                "latency_microseconds": {
+                    "mean": 100,
+                    "p50": 90,
+                    "p95": 150,
+                    "p99": 200,
+                    "max": 300,
+                },
+            }
+            for name in names
+        }
+        totals = {name: value * 5 for name, value in counters.items()}
+        outcome = {
+            "kind": "transaction_outcome_metrics",
+            "benchmark": "tpcc",
+            "scope": "measurement_window",
+            "window_semantics": "fully_contained_logical_invocations",
+            "elapsed_time_nanoseconds": 2_000_000_000,
+            "measured_requests": 100,
+            "phase_ids": [1],
+            "transaction_types": transaction_types,
+            "totals": totals,
+            "new_order_per_minute": 600,
+            "new_order_rate_label": "NewOrder/min",
+        }
+        (trial / "outcome_metrics.json").write_text(json.dumps(outcome), encoding="utf-8")
+        benchbase_path = trial / "benchbase_metrics.json"
+        benchbase = json.loads(benchbase_path.read_text(encoding="utf-8"))
+        benchbase["phase_ids"] = [1]
+        benchbase["transaction_counts"] = {name: 20 for name in names}
+        benchbase["transaction_types"] = {
+            name: {
+                "logical_invocation_count": 20,
+                "latency_microseconds": transaction_types[name]["latency_microseconds"],
+            }
+            for name in names
+        }
+        benchbase_path.write_text(json.dumps(benchbase), encoding="utf-8")
+
+        (trial / "redis_metrics.json").write_text(
+            json.dumps({
+                "entry_count": 50,
+                "cdc_row_count": 40,
+                "cdc_delivery_lag_ms": {"current": 2, "max": 5},
+                "cdc_source_lag_ms": {"current": 3, "max": 7},
+            }),
+            encoding="utf-8",
+        )
+        (trial / "client_metrics.json").write_text(
+            json.dumps({"entry_count": 2, "read_event_count": 60}), encoding="utf-8"
+        )
+        (trial / "client_stream.json").write_text(
+            json.dumps([
+                xrange_entry("11000-0", {"kind": "client_txn"}),
+                xrange_entry("11500-0", {"kind": "session_done"}),
+            ]),
+            encoding="utf-8",
+        )
+        (trial / "analysis_window.json").write_text(
+            json.dumps({
+                "start_epoch_ms": 10000,
+                "end_epoch_ms": 12020,
+                "definition": "benchbase_measured_start_through_end_fence_transaction_end_cdc_arrival",
+            }),
+            encoding="utf-8",
+        )
+        (trial / "redis_info_after.txt").write_text(
+            "used_memory:1000\nused_memory_peak:2000\nmaxmemory:8589934592\n",
+            encoding="utf-8",
+        )
+
+        monitor_path = trial / "monitor_metrics.json"
+        monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
+        monitor.update(
+            {
+                "finished_at_utc": "1970-01-01T00:00:12.100Z",
+                "limits": {
+                    "assembler": {
+                        "max_active_transactions": 1024,
+                        "max_events_per_transaction": 100000,
+                        "max_active_bytes": 268435456,
+                        "max_completed_transactions": 10000000,
+                        "max_retained_identity_bytes": 268435456,
+                    },
+                    "joiner": {
+                        "max_pending_client_records": 1000000,
+                        "max_pending_client_bytes": 1073741824,
+                        "max_pending_cdc_slots": 1000000,
+                        "max_pending_cdc_bytes": 268435456,
+                        "max_retained_identity_records": 10000000,
+                        "max_retained_identity_bytes": 2147483648,
+                        "max_events_per_transaction": 101000,
+                        "max_bootstrap_state_rows": 10000000,
+                        "max_bootstrap_state_bytes": 268435456,
+                        "max_checker_state_bytes": 536870912,
+                    },
+                    "checker": {
+                        "max_retained_state_bytes": 536870912,
+                        "max_events_per_transaction": 101000,
+                        "max_mapped_identity_records": 10000000,
+                        "max_mapped_identity_bytes": 2147483648,
+                    },
+                },
+                "assembler": {
+                    "normalized_write_events": 1080,
+                    "active_transactions": 0,
+                    "active_transactions_high_water": 2,
+                    "observed_events_per_transaction_high_water": 20,
+                    "active_assembly_bytes": 0,
+                    "active_assembly_high_water_bytes": 4096,
+                    "completed_transactions": 100,
+                    "retained_identity_high_water_bytes": 8192,
+                },
+            }
+        )
+        monitor["joiner"].update(
+            {
+                "pending_client_high_water_records": 3,
+                "pending_client_records": 0,
+                "pending_client_bytes": 0,
+                "pending_client_high_water_bytes": 4096,
+                "pending_cdc_slots": 0,
+                "pending_cdc_bytes": 0,
+                "pending_cdc_high_water_slots": 4,
+                "pending_cdc_high_water_bytes": 8192,
+                "retained_identity_high_water_records": 100,
+                "retained_identity_high_water_bytes": 16384,
+                "released_events_per_transaction_high_water": 30,
+                "bootstrap_state_high_water_rows": 599011,
+                "bootstrap_state_high_water_bytes": 100000000,
+                "end_fence_drain_nanoseconds": 50000000,
+                "end_fence_drain_current_nanoseconds": 0,
+            }
+        )
+        monitor["checker"].update(
+            {
+                "mapped_identity_high_water_records": 100,
+                "mapped_identity_high_water_bytes": 8192,
+                "events_per_transaction_high_water": 30,
+                "engine": {
+                    "retained_state_capacity_bytes": 536870912,
+                    "retained_state_bytes": 8192,
+                    "peak_retained_state_bytes": 16384,
+                },
+            }
+        )
+        monitor_path.write_text(json.dumps(monitor), encoding="utf-8")
+        report.write_checksums(trial, trial / "SHA256SUMS")
+        return trial
 
     def test_aggregate_preserves_partial_no_verdict_and_fence_latencies(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -265,6 +503,147 @@ class ReportTest(unittest.TestCase):
             attributions = {row["attribution"] for row in overhead_rows}
             self.assertIn("redis_publication_increment", attributions)
             self.assertIn("checking_boundary_increment", attributions)
+
+    def test_tpcc_report_emits_window_rates_events_resources_and_per_type_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            self.write_tpcc_trial(root)
+            raw_path = root / "raw_trials.csv"
+            transaction_path = root / "transaction_results.csv"
+            rows = report.write_raw_trials(root, raw_path)
+            report.write_transaction_results(rows, transaction_path)
+            row = rows[0]
+            self.assertEqual(row["benchmark"], "tpcc")
+            self.assertEqual(row["bootstrap_row_count"], 599011)
+            self.assertEqual(row["successful_transactions_per_second_workload"], 50.0)
+            self.assertEqual(row["new_order_per_minute"], 600)
+            self.assertEqual(row["new_order_rate_label"], "NewOrder/min")
+            self.assertEqual(row["workload_end_to_verdict_tail_ms"], 100)
+            self.assertEqual(row["monitor_end_fence_drain_ms"], 50.0)
+            self.assertEqual(row["client_read_events_per_second_workload"], 30.0)
+            self.assertEqual(row["normalized_write_events_per_second_workload"], 40.0)
+            self.assertTrue(row["declared_resource_high_water_accepted"])
+            self.assertAlmostEqual(
+                row["resource_bootstrap_state_bytes_high_water_percent"],
+                100000000 * 100 / 268435456,
+            )
+            with transaction_path.open(encoding="utf-8", newline="") as stream:
+                transaction_rows = list(csv.DictReader(stream))
+            self.assertEqual(len(transaction_rows), 6)
+            overall = next(item for item in transaction_rows if item["row_scope"] == "overall")
+            self.assertEqual(overall["transaction_type"], "")
+            self.assertEqual(overall["successful_transactions_per_second"], "50.0")
+            self.assertEqual(overall["new_order_per_minute"], "600")
+            by_name = {item["transaction_type"]: item for item in transaction_rows}
+            self.assertEqual(by_name["NewOrder"]["row_scope"], "transaction_type")
+            self.assertEqual(by_name["NewOrder"]["successful_transactions_per_second"], "10.0")
+            self.assertEqual(by_name["NewOrder"]["new_order_per_minute"], "600.0")
+            self.assertEqual(by_name["Payment"]["new_order_per_minute"], "")
+
+    def test_join_only_capacity_acceptance_does_not_invent_a_checker_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            trial = self.write_tpcc_trial(Path(directory_name))
+            metadata = json.loads((trial / "metadata.json").read_text(encoding="utf-8"))
+            metadata["stage"] = "assembly_join"
+            monitor = json.loads(
+                (trial / "monitor_metrics.json").read_text(encoding="utf-8")
+            )
+            monitor["checker"].update(
+                {
+                    "mapped_identity_high_water_records": 0,
+                    "mapped_identity_high_water_bytes": 0,
+                    "events_per_transaction_high_water": 0,
+                    "engine": {
+                        "retained_state_capacity_bytes": 0,
+                        "retained_state_bytes": 0,
+                        "peak_retained_state_bytes": 0,
+                    },
+                }
+            )
+            flattened: dict[str, object] = {}
+            report.flatten("monitor", monitor, flattened)
+            capacity = report.monitor_capacity_acceptance(metadata, flattened)
+            self.assertTrue(capacity["resource_high_water_accepted"])
+            self.assertNotIn("resource_checker_state_bytes_high_water", capacity)
+
+    def test_tpcc_report_rejects_drain_resource_and_outcome_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            trial = self.write_tpcc_trial(root)
+            monitor_path = trial / "monitor_metrics.json"
+            monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
+            monitor["assembler"]["active_transactions_high_water"] = 800
+            monitor_path.write_text(json.dumps(monitor), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "high-water threshold"):
+                report.trial_row(trial)
+
+            trial = self.write_tpcc_trial(Path(directory_name) / "terminal-queue")
+            monitor_path = trial / "monitor_metrics.json"
+            monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
+            monitor["joiner"]["pending_cdc_slots"] = 1
+            monitor_path.write_text(json.dumps(monitor), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "terminal monitor queue"):
+                report.trial_row(trial)
+
+            trial = self.write_tpcc_trial(Path(directory_name) / "drain")
+            monitor_path = trial / "monitor_metrics.json"
+            monitor = json.loads(monitor_path.read_text(encoding="utf-8"))
+            monitor["finished_at_utc"] = "1970-01-01T00:00:43.000Z"
+            monitor_path.write_text(json.dumps(monitor), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "drain timeout"):
+                report.trial_row(trial)
+
+            trial = self.write_tpcc_trial(Path(directory_name) / "outcome")
+            (trial / "outcome_metrics.json").unlink()
+            with self.assertRaisesRegex(report.ReportError, "outcomes are missing"):
+                report.trial_row(trial)
+
+            trial = self.write_tpcc_trial(Path(directory_name) / "fractional-rate")
+            elapsed_ns = 2_999_872_712
+            benchbase_path = trial / "benchbase_metrics.json"
+            benchbase = json.loads(benchbase_path.read_text(encoding="utf-8"))
+            benchbase["elapsed_time_nanoseconds"] = elapsed_ns
+            benchbase_path.write_text(json.dumps(benchbase), encoding="utf-8")
+            outcome_path = trial / "outcome_metrics.json"
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            outcome["elapsed_time_nanoseconds"] = elapsed_ns
+            outcome["new_order_per_minute"] = 20 * 60.0 / (elapsed_ns / 1_000_000_000.0)
+            outcome_path.write_text(json.dumps(outcome), encoding="utf-8")
+            report.trial_row(trial)
+            outcome["new_order_per_minute"] += 0.01
+            outcome_path.write_text(json.dumps(outcome), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "NewOrder/min differs"):
+                report.trial_row(trial)
+
+            trial = self.write_tpcc_trial(Path(directory_name) / "error-outcome")
+            outcome_path = trial / "outcome_metrics.json"
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            new_order = outcome["transaction_types"]["NewOrder"]
+            new_order["successful_transactions"] = 19
+            new_order["error_transactions"] = 1
+            new_order["definitively_aborted_attempts"] = 1
+            outcome["totals"]["successful_transactions"] = 99
+            outcome["totals"]["error_transactions"] = 1
+            outcome["totals"]["definitively_aborted_attempts"] = 1
+            outcome["new_order_per_minute"] = 570
+            outcome_path.write_text(json.dumps(outcome), encoding="utf-8")
+            row = report.trial_row(trial)
+            self.assertEqual(row["error_transactions"], 1)
+
+            trial = self.write_tpcc_trial(Path(directory_name) / "ambiguous-outcome")
+            outcome_path = trial / "outcome_metrics.json"
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            new_order = outcome["transaction_types"]["NewOrder"]
+            new_order["successful_transactions"] = 19
+            new_order["unknown_status_transactions"] = 1
+            new_order["ambiguous_attempts"] = 1
+            outcome["totals"]["successful_transactions"] = 99
+            outcome["totals"]["unknown_status_transactions"] = 1
+            outcome["totals"]["ambiguous_attempts"] = 1
+            outcome["new_order_per_minute"] = 570
+            outcome_path.write_text(json.dumps(outcome), encoding="utf-8")
+            with self.assertRaisesRegex(report.ReportError, "nonzero unknown_status_transactions"):
+                report.trial_row(trial)
 
     def test_aggregate_accepts_one_selected_stage_without_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -561,6 +940,55 @@ class ReportTest(unittest.TestCase):
             monitor_path.write_text(json.dumps(monitor), encoding="utf-8")
             with self.assertRaisesRegex(report.ReportError, "bootstrap-state byte"):
                 report.trial_row(trial)
+
+    def test_trial_requires_canonical_loader_timestamp(self) -> None:
+        invalid_values: tuple[object, ...] = (
+            None,
+            "2024-02-29T12:34:56+00:00",
+            "2024-02-29T12:34:56.000Z",
+            "2024-2-29T12:34:56Z",
+            "2023-02-29T12:34:56Z",
+            "2024-02-29T12:34:56Z ",
+        )
+        for index, value in enumerate(invalid_values):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory_name:
+                root = Path(directory_name)
+                self.write_trial(root, "benchbase_uninstrumented", 1)
+                metadata_path = (
+                    root
+                    / "trials"
+                    / "repetition-01"
+                    / "01-benchbase_uninstrumented"
+                    / "metadata.json"
+                )
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if index == 0:
+                    metadata.pop("loader_timestamp_utc")
+                else:
+                    metadata["loader_timestamp_utc"] = value
+                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+                with self.assertRaisesRegex(report.ReportError, "loader timestamp"):
+                    report.trial_row(metadata_path.parent)
+
+    def test_aggregate_rejects_loader_timestamp_invariant_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            for position, stage in enumerate(report.STAGES, start=1):
+                self.write_trial(root, stage, position)
+            metadata_path = (
+                root
+                / "trials"
+                / "repetition-01"
+                / "01-benchbase_uninstrumented"
+                / "metadata.json"
+            )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["loader_timestamp_utc"] = "2001-02-03T04:05:06Z"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportError, "loader_timestamp_utc"
+            ):
+                report.write_raw_trials(root, root / "raw_trials.csv")
 
     def test_aggregate_rejects_truncated_configured_repetitions(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

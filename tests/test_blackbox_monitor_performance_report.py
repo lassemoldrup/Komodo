@@ -60,10 +60,22 @@ class MonitorPerformanceReportTest(unittest.TestCase):
             "source_client_entries": 2005,
             "source_workload_transactions": self.source_transactions,
             "redis_maxmemory_bytes": 8 * 1024**3,
+            "monitor_max_assembler_active_transactions": 1024,
+            "monitor_max_assembler_events_per_transaction": 100000,
+            "monitor_max_assembler_active_bytes": 256 * 1024**2,
+            "monitor_max_assembler_completed_transactions": 10_000_000,
+            "monitor_max_assembler_retained_identity_bytes": 256 * 1024**2,
+            "monitor_max_pending_client_records": 1_000_000,
             "monitor_max_pending_client_bytes": 3 * 1024**3,
+            "monitor_max_pending_cdc_slots": 1_000_000,
+            "monitor_max_pending_cdc_bytes": 256 * 1024**2,
+            "monitor_max_retained_identity_records": 10_000_000,
             "monitor_max_retained_identity_bytes": 2 * 1024**3,
+            "monitor_max_events_per_transaction": 101000,
             "monitor_max_bootstrap_state_rows": 10_000_000,
             "monitor_max_bootstrap_state_bytes": 256 * 1024**2,
+            "monitor_max_checker_state_bytes": 512 * 1024**2,
+            "maximum_capacity_utilization_percent": 70,
             "si_monitoring_head": "d" * 40,
             "co_checker_head": "e" * 40,
             "si_monitoring_dirty": False,
@@ -84,14 +96,56 @@ class MonitorPerformanceReportTest(unittest.TestCase):
                 "max_rss_kib": max_rss_kib,
             },
             "limits": {
+                "assembler": {
+                    "max_active_transactions": 1024,
+                    "max_events_per_transaction": 100000,
+                    "max_active_bytes": 256 * 1024**2,
+                    "max_completed_transactions": 10_000_000,
+                    "max_retained_identity_bytes": 256 * 1024**2,
+                },
                 "joiner": {
+                    "max_pending_client_records": 1_000_000,
                     "max_pending_client_bytes": 3 * 1024**3,
+                    "max_pending_cdc_slots": 1_000_000,
+                    "max_pending_cdc_bytes": 256 * 1024**2,
+                    "max_retained_identity_records": 10_000_000,
                     "max_retained_identity_bytes": 2 * 1024**3,
+                    "max_events_per_transaction": 101000,
                     "max_bootstrap_state_rows": 10_000_000,
                     "max_bootstrap_state_bytes": 256 * 1024**2,
-                }
+                    "max_checker_state_bytes": 512 * 1024**2,
+                },
+                "checker": {
+                    "max_retained_state_bytes": 512 * 1024**2,
+                    "max_events_per_transaction": 101000,
+                    "max_mapped_identity_records": 10_000_000,
+                    "max_mapped_identity_bytes": 2 * 1024**3,
+                },
             },
-            "joiner": {"joined_workload_transactions": self.source_transactions},
+            "assembler": {
+                "active_transactions_high_water": 1,
+                "observed_events_per_transaction_high_water": 10,
+                "active_assembly_high_water_bytes": 1000,
+                "completed_transactions": 1100,
+                "retained_identity_high_water_bytes": 1000,
+            },
+            "joiner": {
+                "joined_workload_transactions": self.source_transactions,
+                "pending_client_high_water_records": 10,
+                "pending_client_high_water_bytes": 1000,
+                "pending_cdc_high_water_slots": 10,
+                "pending_cdc_high_water_bytes": 1000,
+                "join_buffer_high_water_records": 20,
+                "join_buffer_high_water_bytes": 2000,
+                "retained_identity_high_water_records": 2000,
+                "retained_identity_high_water_bytes": 10000,
+                "released_events_per_transaction_high_water": 20,
+                "bootstrap_state_high_water_rows": 100,
+                "bootstrap_state_high_water_bytes": 10000,
+                "missing_client_head_wait_max_nanoseconds": 100_000_000,
+                "end_fence_drain_current_nanoseconds": 0,
+                "end_fence_drain_nanoseconds": 200_000_000,
+            },
             "checker": {
                 "bootstrap_transactions": self.source_transactions // 10 if audited else 0,
                 "workload_transactions": self.source_transactions if audited else 0,
@@ -101,9 +155,15 @@ class MonitorPerformanceReportTest(unittest.TestCase):
                 "consumed_transactions": self.source_transactions + 12 if audited else 0,
                 "mapped_identity_records": self.source_transactions * 2 if audited else 0,
                 "mapped_identity_bytes": self.source_transactions * 16 if audited else 0,
+                "mapped_identity_high_water_records": self.source_transactions * 2 if audited else 0,
+                "mapped_identity_high_water_bytes": self.source_transactions * 16 if audited else 0,
+                "events_per_transaction_high_water": 20 if audited else 0,
                 "next_commit_seq": self.source_transactions + 12 if audited else 0,
                 "consume_total_nanoseconds": 500_000_000 if audited else 0,
                 "consume_max_nanoseconds": 1_000_000 if audited else 0,
+                "engine": {
+                    "peak_retained_state_bytes": 1000 if audited else 0,
+                },
             },
             "reconciliation": {
                 "evidence_reconciled": True,
@@ -178,6 +238,9 @@ class MonitorPerformanceReportTest(unittest.TestCase):
             self.assertEqual(raw[0]["process_cpu_seconds"], "5")
             self.assertEqual(raw[0]["transactions_per_cpu_second"], "200")
             self.assertEqual(raw[0]["max_rss_mib"], "256")
+            self.assertEqual(raw[0]["peak_capacity_utilization_percent"], "0.09765625")
+            self.assertEqual(raw[0]["missing_client_head_wait_max_seconds"], "0.1")
+            self.assertEqual(raw[0]["end_fence_drain_seconds"], "0.2")
 
             with (root / "monitor_summary_statistics.csv").open(
                 encoding="utf-8", newline=""
@@ -474,11 +537,39 @@ class MonitorPerformanceReportTest(unittest.TestCase):
                 "differs from trial metadata",
             ),
             (
+                "assembler limit mismatch",
+                lambda value: value["limits"]["assembler"].__setitem__(
+                    "max_active_transactions", 1
+                ),
+                "differs from trial metadata",
+            ),
+            (
+                "checker limit mismatch",
+                lambda value: value["limits"]["checker"].__setitem__(
+                    "max_retained_state_bytes", 1
+                ),
+                "differs from trial metadata",
+            ),
+            (
                 "bootstrap row limit mismatch",
                 lambda value: value["limits"]["joiner"].__setitem__(
                     "max_bootstrap_state_rows", 1
                 ),
                 "differs from trial metadata",
+            ),
+            (
+                "capacity threshold",
+                lambda value: value["assembler"].__setitem__(
+                    "active_transactions_high_water", 717
+                ),
+                "not below its capacity threshold",
+            ),
+            (
+                "active drain timer",
+                lambda value: value["joiner"].__setitem__(
+                    "end_fence_drain_current_nanoseconds", 1
+                ),
+                "active end-fence drain timer",
             ),
             (
                 "bootstrap byte limit mismatch",

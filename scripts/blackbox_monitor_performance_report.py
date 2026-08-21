@@ -18,6 +18,48 @@ MODE_LABELS = {
     "assembly_join_check": "Full checking",
 }
 
+CAPACITY_METADATA_FIELDS = (
+    "monitor_max_assembler_active_transactions",
+    "monitor_max_assembler_events_per_transaction",
+    "monitor_max_assembler_active_bytes",
+    "monitor_max_assembler_completed_transactions",
+    "monitor_max_assembler_retained_identity_bytes",
+    "monitor_max_pending_client_records",
+    "monitor_max_pending_client_bytes",
+    "monitor_max_pending_cdc_slots",
+    "monitor_max_pending_cdc_bytes",
+    "monitor_max_retained_identity_records",
+    "monitor_max_retained_identity_bytes",
+    "monitor_max_events_per_transaction",
+    "monitor_max_bootstrap_state_rows",
+    "monitor_max_bootstrap_state_bytes",
+    "monitor_max_checker_state_bytes",
+    "maximum_capacity_utilization_percent",
+)
+
+CAPACITY_OBSERVATION_FIELDS = (
+    "assembler_active_transactions_high_water",
+    "assembler_events_per_transaction_high_water",
+    "assembler_active_bytes_high_water",
+    "assembler_completed_transactions",
+    "assembler_retained_identity_bytes_high_water",
+    "joiner_pending_client_records_high_water",
+    "joiner_pending_client_bytes_high_water",
+    "joiner_pending_cdc_slots_high_water",
+    "joiner_pending_cdc_bytes_high_water",
+    "joiner_retained_identity_records_high_water",
+    "joiner_retained_identity_bytes_high_water",
+    "joiner_events_per_transaction_high_water",
+    "joiner_bootstrap_state_rows_high_water",
+    "joiner_bootstrap_state_bytes_high_water",
+    "checker_mapped_identity_records_high_water",
+    "checker_mapped_identity_bytes_high_water",
+    "checker_events_per_transaction_high_water",
+    "checker_state_bytes_high_water",
+    "join_buffer_records_high_water",
+    "join_buffer_bytes_high_water",
+)
+
 METRICS = (
     "workload_transactions",
     "monitor_wall_seconds",
@@ -25,6 +67,9 @@ METRICS = (
     "process_cpu_seconds",
     "transactions_per_cpu_second",
     "max_rss_mib",
+    "peak_capacity_utilization_percent",
+    "missing_client_head_wait_max_seconds",
+    "end_fence_drain_seconds",
 )
 
 JOIN_ONLY_CHECKER_COUNTERS = (
@@ -36,6 +81,9 @@ JOIN_ONLY_CHECKER_COUNTERS = (
     "consumed_transactions",
     "mapped_identity_records",
     "mapped_identity_bytes",
+    "mapped_identity_high_water_records",
+    "mapped_identity_high_water_bytes",
+    "events_per_transaction_high_water",
     "next_commit_seq",
     "consume_total_nanoseconds",
     "consume_max_nanoseconds",
@@ -61,10 +109,7 @@ RAW_FIELDS = (
     "source_client_entries",
     "source_workload_transactions",
     "redis_maxmemory_bytes",
-    "monitor_max_pending_client_bytes",
-    "monitor_max_retained_identity_bytes",
-    "monitor_max_bootstrap_state_rows",
-    "monitor_max_bootstrap_state_bytes",
+    *CAPACITY_METADATA_FIELDS,
     "si_monitoring_head",
     "co_checker_head",
     "si_monitoring_dirty",
@@ -79,6 +124,12 @@ RAW_FIELDS = (
     "transactions_per_cpu_second",
     "process_max_rss_kib",
     "max_rss_mib",
+    *CAPACITY_OBSERVATION_FIELDS,
+    "peak_capacity_utilization_percent",
+    "missing_client_head_wait_max_nanoseconds",
+    "missing_client_head_wait_max_seconds",
+    "end_fence_drain_nanoseconds",
+    "end_fence_drain_seconds",
     "completion_status",
     "evidence_reconciled",
     "audited_outcome",
@@ -104,6 +155,9 @@ HEADLINE_FIELDS = (
     "process_cpu_seconds",
     "transactions_per_cpu_second",
     "max_rss_mib",
+    "peak_capacity_utilization_percent",
+    "missing_client_head_wait_max_seconds",
+    "end_fence_drain_seconds",
     "throughput_loss_vs_join_only_percent",
 )
 
@@ -126,10 +180,7 @@ METADATA_FIELDS = (
     "source_client_entries",
     "source_workload_transactions",
     "redis_maxmemory_bytes",
-    "monitor_max_pending_client_bytes",
-    "monitor_max_retained_identity_bytes",
-    "monitor_max_bootstrap_state_rows",
-    "monitor_max_bootstrap_state_bytes",
+    *CAPACITY_METADATA_FIELDS,
     "si_monitoring_head",
     "co_checker_head",
     "si_monitoring_dirty",
@@ -150,10 +201,7 @@ INVARIANT_FIELDS = (
     "source_client_entries",
     "source_workload_transactions",
     "redis_maxmemory_bytes",
-    "monitor_max_pending_client_bytes",
-    "monitor_max_retained_identity_bytes",
-    "monitor_max_bootstrap_state_rows",
-    "monitor_max_bootstrap_state_bytes",
+    *CAPACITY_METADATA_FIELDS,
     "si_monitoring_head",
     "co_checker_head",
     "si_monitoring_dirty",
@@ -274,12 +322,13 @@ def validate_metadata(metadata: Mapping[str, Any], trial_dir: Path) -> dict[str,
         "source_client_entries",
         "source_workload_transactions",
         "redis_maxmemory_bytes",
-        "monitor_max_pending_client_bytes",
-        "monitor_max_retained_identity_bytes",
-        "monitor_max_bootstrap_state_rows",
-        "monitor_max_bootstrap_state_bytes",
+        *CAPACITY_METADATA_FIELDS,
     ):
         result[field] = integer(metadata[field], f"{label}.{field}", minimum=1)
+    require(
+        result["maximum_capacity_utilization_percent"] <= 100,
+        f"{label}.maximum_capacity_utilization_percent exceeds 100",
+    )
     for field in (
         "source_trial_manifest_sha256",
         "source_cdc_sha256",
@@ -329,27 +378,93 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     )
 
     limits = object_field(monitor, "limits", label)
+    assembler_limits = object_field(limits, "assembler", f"{label}.limits")
     joiner_limits = object_field(limits, "joiner", f"{label}.limits")
-    for metric_field, metadata_field in (
-        ("max_pending_client_bytes", "monitor_max_pending_client_bytes"),
-        ("max_retained_identity_bytes", "monitor_max_retained_identity_bytes"),
-        ("max_bootstrap_state_rows", "monitor_max_bootstrap_state_rows"),
-        ("max_bootstrap_state_bytes", "monitor_max_bootstrap_state_bytes"),
+    checker_limits = object_field(limits, "checker", f"{label}.limits")
+    for group, metric_field, metadata_field in (
+        (assembler_limits, "max_active_transactions", "monitor_max_assembler_active_transactions"),
+        (assembler_limits, "max_events_per_transaction", "monitor_max_assembler_events_per_transaction"),
+        (assembler_limits, "max_active_bytes", "monitor_max_assembler_active_bytes"),
+        (assembler_limits, "max_completed_transactions", "monitor_max_assembler_completed_transactions"),
+        (assembler_limits, "max_retained_identity_bytes", "monitor_max_assembler_retained_identity_bytes"),
+        (joiner_limits, "max_pending_client_records", "monitor_max_pending_client_records"),
+        (joiner_limits, "max_pending_client_bytes", "monitor_max_pending_client_bytes"),
+        (joiner_limits, "max_pending_cdc_slots", "monitor_max_pending_cdc_slots"),
+        (joiner_limits, "max_pending_cdc_bytes", "monitor_max_pending_cdc_bytes"),
+        (joiner_limits, "max_retained_identity_records", "monitor_max_retained_identity_records"),
+        (joiner_limits, "max_retained_identity_bytes", "monitor_max_retained_identity_bytes"),
+        (joiner_limits, "max_events_per_transaction", "monitor_max_events_per_transaction"),
+        (joiner_limits, "max_bootstrap_state_rows", "monitor_max_bootstrap_state_rows"),
+        (joiner_limits, "max_bootstrap_state_bytes", "monitor_max_bootstrap_state_bytes"),
+        (joiner_limits, "max_checker_state_bytes", "monitor_max_checker_state_bytes"),
     ):
-        observed = metric_integer(joiner_limits, metric_field, f"{label}.limits.joiner", minimum=1)
+        observed = metric_integer(group, metric_field, f"{label}.limits", minimum=1)
         require(
             observed == metadata[metadata_field],
             f"{label} {metric_field} differs from trial metadata {metadata_field}",
         )
+    for metric_field, metadata_field in (
+        ("max_retained_state_bytes", "monitor_max_checker_state_bytes"),
+        ("max_events_per_transaction", "monitor_max_events_per_transaction"),
+        ("max_mapped_identity_records", "monitor_max_retained_identity_records"),
+        ("max_mapped_identity_bytes", "monitor_max_retained_identity_bytes"),
+    ):
+        require(
+            metric_integer(checker_limits, metric_field, f"{label}.limits.checker", minimum=1)
+            == metadata[metadata_field],
+            f"{label} checker {metric_field} differs from trial metadata",
+        )
 
+    assembler = object_field(monitor, "assembler", label)
     joiner = object_field(monitor, "joiner", label)
+    checker = object_field(monitor, "checker", label)
+    checker_engine = object_field(checker, "engine", f"{label}.checker")
+    capacity_observations = (
+        (assembler, "active_transactions_high_water", assembler_limits, "max_active_transactions", "assembler_active_transactions_high_water"),
+        (assembler, "observed_events_per_transaction_high_water", assembler_limits, "max_events_per_transaction", "assembler_events_per_transaction_high_water"),
+        (assembler, "active_assembly_high_water_bytes", assembler_limits, "max_active_bytes", "assembler_active_bytes_high_water"),
+        (assembler, "completed_transactions", assembler_limits, "max_completed_transactions", "assembler_completed_transactions"),
+        (assembler, "retained_identity_high_water_bytes", assembler_limits, "max_retained_identity_bytes", "assembler_retained_identity_bytes_high_water"),
+        (joiner, "pending_client_high_water_records", joiner_limits, "max_pending_client_records", "joiner_pending_client_records_high_water"),
+        (joiner, "pending_client_high_water_bytes", joiner_limits, "max_pending_client_bytes", "joiner_pending_client_bytes_high_water"),
+        (joiner, "pending_cdc_high_water_slots", joiner_limits, "max_pending_cdc_slots", "joiner_pending_cdc_slots_high_water"),
+        (joiner, "pending_cdc_high_water_bytes", joiner_limits, "max_pending_cdc_bytes", "joiner_pending_cdc_bytes_high_water"),
+        (joiner, "retained_identity_high_water_records", joiner_limits, "max_retained_identity_records", "joiner_retained_identity_records_high_water"),
+        (joiner, "retained_identity_high_water_bytes", joiner_limits, "max_retained_identity_bytes", "joiner_retained_identity_bytes_high_water"),
+        (joiner, "released_events_per_transaction_high_water", joiner_limits, "max_events_per_transaction", "joiner_events_per_transaction_high_water"),
+        (joiner, "bootstrap_state_high_water_rows", joiner_limits, "max_bootstrap_state_rows", "joiner_bootstrap_state_rows_high_water"),
+        (joiner, "bootstrap_state_high_water_bytes", joiner_limits, "max_bootstrap_state_bytes", "joiner_bootstrap_state_bytes_high_water"),
+        (checker, "mapped_identity_high_water_records", checker_limits, "max_mapped_identity_records", "checker_mapped_identity_records_high_water"),
+        (checker, "mapped_identity_high_water_bytes", checker_limits, "max_mapped_identity_bytes", "checker_mapped_identity_bytes_high_water"),
+        (checker, "events_per_transaction_high_water", checker_limits, "max_events_per_transaction", "checker_events_per_transaction_high_water"),
+        (checker_engine, "peak_retained_state_bytes", checker_limits, "max_retained_state_bytes", "checker_state_bytes_high_water"),
+    )
+    capacity_percentages: list[Decimal] = []
+    capacity_high_waters: dict[str, int] = {}
+    for observed_group, observed_field, capacity_group, capacity_field, output_field in capacity_observations:
+        observed = metric_integer(observed_group, observed_field, label)
+        capacity = metric_integer(capacity_group, capacity_field, f"{label}.limits", minimum=1)
+        utilization = Decimal(observed) * Decimal(100) / Decimal(capacity)
+        require(
+            utilization < metadata["maximum_capacity_utilization_percent"],
+            f"{label}.{observed_field} is not below its capacity threshold",
+        )
+        capacity_percentages.append(utilization)
+        capacity_high_waters[output_field] = observed
+    capacity_high_waters["join_buffer_records_high_water"] = metric_integer(
+        joiner, "join_buffer_high_water_records", f"{label}.joiner"
+    )
+    capacity_high_waters["join_buffer_bytes_high_water"] = metric_integer(
+        joiner, "join_buffer_high_water_bytes", f"{label}.joiner"
+    )
+    peak_capacity_utilization = max(capacity_percentages)
+
     joined = metric_integer(joiner, "joined_workload_transactions", f"{label}.joiner")
     require(
         joined == source_transactions,
         f"{label} joined workload count differs from source_workload_transactions",
     )
 
-    checker = object_field(monitor, "checker", label)
     checker_workload = metric_integer(checker, "workload_transactions", f"{label}.checker")
     checker_consumed = metric_integer(checker, "consumed_transactions", f"{label}.checker")
     if stage == "assembly_join":
@@ -361,6 +476,15 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         require(
             not any(checker_activity.values()),
             f"{label} join-only mode invoked the checker",
+        )
+        require(
+            metric_integer(
+                checker_engine,
+                "peak_retained_state_bytes",
+                f"{label}.checker.engine",
+            )
+            == 0,
+            f"{label} join-only mode retained checker state",
         )
         workload_transactions = joined
         audited_outcome = ""
@@ -384,6 +508,21 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     cpu_ns = user_ns + system_ns
     require(cpu_ns > 0, f"{label} process CPU time is zero")
     max_rss_kib = metric_integer(process, "max_rss_kib", f"{label}.process", minimum=1)
+    head_wait_ns = metric_integer(
+        joiner, "missing_client_head_wait_max_nanoseconds", f"{label}.joiner"
+    )
+    end_fence_drain_ns = metric_integer(
+        joiner, "end_fence_drain_nanoseconds", f"{label}.joiner"
+    )
+    require(
+        metric_integer(
+            joiner,
+            "end_fence_drain_current_nanoseconds",
+            f"{label}.joiner",
+        )
+        == 0,
+        f"{label} retains an active end-fence drain timer",
+    )
 
     billion = Decimal(1_000_000_000)
     wall_seconds = Decimal(wall_ns) / billion
@@ -391,6 +530,8 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     throughput = Decimal(workload_transactions) / wall_seconds
     transactions_per_cpu_second = Decimal(workload_transactions) / cpu_seconds
     max_rss_mib = Decimal(max_rss_kib) / Decimal(1024)
+    head_wait_seconds = Decimal(head_wait_ns) / billion
+    end_fence_drain_seconds = Decimal(end_fence_drain_ns) / billion
 
     row = {
         "stage": stage,
@@ -407,18 +548,7 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "random_seed": metadata["random_seed"],
         **{field: metadata[field] for field in RAW_FIELDS if field.startswith("source_")},
         "redis_maxmemory_bytes": metadata["redis_maxmemory_bytes"],
-        "monitor_max_pending_client_bytes": metadata[
-            "monitor_max_pending_client_bytes"
-        ],
-        "monitor_max_retained_identity_bytes": metadata[
-            "monitor_max_retained_identity_bytes"
-        ],
-        "monitor_max_bootstrap_state_rows": metadata[
-            "monitor_max_bootstrap_state_rows"
-        ],
-        "monitor_max_bootstrap_state_bytes": metadata[
-            "monitor_max_bootstrap_state_bytes"
-        ],
+        **{field: metadata[field] for field in CAPACITY_METADATA_FIELDS},
         "si_monitoring_head": metadata["si_monitoring_head"],
         "co_checker_head": metadata["co_checker_head"],
         "si_monitoring_dirty": metadata["si_monitoring_dirty"],
@@ -433,6 +563,12 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "transactions_per_cpu_second": transactions_per_cpu_second,
         "process_max_rss_kib": max_rss_kib,
         "max_rss_mib": max_rss_mib,
+        **capacity_high_waters,
+        "peak_capacity_utilization_percent": peak_capacity_utilization,
+        "missing_client_head_wait_max_nanoseconds": head_wait_ns,
+        "missing_client_head_wait_max_seconds": head_wait_seconds,
+        "end_fence_drain_nanoseconds": end_fence_drain_ns,
+        "end_fence_drain_seconds": end_fence_drain_seconds,
         "completion_status": "completed",
         "evidence_reconciled": True,
         "audited_outcome": audited_outcome,
@@ -593,18 +729,7 @@ def write_summary_json(
         "source_corpus": source,
         "provenance": {
             "redis_maxmemory_bytes": metadata["redis_maxmemory_bytes"],
-            "monitor_max_pending_client_bytes": metadata[
-                "monitor_max_pending_client_bytes"
-            ],
-            "monitor_max_retained_identity_bytes": metadata[
-                "monitor_max_retained_identity_bytes"
-            ],
-            "monitor_max_bootstrap_state_rows": metadata[
-                "monitor_max_bootstrap_state_rows"
-            ],
-            "monitor_max_bootstrap_state_bytes": metadata[
-                "monitor_max_bootstrap_state_bytes"
-            ],
+            **{field: metadata[field] for field in CAPACITY_METADATA_FIELDS},
             "si_monitoring_head": metadata["si_monitoring_head"],
             "co_checker_head": metadata["co_checker_head"],
             "si_monitoring_dirty": metadata["si_monitoring_dirty"],

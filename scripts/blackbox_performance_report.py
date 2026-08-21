@@ -40,6 +40,8 @@ IDENTITY_FIELDS = (
 
 OVERHEAD_METRICS = (
     ("throughput_requests_per_second", "throughput_loss_percent"),
+    ("successful_transactions_per_second_workload", "throughput_loss_percent"),
+    ("new_order_per_minute", "throughput_loss_percent"),
     ("latency_mean_microseconds", "latency_increase_percent"),
     ("latency_p50_microseconds", "latency_increase_percent"),
     ("latency_p95_microseconds", "latency_increase_percent"),
@@ -67,6 +69,60 @@ HEADLINE_STAGE_LABELS = {
     "read_capture_encoding_redis": "Capture + Redis",
     "cdc_capture": "CDC only",
 }
+
+TRANSACTION_RESULT_FIELDS = (
+    "benchmark",
+    "stage",
+    "repetition",
+    "trial_id",
+    "row_scope",
+    "transaction_type",
+    "elapsed_time_nanoseconds",
+    "logical_transactions_started",
+    "successful_transactions",
+    "terminal_aborted_transactions",
+    "physical_attempts_started",
+    "definitively_aborted_attempts",
+    "retry_attempts",
+    "retryable_failure_events",
+    "error_transactions",
+    "unknown_status_transactions",
+    "failed_transactions",
+    "ambiguous_attempts",
+    "retry_different_events",
+    "logical_transactions_per_second",
+    "successful_transactions_per_second",
+    "attempts_per_second",
+    "retry_attempts_per_second",
+    "terminal_aborted_transactions_per_second",
+    "error_transactions_per_second",
+    "unknown_status_transactions_per_second",
+    "failed_transactions_per_second",
+    "latency_mean_microseconds",
+    "latency_p50_microseconds",
+    "latency_p95_microseconds",
+    "latency_p99_microseconds",
+    "latency_max_microseconds",
+    "new_order_per_minute",
+)
+
+OUTCOME_COUNTER_FIELDS = (
+    "logical_transactions_started",
+    "successful_transactions",
+    "terminal_aborted_transactions",
+    "physical_attempts_started",
+    "definitively_aborted_attempts",
+    "retry_attempts",
+    "retryable_failure_events",
+    "error_transactions",
+    "unknown_status_transactions",
+    "ambiguous_attempts",
+    "retry_different_events",
+)
+
+CANONICAL_UTC_SECOND_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
+)
 
 
 class ReportError(ValueError):
@@ -138,6 +194,63 @@ def finite_numbers(values: Iterable[Any]) -> list[float]:
         if math.isfinite(number):
             result.append(number)
     return result
+
+
+def numeric(value: Any, label: str, *, minimum: float = 0.0) -> float:
+    values = finite_numbers((value,))
+    require(len(values) == 1 and values[0] >= minimum, f"{label} is not a number >= {minimum}")
+    return values[0]
+
+
+def integer(value: Any, label: str, *, minimum: int = 0) -> int:
+    require(
+        isinstance(value, int) and not isinstance(value, bool) and value >= minimum,
+        f"{label} is not an integer >= {minimum}",
+    )
+    return value
+
+
+def parse_utc_epoch_ms(value: Any, label: str) -> int:
+    require(isinstance(value, str), f"{label} is not text")
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ReportError(f"{label} is invalid") from error
+    require(parsed.tzinfo is not None, f"{label} has no timezone")
+    return int(parsed.timestamp() * 1000)
+
+
+def canonical_utc_second(value: Any, label: str) -> str:
+    require(
+        isinstance(value, str) and CANONICAL_UTC_SECOND_RE.fullmatch(value) is not None,
+        f"{label} is not canonical UTC whole-second text",
+    )
+    try:
+        dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as error:
+        raise ReportError(f"{label} is not a valid UTC calendar timestamp") from error
+    return value
+
+
+def parse_redis_info(path: Path) -> dict[str, int]:
+    require(path.is_file(), f"Redis INFO artifact is missing: {path}")
+    values: dict[str, int] = {}
+    for raw_line in path.read_text(encoding="utf-8", errors="strict").splitlines():
+        if not raw_line or raw_line.startswith("#") or ":" not in raw_line:
+            continue
+        name, value = raw_line.split(":", 1)
+        if name in {"used_memory", "used_memory_peak", "maxmemory"}:
+            require(re.fullmatch(r"0|[1-9][0-9]*", value) is not None, f"Redis INFO {name} is invalid")
+            values[name] = int(value)
+    require(
+        set(values) == {"used_memory", "used_memory_peak", "maxmemory"},
+        "Redis INFO memory counters are incomplete",
+    )
+    return values
+
+
+def directory_file_bytes(path: Path) -> int:
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
 def summarize_resources(path: Path) -> dict[str, Any]:
@@ -415,7 +528,211 @@ def monitor_aliases(flattened: Mapping[str, Any]) -> dict[str, Any]:
         "monitor_released_ordered_events": flattened.get(
             "monitor_joiner_released_ordered_events", ""
         ),
+        "monitor_normalized_write_events": flattened.get(
+            "monitor_assembler_normalized_write_events", ""
+        ),
+        "head_of_line_wait_count": flattened.get(
+            "monitor_joiner_missing_client_head_wait_count", ""
+        ),
+        "head_of_line_wait_total_ms": nanoseconds_to_milliseconds(
+            flattened.get("monitor_joiner_missing_client_head_wait_total_nanoseconds", "")
+        ),
+        "monitor_end_fence_drain_ms": nanoseconds_to_milliseconds(
+            flattened.get("monitor_joiner_end_fence_drain_nanoseconds", "")
+        ),
     }
+
+
+MONITOR_CAPACITY_METRICS = (
+    (
+        "assembler_active_transactions",
+        "monitor_max_assembler_active_transactions",
+        "monitor_limits_assembler_max_active_transactions",
+        "monitor_assembler_active_transactions_high_water",
+    ),
+    (
+        "assembler_events_per_transaction",
+        "monitor_max_assembler_events_per_transaction",
+        "monitor_limits_assembler_max_events_per_transaction",
+        "monitor_assembler_observed_events_per_transaction_high_water",
+    ),
+    (
+        "assembler_active_bytes",
+        "monitor_max_assembler_active_bytes",
+        "monitor_limits_assembler_max_active_bytes",
+        "monitor_assembler_active_assembly_high_water_bytes",
+    ),
+    (
+        "assembler_completed_transactions",
+        "monitor_max_assembler_completed_transactions",
+        "monitor_limits_assembler_max_completed_transactions",
+        "monitor_assembler_completed_transactions",
+    ),
+    (
+        "assembler_retained_identity_bytes",
+        "monitor_max_assembler_retained_identity_bytes",
+        "monitor_limits_assembler_max_retained_identity_bytes",
+        "monitor_assembler_retained_identity_high_water_bytes",
+    ),
+    (
+        "pending_client_records",
+        "monitor_max_pending_client_records",
+        "monitor_limits_joiner_max_pending_client_records",
+        "monitor_joiner_pending_client_high_water_records",
+    ),
+    (
+        "pending_client_bytes",
+        "monitor_max_pending_client_bytes",
+        "monitor_limits_joiner_max_pending_client_bytes",
+        "monitor_joiner_pending_client_high_water_bytes",
+    ),
+    (
+        "pending_cdc_slots",
+        "monitor_max_pending_cdc_slots",
+        "monitor_limits_joiner_max_pending_cdc_slots",
+        "monitor_joiner_pending_cdc_high_water_slots",
+    ),
+    (
+        "pending_cdc_bytes",
+        "monitor_max_pending_cdc_bytes",
+        "monitor_limits_joiner_max_pending_cdc_bytes",
+        "monitor_joiner_pending_cdc_high_water_bytes",
+    ),
+    (
+        "retained_identity_records",
+        "monitor_max_retained_identity_records",
+        "monitor_limits_joiner_max_retained_identity_records",
+        "monitor_joiner_retained_identity_high_water_records",
+    ),
+    (
+        "retained_identity_bytes",
+        "monitor_max_retained_identity_bytes",
+        "monitor_limits_joiner_max_retained_identity_bytes",
+        "monitor_joiner_retained_identity_high_water_bytes",
+    ),
+    (
+        "events_per_transaction",
+        "monitor_max_events_per_transaction",
+        "monitor_limits_joiner_max_events_per_transaction",
+        "monitor_joiner_released_events_per_transaction_high_water",
+    ),
+    (
+        "bootstrap_state_rows",
+        "monitor_max_bootstrap_state_rows",
+        "monitor_limits_joiner_max_bootstrap_state_rows",
+        "monitor_joiner_bootstrap_state_high_water_rows",
+    ),
+    (
+        "bootstrap_state_bytes",
+        "monitor_max_bootstrap_state_bytes",
+        "monitor_limits_joiner_max_bootstrap_state_bytes",
+        "monitor_joiner_bootstrap_state_high_water_bytes",
+    ),
+    (
+        "checker_state_bytes",
+        "monitor_max_checker_state_bytes",
+        "monitor_limits_checker_max_retained_state_bytes",
+        "monitor_checker_engine_peak_retained_state_bytes",
+    ),
+    (
+        "checker_mapped_identity_records",
+        "monitor_max_retained_identity_records",
+        "monitor_limits_checker_max_mapped_identity_records",
+        "monitor_checker_mapped_identity_high_water_records",
+    ),
+    (
+        "checker_mapped_identity_bytes",
+        "monitor_max_retained_identity_bytes",
+        "monitor_limits_checker_max_mapped_identity_bytes",
+        "monitor_checker_mapped_identity_high_water_bytes",
+    ),
+    (
+        "checker_events_per_transaction",
+        "monitor_max_events_per_transaction",
+        "monitor_limits_checker_max_events_per_transaction",
+        "monitor_checker_events_per_transaction_high_water",
+    ),
+)
+
+
+def monitor_capacity_acceptance(
+    metadata: Mapping[str, Any], flattened: Mapping[str, Any]
+) -> dict[str, Any]:
+    checker_enabled = metadata.get("stage") == "assembly_join_check"
+    threshold = numeric(
+        metadata.get("high_water_threshold_percent"),
+        "high-water threshold percent",
+        minimum=0.0,
+    )
+    require(0 < threshold <= 100, "high-water threshold percent is outside (0,100]")
+    result: dict[str, Any] = {}
+    ratios: list[float] = []
+    for label, metadata_field, monitor_limit_field, observed_field in MONITOR_CAPACITY_METRICS:
+        if label.startswith("checker_") and not checker_enabled:
+            continue
+        configured = integer(metadata.get(metadata_field), metadata_field, minimum=1)
+        reported = integer(flattened.get(monitor_limit_field), monitor_limit_field, minimum=1)
+        require(reported == configured, f"monitor {label} limit differs from trial metadata")
+        observed = numeric(flattened.get(observed_field), observed_field)
+        utilization = observed * 100.0 / configured
+        result[f"resource_{label}_high_water"] = observed
+        result[f"resource_{label}_capacity"] = configured
+        result[f"resource_{label}_high_water_percent"] = utilization
+        ratios.append(utilization)
+
+    checker_limit = integer(metadata.get("monitor_max_checker_state_bytes"), "checker state limit", minimum=1)
+    require(
+        integer(flattened.get("monitor_limits_joiner_max_checker_state_bytes"), "joiner checker state limit", minimum=1)
+        == checker_limit,
+        "joiner checker-state limit differs from trial metadata",
+    )
+    if checker_enabled:
+        require(
+            integer(flattened.get("monitor_checker_engine_retained_state_capacity_bytes"), "checker engine capacity", minimum=1)
+            == checker_limit,
+            "checker engine capacity differs from trial metadata",
+        )
+        require(
+            integer(flattened.get("monitor_limits_checker_max_events_per_transaction"), "checker event limit", minimum=1)
+            == int(metadata["monitor_max_events_per_transaction"]),
+            "checker event limit differs from trial metadata",
+        )
+        require(
+            integer(flattened.get("monitor_limits_checker_max_mapped_identity_records"), "checker identity record limit", minimum=1)
+            == int(metadata["monitor_max_retained_identity_records"]),
+            "checker identity record limit differs from trial metadata",
+        )
+        require(
+            integer(flattened.get("monitor_limits_checker_max_mapped_identity_bytes"), "checker identity byte limit", minimum=1)
+            == int(metadata["monitor_max_retained_identity_bytes"]),
+            "checker identity byte limit differs from trial metadata",
+        )
+    result["resource_high_water_max_percent"] = max(ratios)
+    result["resource_high_water_threshold_percent"] = threshold
+    result["resource_high_water_accepted"] = max(ratios) < threshold
+    require(result["resource_high_water_accepted"], "monitor high-water threshold was reached or exceeded")
+    return result
+
+
+def monitor_terminal_queue_acceptance(flattened: Mapping[str, Any]) -> dict[str, Any]:
+    fields = (
+        "monitor_assembler_active_transactions",
+        "monitor_assembler_active_assembly_bytes",
+        "monitor_joiner_pending_client_records",
+        "monitor_joiner_pending_client_bytes",
+        "monitor_joiner_pending_cdc_slots",
+        "monitor_joiner_pending_cdc_bytes",
+        "monitor_joiner_unmatched_client_records",
+        "monitor_joiner_unmatched_workload_cdc_slots",
+        "monitor_joiner_end_fence_drain_current_nanoseconds",
+    )
+    result: dict[str, Any] = {}
+    for field in fields:
+        value = numeric(flattened.get(field), field)
+        result[f"terminal_{field.removeprefix('monitor_')}"] = value
+        require(value == 0, f"terminal monitor queue is nonzero: {field}")
+    result["terminal_monitor_queues_drained"] = True
+    return result
 
 
 def stream_id_milliseconds(stream_id: str) -> int:
@@ -577,11 +894,301 @@ def fence_stream_time(
     return phases[phase]
 
 
+def optional_rate(count: Any, seconds: float) -> float | str:
+    values = finite_numbers((count,))
+    return values[0] / seconds if values and seconds > 0 else ""
+
+
+def validate_outcome_metrics(
+    outcome: Mapping[str, Any], benchbase: Mapping[str, Any], benchmark: str
+) -> None:
+    require(outcome.get("kind") == "transaction_outcome_metrics", "outcome metric kind differs")
+    require(outcome.get("benchmark") == benchmark, "outcome benchmark differs from metadata")
+    require(outcome.get("scope") == "measurement_window", "outcome scope differs")
+    require(
+        outcome.get("window_semantics") == "fully_contained_logical_invocations",
+        "outcome window semantics differ",
+    )
+    elapsed_ns = integer(outcome.get("elapsed_time_nanoseconds"), "outcome elapsed", minimum=1)
+    require(
+        elapsed_ns == integer(benchbase.get("elapsed_time_nanoseconds"), "BenchBase elapsed", minimum=1),
+        "outcome and BenchBase elapsed windows differ",
+    )
+    measured = integer(outcome.get("measured_requests"), "outcome measured requests")
+    require(
+        measured == integer(benchbase.get("measured_count"), "BenchBase measured requests"),
+        "outcome and BenchBase measured counts differ",
+    )
+    require(outcome.get("phase_ids") == benchbase.get("phase_ids"), "outcome phase IDs differ")
+    raw_counts = benchbase.get("transaction_counts")
+    types = outcome.get("transaction_types")
+    totals = outcome.get("totals")
+    require(isinstance(raw_counts, Mapping), "BenchBase transaction counts are missing")
+    require(isinstance(types, Mapping) and types, "outcome transaction types are missing")
+    require(isinstance(totals, Mapping), "outcome totals are missing")
+    summed = {name: 0 for name in OUTCOME_COUNTER_FIELDS}
+    for transaction_name, raw_counters in types.items():
+        require(isinstance(transaction_name, str) and transaction_name, "outcome transaction name is invalid")
+        require(isinstance(raw_counters, Mapping), "outcome transaction counters are not an object")
+        counters = {
+            name: integer(raw_counters.get(name), f"{transaction_name}.{name}")
+            for name in OUTCOME_COUNTER_FIELDS
+        }
+        require(
+            counters["logical_transactions_started"]
+            == counters["successful_transactions"]
+            + counters["terminal_aborted_transactions"]
+            + counters["error_transactions"]
+            + counters["unknown_status_transactions"],
+            f"{transaction_name} logical outcomes do not reconcile",
+        )
+        require(
+            counters["physical_attempts_started"]
+            == counters["successful_transactions"]
+            + counters["definitively_aborted_attempts"]
+            + counters["ambiguous_attempts"],
+            f"{transaction_name} physical attempts do not reconcile",
+        )
+        require(
+            counters["retry_attempts"]
+            == counters["physical_attempts_started"] - counters["logical_transactions_started"],
+            f"{transaction_name} retries do not reconcile",
+        )
+        require(
+            counters["ambiguous_attempts"] == counters["unknown_status_transactions"],
+            f"{transaction_name} ambiguity counters differ",
+        )
+        retry_failure_events = (
+            counters["retryable_failure_events"]
+            + counters["retry_different_events"]
+        )
+        require(
+            counters["retry_attempts"]
+            <= retry_failure_events
+            <= counters["retry_attempts"] + counters["terminal_aborted_transactions"],
+            f"{transaction_name} retry failure event algebra differs",
+        )
+        require(
+            counters["logical_transactions_started"]
+            == integer(raw_counts.get(transaction_name, 0), f"raw {transaction_name} count"),
+            f"{transaction_name} raw/outcome count differs",
+        )
+        for name, value in counters.items():
+            summed[name] += value
+    for name, value in summed.items():
+        require(integer(totals.get(name), f"outcome total {name}") == value, f"outcome total {name} differs")
+    require(summed["logical_transactions_started"] == measured, "outcome logical total differs")
+    if benchmark == "tpcc":
+        require(
+            set(types) == {"NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel"},
+            "TPC-C outcome transaction roster differs",
+        )
+        expected_rate = (
+            integer(types["NewOrder"].get("successful_transactions"), "NewOrder successes")
+            * 60.0
+            / (elapsed_ns / 1_000_000_000.0)
+        )
+        actual_rate = numeric(outcome.get("new_order_per_minute"), "NewOrder/min")
+        require(
+            math.isclose(actual_rate, expected_rate, rel_tol=1e-15, abs_tol=1e-9),
+            "NewOrder/min differs",
+        )
+        require(outcome.get("new_order_rate_label") == "NewOrder/min", "NewOrder rate label differs")
+
+
+def add_interval_and_event_metrics(
+    row: dict[str, Any],
+    metadata: Mapping[str, Any],
+    benchbase: Mapping[str, Any],
+    outcome: Mapping[str, Any] | None,
+    analysis_window: Mapping[str, Any] | None,
+    monitor: Mapping[str, Any] | None,
+) -> None:
+    elapsed_ns = numeric(
+        benchbase.get("elapsed_time_nanoseconds"), "BenchBase elapsed nanoseconds", minimum=1.0
+    )
+    workload_seconds = elapsed_ns / 1_000_000_000.0
+    measured_start_ms = int(numeric(benchbase.get("measured_start_epoch_ms"), "measured start"))
+    measured_end_ms = int(numeric(benchbase.get("measured_end_epoch_ms"), "measured end"))
+    require(measured_end_ms >= measured_start_ms, "BenchBase measured window is reversed")
+    row["workload_window_seconds"] = workload_seconds
+
+    if outcome is not None:
+        totals = outcome.get("totals")
+        require(isinstance(totals, Mapping), "outcome totals are missing")
+        successful = numeric(totals.get("successful_transactions"), "successful transactions")
+        row["successful_transactions"] = successful
+        row["successful_transactions_per_second_workload"] = successful / workload_seconds
+        for counter in (
+            "logical_transactions_started",
+            "physical_attempts_started",
+            "retry_attempts",
+            "retryable_failure_events",
+            "terminal_aborted_transactions",
+            "error_transactions",
+            "unknown_status_transactions",
+            "ambiguous_attempts",
+            "retry_different_events",
+        ):
+            row[counter] = totals.get(counter, "")
+            row[f"{counter}_per_second_workload"] = optional_rate(
+                totals.get(counter), workload_seconds
+            )
+        row["attempts_per_second_workload"] = row[
+            "physical_attempts_started_per_second_workload"
+        ]
+        failed = numeric(totals.get("error_transactions"), "error transactions") + numeric(
+            totals.get("unknown_status_transactions"), "unknown statuses"
+        )
+        row["failed_transactions"] = failed
+        row["failed_transactions_per_second_workload"] = failed / workload_seconds
+        row["new_order_per_minute"] = outcome.get("new_order_per_minute", "")
+        row["new_order_rate_label"] = outcome.get("new_order_rate_label", "")
+    else:
+        successful = numeric(benchbase.get("measured_count"), "BenchBase measured count")
+        row["successful_transactions"] = successful
+        row["successful_transactions_per_second_workload"] = successful / workload_seconds
+        row["attempts_per_second_workload"] = successful / workload_seconds
+        row["new_order_per_minute"] = ""
+        row["new_order_rate_label"] = ""
+
+    interval_end_ms = measured_end_ms
+    interval_kind = "workload_window"
+    if isinstance(analysis_window, Mapping):
+        interval_end_ms = int(numeric(analysis_window.get("end_epoch_ms"), "analysis window end"))
+        require(interval_end_ms >= measured_end_ms, "analysis window ends before the workload")
+        interval_kind = str(analysis_window.get("definition", "analysis_window"))
+    if monitor is not None:
+        monitor_end_ms = parse_utc_epoch_ms(monitor.get("finished_at_utc"), "monitor finish timestamp")
+        if "drain_timeout_seconds" in metadata:
+            require(monitor_end_ms >= measured_end_ms, "monitor finished before the measured workload")
+        if monitor_end_ms >= measured_end_ms:
+            interval_end_ms = monitor_end_ms
+            interval_kind = "measured_workload_start_through_monitor_verdict"
+            tail_ms = interval_end_ms - measured_end_ms
+            row["workload_end_to_verdict_tail_ms"] = tail_ms
+        if "drain_timeout_seconds" in metadata:
+            drain_limit_ms = int(numeric(metadata.get("drain_timeout_seconds"), "drain timeout", minimum=1.0)) * 1000
+            joiner = monitor.get("joiner")
+            require(isinstance(joiner, Mapping), "monitor joiner metrics are missing")
+            end_fence_drain_ms = numeric(
+                joiner.get("end_fence_drain_nanoseconds"),
+                "monitor end-fence drain nanoseconds",
+            ) / 1_000_000.0
+            row["monitor_end_fence_drain_ms"] = end_fence_drain_ms
+            row["drain_timeout_ms"] = drain_limit_ms
+            row["drain_tail_accepted"] = (
+                tail_ms <= drain_limit_ms and end_fence_drain_ms <= drain_limit_ms
+            )
+            require(row["drain_tail_accepted"], "workload-to-verdict drain timeout was exceeded")
+    complete_seconds = (interval_end_ms - measured_start_ms) / 1000.0
+    require(complete_seconds > 0, "complete measurement interval is not positive")
+    row["complete_interval_definition"] = interval_kind
+    row["complete_interval_seconds"] = complete_seconds
+    row["successful_transactions_per_second_complete_interval"] = successful / complete_seconds
+
+    normalized_all = finite_numbers((row.get("monitor_normalized_write_events"),))
+    normalized_bootstrap = finite_numbers(
+        (row.get("monitor_released_bootstrap_write_events"),)
+    )
+    normalized_workload: float | str = ""
+    if normalized_all and normalized_bootstrap:
+        require(
+            normalized_all[0] >= normalized_bootstrap[0],
+            "normalized write count is below the bootstrap write count",
+        )
+        normalized_workload = normalized_all[0] - normalized_bootstrap[0]
+
+    event_counts = {
+        "client_read_events": _candidate(
+            row, ("client_read_event_count", "capture_read_event_count")
+        ),
+        "raw_cdc_row_events": row.get("redis_cdc_row_count", ""),
+        "normalized_write_events": normalized_workload,
+    }
+    joined_reads = finite_numbers((row.get("monitor_joined_read_events"),))
+    joined_writes = finite_numbers((row.get("monitor_joined_write_events"),))
+    event_counts["joined_checker_events"] = (
+        joined_reads[0] + joined_writes[0]
+        if joined_reads and joined_writes
+        else ""
+    )
+    for label, count in event_counts.items():
+        row[label] = count
+        row[f"{label}_per_second_workload"] = optional_rate(count, workload_seconds)
+        row[f"{label}_per_second_complete_interval"] = optional_rate(count, complete_seconds)
+
+    redis_entry_count = row.get("redis_entry_count", "")
+    client_entry_count = row.get("client_entry_count", "")
+    row["redis_cdc_logical_bytes_per_entry"] = (
+        numeric(row["redis_logical_cdc_stream_bytes"], "CDC logical bytes")
+        / numeric(redis_entry_count, "CDC Redis entries", minimum=1.0)
+        if row.get("redis_logical_cdc_stream_bytes") not in (None, "")
+        and finite_numbers((redis_entry_count,))
+        and float(redis_entry_count) > 0
+        else ""
+    )
+    row["redis_cdc_logical_bytes_per_row_event"] = (
+        numeric(row["redis_logical_cdc_stream_bytes"], "CDC logical bytes")
+        / numeric(row.get("redis_cdc_row_count"), "CDC row events", minimum=1.0)
+        if row.get("redis_logical_cdc_stream_bytes") not in (None, "")
+        and finite_numbers((row.get("redis_cdc_row_count"),))
+        and float(row["redis_cdc_row_count"]) > 0
+        else ""
+    )
+    client_logical_bytes = row.get("redis_logical_client_stream_bytes")
+    if client_logical_bytes in (None, ""):
+        client_logical_bytes = row.get("redis_logical_measurement_stream_bytes")
+    row["redis_client_logical_bytes_per_entry"] = (
+        numeric(client_logical_bytes, "client logical bytes")
+        / numeric(client_entry_count, "client Redis entries", minimum=1.0)
+        if client_logical_bytes not in (None, "")
+        and finite_numbers((client_entry_count,))
+        and float(client_entry_count) > 0
+        else ""
+    )
+    cdc_memory = row.get("redis_memory_keys_cdc", "")
+    client_memory = row.get("redis_memory_keys_client", "")
+    if client_memory in (None, ""):
+        client_memory = row.get("redis_memory_keys_measurement_client", "")
+    row["redis_cdc_allocated_bytes_per_entry"] = (
+        numeric(cdc_memory, "CDC Redis allocation")
+        / numeric(redis_entry_count, "CDC Redis entries", minimum=1.0)
+        if finite_numbers((cdc_memory,))
+        and finite_numbers((redis_entry_count,))
+        and float(redis_entry_count) > 0
+        else ""
+    )
+    row["redis_client_allocated_bytes_per_entry"] = (
+        numeric(client_memory, "client Redis allocation")
+        / numeric(client_entry_count, "client Redis entries", minimum=1.0)
+        if finite_numbers((client_memory,))
+        and finite_numbers((client_entry_count,))
+        and float(client_entry_count) > 0
+        else ""
+    )
+    evidence_entries = sum(
+        values[0]
+        for value in (redis_entry_count, client_entry_count)
+        if (values := finite_numbers((value,)))
+    )
+    for direction in ("input", "output"):
+        network_bytes = row.get(f"redis_network_{direction}_bytes_delta", "")
+        row[f"redis_network_{direction}_bytes_per_evidence_entry"] = (
+            numeric(network_bytes, f"Redis network {direction} bytes") / evidence_entries
+            if finite_numbers((network_bytes,)) and evidence_entries > 0
+            else ""
+        )
+
+
 def trial_row(trial_dir: Path) -> dict[str, Any]:
     metadata = load_json(trial_dir / "metadata.json", required=True)
     require(isinstance(metadata, dict), f"metadata is not an object: {trial_dir}")
     stage = metadata.get("stage")
     require(stage in STAGES, f"unknown performance stage in {trial_dir}: {stage!r}")
+    benchmark = metadata.get("benchmark", "ycsb")
+    require(benchmark in {"ycsb", "tpcc"}, f"unknown benchmark in {trial_dir}: {benchmark!r}")
+    canonical_utc_second(metadata.get("loader_timestamp_utc"), "loader timestamp")
 
     row: dict[str, Any] = {field: "" for field in IDENTITY_FIELDS}
     for key, value in metadata.items():
@@ -602,8 +1209,32 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
     require(isinstance(benchbase, dict), "BenchBase metrics are not an object")
     row.update(benchbase_aliases(benchbase))
     flatten("benchbase", benchbase, row)
+    outcome = load_json(trial_dir / "outcome_metrics.json")
+    if benchmark == "tpcc":
+        require(isinstance(outcome, dict), "TPC-C measurement-window outcomes are missing")
+        validate_outcome_metrics(outcome, benchbase, benchmark)
+        outcome_types = outcome.get("transaction_types")
+        require(
+            isinstance(outcome_types, Mapping)
+            and set(outcome_types)
+            == {"NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel"},
+            "TPC-C outcome transaction roster differs",
+        )
+        require(outcome.get("new_order_rate_label") == "NewOrder/min", "NewOrder rate label differs")
+    elif outcome is not None:
+        require(isinstance(outcome, dict), "outcome metrics are not an object")
+        validate_outcome_metrics(outcome, benchbase, benchmark)
+    if isinstance(outcome, Mapping):
+        clean_totals = outcome.get("totals")
+        require(isinstance(clean_totals, Mapping), "outcome totals are missing")
+        for counter in ("unknown_status_transactions", "ambiguous_attempts"):
+            require(
+                integer(clean_totals.get(counter), f"outcome total {counter}") == 0,
+                f"clean performance trial has nonzero {counter}",
+            )
 
     for filename, prefix in (
+        ("outcome_metrics.json", "outcomes"),
         ("redis_metrics.json", "redis"),
         ("client_metrics.json", "client"),
         ("capture_metrics.json", "capture"),
@@ -621,12 +1252,13 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
     bootstrap = load_json(trial_dir / "bootstrap_manifest.json", required=True)
     require(isinstance(bootstrap, dict), "bootstrap manifest is not an object")
     counts = bootstrap.get("table_row_counts")
-    require(isinstance(counts, list) and len(counts) == 1, "bootstrap table counts are incomplete")
-    require(isinstance(counts[0], dict), "bootstrap table count is not an object")
-    row_count = counts[0].get("row_count")
-    require(isinstance(row_count, int) and row_count >= 0, "bootstrap row count is invalid")
-    expected_rows = int(metadata.get("scale_factor", 0)) * 1000
-    require(row_count == expected_rows, f"bootstrap row count {row_count} != expected {expected_rows}")
+    require(isinstance(counts, list) and counts, "bootstrap table counts are incomplete")
+    require(all(isinstance(item, dict) for item in counts), "bootstrap table count is not an object")
+    row_count = sum(int(item.get("row_count", -1)) for item in counts)
+    require(row_count >= 0, "bootstrap row count is invalid")
+    if benchmark == "ycsb":
+        expected_rows = int(metadata.get("scale_factor", 0)) * 1000
+        require(row_count == expected_rows, f"bootstrap row count {row_count} != expected {expected_rows}")
     digest = bootstrap.get("canonical_state_digest")
     require(
         isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
@@ -642,16 +1274,21 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         loader_validation.get("loader_batch_size") == metadata.get("loader_batch_size"),
         "loader batch size differs between metadata and validation",
     )
-    expected_counts = [{"table": "benchbase.usertable", "row_count": expected_rows}]
-    declaration_required = stage not in {"benchbase_uninstrumented", "cdc_capture"}
+    expected_counts = loader_validation.get("expected_table_row_counts")
+    require(isinstance(expected_counts, list) and expected_counts, "loader expected counts are absent")
+    declaration_required = (
+        benchmark == "tpcc"
+        or stage not in {"benchbase_uninstrumented", "cdc_capture"}
+    )
     require(
         loader_validation.get("declaration_available") is declaration_required,
         "loader declaration availability differs from stage contract",
     )
     require(
-        loader_validation.get("expected_table_row_counts") == expected_counts
-        and loader_validation.get("observed_table_row_counts") == expected_counts,
-        "loader expected/observed counts differ from YCSB configuration",
+        loader_validation.get("observed_table_row_counts") == expected_counts
+        and sorted(counts, key=lambda item: item["table"])
+        == sorted(expected_counts, key=lambda item: item["table"]),
+        "loader/bootstrap expected/observed counts differ",
     )
     require(
         loader_validation.get("declared_table_row_counts")
@@ -683,6 +1320,16 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         flatten("monitor", monitor, monitor_flat)
         row.update(monitor_flat)
         row.update(monitor_aliases(monitor_flat))
+
+    analysis_window = load_json(trial_dir / "analysis_window.json")
+    add_interval_and_event_metrics(
+        row,
+        metadata,
+        benchbase,
+        outcome if isinstance(outcome, dict) else None,
+        analysis_window if isinstance(analysis_window, dict) else None,
+        monitor if isinstance(monitor, dict) else None,
+    )
 
     redis_stages = {
         "read_capture_encoding_redis",
@@ -725,6 +1372,46 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
             monitor_flat.get("monitor_limits_joiner_max_bootstrap_state_bytes")
             == metadata.get("monitor_max_bootstrap_state_bytes"),
             "monitor bootstrap-state byte limit differs from trial metadata",
+        )
+
+    if "high_water_threshold_percent" in metadata:
+        threshold = numeric(
+            metadata.get("high_water_threshold_percent"),
+            "high-water threshold percent",
+        )
+        require(0 < threshold <= 100, "high-water threshold percent is outside (0,100]")
+        utilization_values: list[float] = []
+        if stage in redis_stages:
+            redis_info = parse_redis_info(trial_dir / "redis_info_after.txt")
+            require(
+                redis_info["maxmemory"] == int(metadata["redis_maxmemory_bytes"]),
+                "Redis INFO maxmemory differs from trial metadata",
+            )
+            redis_peak_percent = (
+                redis_info["used_memory_peak"] * 100.0 / redis_info["maxmemory"]
+            )
+            row.update(
+                {
+                    "redis_used_memory_bytes": redis_info["used_memory"],
+                    "redis_used_memory_peak_bytes": redis_info["used_memory_peak"],
+                    "redis_used_memory_peak_percent": redis_peak_percent,
+                }
+            )
+            utilization_values.append(redis_peak_percent)
+        if stage in {"assembly_join", "assembly_join_check"}:
+            capacity = monitor_capacity_acceptance(metadata, monitor_flat)
+            row.update(capacity)
+            row.update(monitor_terminal_queue_acceptance(monitor_flat))
+            utilization_values.append(float(capacity["resource_high_water_max_percent"]))
+        row["declared_resource_high_water_max_percent"] = (
+            max(utilization_values) if utilization_values else 0.0
+        )
+        row["declared_resource_high_water_accepted"] = (
+            row["declared_resource_high_water_max_percent"] < threshold
+        )
+        require(
+            row["declared_resource_high_water_accepted"],
+            "declared resource high-water threshold was reached or exceeded",
         )
 
     status = parse_status_xrange(load_json(trial_dir / "status_stream.json"))
@@ -859,23 +1546,50 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
     require(len(run_ids) == len(set(run_ids)), "run IDs are not unique")
 
     invariant_fields = (
+        "benchmark",
         "terminals",
         "scale_factor",
+        "warehouses",
         "field_size",
         "loader_threads",
         "loader_batch_size",
+        "loader_timestamp_utc",
         "warmup_seconds",
         "requested_duration_seconds",
         "random_seed",
         "configured_repetitions",
         "redis_maxmemory_bytes",
+        "bootstrap_scan_max_rows",
+        "bootstrap_scan_max_input_bytes",
+        "bootstrap_scan_max_canonical_bytes",
+        "monitor_max_assembler_active_transactions",
+        "monitor_max_assembler_events_per_transaction",
+        "monitor_max_assembler_active_bytes",
+        "monitor_max_assembler_completed_transactions",
+        "monitor_max_assembler_retained_identity_bytes",
+        "monitor_max_pending_client_records",
         "monitor_max_pending_client_bytes",
+        "monitor_max_pending_cdc_slots",
+        "monitor_max_pending_cdc_bytes",
+        "monitor_max_retained_identity_records",
         "monitor_max_retained_identity_bytes",
+        "monitor_max_events_per_transaction",
         "monitor_max_bootstrap_state_rows",
         "monitor_max_bootstrap_state_bytes",
+        "monitor_max_checker_state_bytes",
         "output_max_bytes",
         "isolation",
         "rate",
+        "transaction_mix",
+        "drain_timeout_seconds",
+        "high_water_threshold_percent",
+        "resource_interval_seconds",
+        "cooldown_seconds",
+        "compose_timeout_seconds",
+        "loader_timeout_seconds",
+        "trial_timeout_seconds",
+        "status_timeout_seconds",
+        "baseline_profile",
         "java_flags",
         "si_monitoring_head",
         "benchbase_current_head",
@@ -960,6 +1674,112 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
         writer.writeheader()
         writer.writerows(rows)
     return rows
+
+
+def write_transaction_results(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        trial_dir = Path(str(row["artifact_dir"]))
+        benchbase = load_json(trial_dir / "benchbase_metrics.json", required=True)
+        require(isinstance(benchbase, Mapping), "BenchBase metrics are not an object")
+        outcome = load_json(trial_dir / "outcome_metrics.json")
+        elapsed_ns = int(numeric(benchbase.get("elapsed_time_nanoseconds"), "BenchBase elapsed", minimum=1.0))
+        elapsed_seconds = elapsed_ns / 1_000_000_000.0
+        raw_types = benchbase.get("transaction_types")
+        require(isinstance(raw_types, Mapping), "BenchBase transaction types are missing")
+        if isinstance(outcome, Mapping):
+            outcome_types = outcome.get("transaction_types")
+            require(isinstance(outcome_types, Mapping), "outcome transaction types are missing")
+            transaction_names = sorted(outcome_types)
+            outcome_totals = outcome.get("totals")
+            require(isinstance(outcome_totals, Mapping), "outcome totals are missing")
+        else:
+            outcome_types = {}
+            transaction_names = sorted(raw_types)
+            outcome_totals = {}
+        for transaction_name in (None, *transaction_names):
+            overall = transaction_name is None
+            raw_type = (
+                {"latency_microseconds": benchbase.get("latency_microseconds", {})}
+                if overall
+                else raw_types.get(transaction_name, {})
+            )
+            require(isinstance(raw_type, Mapping), "BenchBase transaction type is not an object")
+            latency = raw_type.get("latency_microseconds", {})
+            require(isinstance(latency, Mapping), "transaction latency is not an object")
+            counters = outcome_totals if overall else outcome_types.get(transaction_name, {})
+            require(isinstance(counters, Mapping), "transaction outcomes are not an object")
+            logical = counters.get(
+                "logical_transactions_started",
+                benchbase.get("measured_count", 0)
+                if overall
+                else raw_type.get("logical_invocation_count", 0),
+            )
+            successful = counters.get("successful_transactions", logical)
+            item: dict[str, Any] = {
+                "benchmark": row.get("benchmark", "ycsb"),
+                "stage": row["stage"],
+                "repetition": row["repetition"],
+                "trial_id": row["trial_id"],
+                "row_scope": "overall" if overall else "transaction_type",
+                "transaction_type": "" if overall else transaction_name,
+                "elapsed_time_nanoseconds": elapsed_ns,
+                "logical_transactions_started": logical,
+                "successful_transactions": successful,
+                "logical_transactions_per_second": numeric(logical, "logical transactions") / elapsed_seconds,
+                "successful_transactions_per_second": numeric(successful, "successful transactions") / elapsed_seconds,
+                "latency_mean_microseconds": latency.get("mean", ""),
+                "latency_p50_microseconds": latency.get("p50", ""),
+                "latency_p95_microseconds": latency.get("p95", ""),
+                "latency_p99_microseconds": latency.get("p99", ""),
+                "latency_max_microseconds": latency.get("max", ""),
+                "new_order_per_minute": (
+                    outcome.get("new_order_per_minute", "")
+                    if overall and isinstance(outcome, Mapping)
+                    else (
+                        numeric(successful, "NewOrder successes") * 60.0 / elapsed_seconds
+                        if transaction_name == "NewOrder"
+                        else ""
+                    )
+                ),
+            }
+            for counter in (
+                "terminal_aborted_transactions",
+                "physical_attempts_started",
+                "definitively_aborted_attempts",
+                "retry_attempts",
+                "retryable_failure_events",
+                "error_transactions",
+                "unknown_status_transactions",
+                "ambiguous_attempts",
+                "retry_different_events",
+            ):
+                item[counter] = counters.get(counter, "")
+            if counters:
+                item["failed_transactions"] = numeric(
+                    counters.get("error_transactions"), "error transactions"
+                ) + numeric(counters.get("unknown_status_transactions"), "unknown statuses")
+            else:
+                item["failed_transactions"] = ""
+            for counter in (
+                "attempts",
+                "retry_attempts",
+                "terminal_aborted_transactions",
+                "error_transactions",
+                "unknown_status_transactions",
+            ):
+                source_name = "physical_attempts_started" if counter == "attempts" else counter
+                value = counters.get(source_name)
+                item[f"{counter}_per_second"] = optional_rate(value, elapsed_seconds)
+            item["failed_transactions_per_second"] = optional_rate(
+                item["failed_transactions"], elapsed_seconds
+            )
+            result.append(item)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=TRANSACTION_RESULT_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(result)
 
 
 def median_for(rows: Sequence[Mapping[str, Any]], stage: str, metric: str) -> float | None:
@@ -1049,6 +1869,12 @@ def headline_rows(raw_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
     baseline_throughput = (
         baseline["throughput_requests_per_second"] if baseline is not None else None
     )
+    benchmarks = {
+        str(row.get("benchmark"))
+        for row in raw_rows
+        if row.get("benchmark") not in (None, "")
+    }
+    tpcc = benchmarks == {"tpcc"}
 
     result: list[dict[str, Any]] = []
     for stage in BENCHBASE_HEADLINE_STAGES:
@@ -1062,7 +1888,11 @@ def headline_rows(raw_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
         result.append(
             {
                 "stage": stage,
-                "Stage": HEADLINE_STAGE_LABELS[stage],
+                "Stage": (
+                    "Evidence-disabled compatibility baseline"
+                    if tpcc and stage == "benchbase_uninstrumented"
+                    else HEADLINE_STAGE_LABELS[stage]
+                ),
                 "Throughput": stage_medians["throughput_requests_per_second"],
                 "Mean latency": stage_medians["latency_mean_microseconds"],
                 "p95": stage_medians["latency_p95_microseconds"],
@@ -1294,6 +2124,8 @@ def command_aggregate(args: argparse.Namespace) -> None:
     rows = write_raw_trials(root, raw_path)
     write_overhead(rows, Path(args.overhead_output))
     write_artifact_index(root, Path(args.artifact_index_output))
+    if args.transaction_output:
+        write_transaction_results(rows, Path(args.transaction_output))
 
 
 def command_headline(args: argparse.Namespace) -> None:
@@ -1337,6 +2169,10 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--raw-output", required=True)
     aggregate.add_argument("--overhead-output", required=True)
     aggregate.add_argument("--artifact-index-output", required=True)
+    aggregate.add_argument(
+        "--transaction-output",
+        help="write one overall/per-type transaction row per stage repetition",
+    )
     aggregate.set_defaults(handler=command_aggregate)
 
     headline = subparsers.add_parser(

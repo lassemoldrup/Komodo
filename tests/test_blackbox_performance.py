@@ -78,6 +78,9 @@ class BenchBaseAnalysisTest(unittest.TestCase):
         self.assertEqual(result["measured_start_epoch_ms"], 1_700_000_000_001)
         self.assertEqual(result["measured_end_epoch_ms"], 1_700_000_000_005)
         self.assertEqual(result["transaction_counts"], {"read": 2, "update": 2})
+        self.assertEqual(result["phase_ids"], [0])
+        self.assertEqual(result["transaction_types"]["read"]["logical_invocation_count"], 2)
+        self.assertEqual(result["transaction_types"]["update"]["latency_microseconds"]["p95"], 40)
 
     def test_empty_measurement_uses_summary_window_and_na_latency(self) -> None:
         summary = dict(self.summary)
@@ -132,6 +135,167 @@ class BenchBaseAnalysisTest(unittest.TestCase):
             self.assertIn(
                 {"metric": "latency_microseconds.p95", "value": "40"}, metric_rows
             )
+
+
+class TransactionOutcomeAnalysisTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.benchbase = {
+            "measured_count": 4,
+            "elapsed_time_nanoseconds": 2_000_000_000,
+            "phase_ids": [1],
+            "transaction_counts": {"NewOrder": 3, "Payment": 1},
+            "transaction_types": {
+                "NewOrder": {
+                    "logical_invocation_count": 3,
+                    "latency_microseconds": {
+                        "mean": 20.0,
+                        "p50": 20,
+                        "p95": 30,
+                        "p99": 30,
+                        "max": 30,
+                    },
+                },
+                "Payment": {
+                    "logical_invocation_count": 1,
+                    "latency_microseconds": {
+                        "mean": 40.0,
+                        "p50": 40,
+                        "p95": 40,
+                        "p99": 40,
+                        "max": 40,
+                    },
+                },
+            },
+        }
+        zero = {name: 0 for name in performance.OUTCOME_COUNTERS}
+        self.document = {
+            "kind": "transaction_outcomes",
+            "benchmark": "tpcc",
+            "scope": "measurement_window",
+            "window_semantics": "fully_contained_logical_invocations",
+            "elapsed_nanoseconds": 2_000_000_000,
+            "measured_requests": 4,
+            "phase_ids": [1],
+            "transaction_types": {
+                "NewOrder": {
+                    **zero,
+                    "logical_transactions_started": 3,
+                    "successful_transactions": 2,
+                    "terminal_aborted_transactions": 1,
+                    "physical_attempts_started": 4,
+                    "definitively_aborted_attempts": 2,
+                    "retry_attempts": 1,
+                    "retryable_failure_events": 1,
+                },
+                "Payment": {
+                    **zero,
+                    "logical_transactions_started": 1,
+                    "successful_transactions": 1,
+                    "physical_attempts_started": 1,
+                },
+                "OrderStatus": dict(zero),
+                "Delivery": dict(zero),
+                "StockLevel": dict(zero),
+            },
+        }
+        self.document["totals"] = {
+            name: sum(
+                counters[name]
+                for counters in self.document["transaction_types"].values()
+            )
+            for name in performance.OUTCOME_COUNTERS
+        }
+
+    def test_exact_window_algebra_rates_and_zero_type_roster(self) -> None:
+        result = performance.analyze_transaction_outcomes(self.document, self.benchbase)
+        self.assertEqual(result["totals"]["successful_transactions"], 3)
+        self.assertEqual(result["totals"]["terminal_aborted_transactions_per_second"], 0.5)
+        self.assertEqual(result["totals"]["failed_transactions_per_second"], 0.0)
+        self.assertEqual(result["transaction_types"]["NewOrder"]["physical_attempts_per_second"], 2.0)
+        self.assertEqual(result["transaction_types"]["OrderStatus"]["latency_microseconds"]["p95"], "N/A")
+        self.assertEqual(result["new_order_per_minute"], 60.0)
+        self.assertEqual(result["new_order_rate_label"], "NewOrder/min")
+
+    def test_wrong_window_or_counter_algebra_fails_closed(self) -> None:
+        document = json.loads(json.dumps(self.document))
+        document["window_semantics"] = "whole_process"
+        with self.assertRaisesRegex(performance.PerformanceDataError, "window semantics"):
+            performance.analyze_transaction_outcomes(document, self.benchbase)
+
+        document = json.loads(json.dumps(self.document))
+        document["transaction_types"]["NewOrder"]["error_transactions"] = 1
+        document["totals"]["error_transactions"] = 1
+        with self.assertRaisesRegex(performance.PerformanceDataError, "logical outcome algebra"):
+            performance.analyze_transaction_outcomes(document, self.benchbase)
+
+    def test_retry_and_raw_count_mutations_fail_closed(self) -> None:
+        document = json.loads(json.dumps(self.document))
+        document["transaction_types"]["NewOrder"]["retry_different_events"] = 2
+        document["totals"]["retry_different_events"] = 2
+        with self.assertRaisesRegex(performance.PerformanceDataError, "retry failure event algebra"):
+            performance.analyze_transaction_outcomes(document, self.benchbase)
+
+        document = json.loads(json.dumps(self.document))
+        document["measured_requests"] = 5
+        with self.assertRaisesRegex(performance.PerformanceDataError, "measured request"):
+            performance.analyze_transaction_outcomes(document, self.benchbase)
+
+    def test_exhausted_retry_failure_count_includes_terminal_event(self) -> None:
+        document = json.loads(json.dumps(self.document))
+        new_order = document["transaction_types"]["NewOrder"]
+        new_order["logical_transactions_started"] = 1
+        new_order["successful_transactions"] = 0
+        new_order["terminal_aborted_transactions"] = 1
+        new_order["physical_attempts_started"] = 3
+        new_order["definitively_aborted_attempts"] = 3
+        new_order["retry_attempts"] = 2
+        new_order["retryable_failure_events"] = 0
+        new_order["retry_different_events"] = 3
+        self.benchbase["measured_count"] = 2
+        self.benchbase["transaction_counts"] = {"NewOrder": 1, "Payment": 1}
+        self.benchbase["transaction_types"]["NewOrder"]["logical_invocation_count"] = 1
+        document["measured_requests"] = 2
+        document["totals"] = {
+            name: sum(
+                counters[name]
+                for counters in document["transaction_types"].values()
+            )
+            for name in performance.OUTCOME_COUNTERS
+        }
+
+        result = performance.analyze_transaction_outcomes(document, self.benchbase)
+
+        self.assertEqual(result["transaction_types"]["NewOrder"]["retry_attempts"], 2)
+        self.assertEqual(result["transaction_types"]["NewOrder"]["retry_different_events"], 3)
+
+    def test_outcome_cli_writes_machine_readable_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            outcomes = root / "run.outcomes.json"
+            benchbase = root / "benchbase_metrics.json"
+            output = root / "outcome_metrics.json"
+            outcomes.write_text(json.dumps(self.document), encoding="utf-8")
+            benchbase.write_text(json.dumps(self.benchbase), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(TOOL),
+                    "analyze-outcomes",
+                    "--outcomes-json",
+                    str(outcomes),
+                    "--benchbase-metrics-json",
+                    str(benchbase),
+                    "--output-json",
+                    str(output),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            document = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(document["new_order_rate_label"], "NewOrder/min")
+            self.assertEqual(document["transaction_types"]["Delivery"]["logical_transactions_started"], 0)
 
 
 class RedisAnalysisTest(unittest.TestCase):

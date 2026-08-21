@@ -362,10 +362,41 @@ docker exec db-monitoring-dev bash -lc '
 '
 ```
 
-By default, the smoke target executes every real stage once with two terminals,
-scale one, one second of warmup, and two requested measurement seconds. The
-measured target uses three rotated repetitions, four terminals, scale ten, five
-seconds of warmup, and twenty requested measurement seconds:
+TPC-C uses the current BenchBase checkout for every stage and does not require
+the historical YCSB worktree. Its first stage is the evidence-disabled RR
+compatibility profile, so the schema and full-row SQL variants are identical
+to the five instrumented profiles. The initial target is one warehouse, four
+terminals, 120 seconds, three repetitions, and mix `45,43,4,4,4`:
+
+```bash
+./scripts/run_blackbox_performance.sh \
+  --benchmark tpcc \
+  --warehouses 1 \
+  --terminals 4 \
+  --duration-seconds 120 \
+  --repetitions 3 \
+  --mix 45,43,4,4,4 \
+  --loader-timestamp-utc 2000-01-01T00:00:00Z \
+  --rate unlimited \
+  --drain-timeout-seconds 30 \
+  --status-timeout-seconds 900 \
+  --high-water-threshold-percent 70 \
+  --monitor-bootstrap-state-bytes 1073741824 \
+  --output-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/tpcc-w1-t4
+```
+
+Backlog and head-of-line measurements remain in the reports as diagnostic
+telemetry. Acceptance requires terminal queues and unmatched evidence to be
+zero, the end-to-verdict tail to stay within `--drain-timeout-seconds`, and
+resource high-water marks to remain below
+`--high-water-threshold-percent`; it does not impose a backlog-trend rule.
+
+By default, the smoke target executes every real stage once with scale one and
+two requested measurement seconds. YCSB smoke uses two terminals and one second
+of warmup; TPC-C smoke uses four terminals and no warmup so the standard mix is
+exercised without adding another workload interval after its larger bootstrap.
+The default measured YCSB target uses three rotated repetitions, four terminals,
+scale ten, five seconds of warmup, and twenty requested measurement seconds:
 
 ```bash
 docker exec db-monitoring-dev bash -lc '
@@ -406,6 +437,17 @@ written to configuration, trial metadata, and `loader_validation.json`; loader
 acceptance never assumes 128. Every current-loader trial independently compares
 the exact loader-declared table counts with SQL counts before creating the
 codec-dependent bootstrap manifest.
+
+The generated configurations also record a fixed loader timestamp. It defaults
+to `2000-01-01T00:00:00Z` and can be selected with
+`--loader-timestamp-utc YYYY-MM-DDTHH:MM:SSZ` or the
+`BLACKBOX_PERFORMANCE_LOADER_TIMESTAMP_UTC` environment variable. The runner
+rejects offsets, fractional seconds, whitespace, and invalid calendar values.
+For TPC-C this fixes `c_since`, `h_date`, `o_entry_d`, and non-null
+`ol_delivery_d` loader values across stages and repetitions; workload-generated
+timestamps remain real-time. The exact value is preserved in both generated
+profiles, system provenance, and every trial's metadata, and the report rejects
+cross-trial differences.
 
 Current BenchBase loaders atomically publish `loader_declaration` JSON only
 after successful completion. Audited/current stages require and preserve that
@@ -464,15 +506,13 @@ is the explicit exception used to test uncommitted harness changes. The runner
 also requires that its own process is inside `db-monitoring-dev`.
 
 The performance runner explicitly starts Redis with an 8 GiB no-eviction limit
-and gives the monitor 1 GiB for pending client evidence and 2 GiB for retained
-join identities. Ordinary Compose and monitor invocations keep their 2 GiB,
-256 MiB, and 512 MiB defaults, respectively. Override the measured capacities
-with `--redis-maxmemory-bytes`, `--monitor-pending-client-bytes`, and
-`--monitor-retained-identity-bytes`. Each Redis-using trial verifies Redis's
-effective `maxmemory` and policy before accepting the measurement. Trial
-metadata records all requested capacities, `redis_configuration.json` records
-the effective Redis settings, and full-stage monitor metrics record both
-effective joiner limits.
+and exposes every assembler, pending-client, pending-CDC, retained-identity,
+per-transaction, bootstrap, and checker-state capacity as a command-line
+option; `--help` lists their defaults. Each Redis-using trial verifies Redis's
+effective `maxmemory` and policy. Full stages verify every monitor-reported
+limit against trial metadata, require terminal backlogs to be zero, and require
+all observed high-water marks to remain strictly below the selected threshold
+(70 percent by default).
 
 Performance output is restricted to `/media/newhd/yifan/db-monitoring-builds`
 and defaults to a 107374182400-byte (100 GiB) run budget. The coordinator checks
@@ -481,7 +521,10 @@ large Redis captures through a bounded writer. `--output-max-bytes` can lower
 the budget but should not be raised for the canonical run.
 
 Throughput, request latency, the authoritative actual elapsed time, and the
-measured epoch window come from BenchBase's raw CSV and summary JSON. Redis
+measured epoch window come from BenchBase's raw CSV and summary JSON. For TPC-C,
+the atomic measurement-window outcome artifact supplies exact overall and
+per-type successes, attempts, retries, terminal aborts, and errors; successful
+NewOrder/min is derived from that same interval. Redis
 logical bytes count UTF-8 stream field and value bytes; per-stream allocation is
 `MEMORY USAGE`, and network bytes are workload-window `INFO stats` counter
 deltas from workload-process start through pipeline drain. CDC delivery lag is Redis stream time minus Debezium envelope time;
@@ -499,11 +542,14 @@ Each output root contains generated input configurations, build logs and exact
 commands, host/JVM/container/image provenance, `stage_order.csv`, and one
 checksummed directory per raw trial. The aggregate deliverables are
 `headline_results.md`, its machine-readable `headline_results.csv`,
-`raw_trials.csv`, `summary_statistics.csv` (median, min, max, and MAD without
+`raw_trials.csv`, `transaction_results.csv`, `summary_statistics.csv` (median,
+min, max, and MAD without
 outlier removal), `overhead.csv`, `artifact_index.csv`, and the root
-`SHA256SUMS`. The headline table reports BenchBase-stage medians: throughput in
+`SHA256SUMS`. `transaction_results.csv` contains one overall/per-type row per
+stage and repetition, including outcome rates, latency, and successful
+NewOrder/min where applicable. The compatibility headline table reports BenchBase-stage medians: throughput in
 requests per second, mean and p95 latency in microseconds, and throughput loss
-relative to the uninstrumented baseline in percent. Assembly/join and
+relative to the baseline profile in percent. Assembly/join and
 full-checking are excluded because their primary throughput belongs in a
 separate monitor table once that benchmark is generated. The CSV retains
 unrounded numeric values

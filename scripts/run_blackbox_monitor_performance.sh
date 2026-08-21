@@ -24,10 +24,22 @@ RANDOM_SEED=${BLACKBOX_MONITOR_PERFORMANCE_RANDOM_SEED:-20260818}
 COOLDOWN_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_COOLDOWN_SECONDS:-2}
 RESOURCE_INTERVAL_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_RESOURCE_INTERVAL_SECONDS:-1}
 REDIS_MAXMEMORY_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_REDIS_MAXMEMORY_BYTES:-8589934592}
+MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS:-1024}
+MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION:-100000}
+MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES:-268435456}
+MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS:-10000000}
+MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES:-268435456}
+MONITOR_MAX_PENDING_CLIENT_RECORDS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_RECORDS:-1000000}
 MONITOR_MAX_PENDING_CLIENT_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_BYTES:-3221225472}
+MONITOR_MAX_PENDING_CDC_SLOTS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_PENDING_CDC_SLOTS:-1000000}
+MONITOR_MAX_PENDING_CDC_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_PENDING_CDC_BYTES:-268435456}
+MONITOR_MAX_RETAINED_IDENTITY_RECORDS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_RETAINED_IDENTITY_RECORDS:-10000000}
 MONITOR_MAX_RETAINED_IDENTITY_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_RETAINED_IDENTITY_BYTES:-2147483648}
+MONITOR_MAX_EVENTS_PER_TRANSACTION=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_EVENTS_PER_TRANSACTION:-101000}
 MONITOR_MAX_BOOTSTRAP_STATE_ROWS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_ROWS:-10000000}
 MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_BYTES:-268435456}
+MONITOR_MAX_CHECKER_STATE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_CHECKER_STATE_BYTES:-536870912}
+MAXIMUM_CAPACITY_UTILIZATION_PERCENT=${BLACKBOX_MONITOR_PERFORMANCE_MAXIMUM_CAPACITY_UTILIZATION_PERCENT:-70}
 OUTPUT_MAX_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_OUTPUT_MAX_BYTES:-107374182400}
 COMPOSE_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_COMPOSE_TIMEOUT_SECONDS:-300}
 DOCKER_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_DOCKER_TIMEOUT_SECONDS:-30}
@@ -68,14 +80,29 @@ Options:
   --seed N                   Fixed stage-order seed (default: 20260818).
   --cooldown-seconds N       Delay after each trial (default: 2).
   --redis-maxmemory-bytes N  Fresh replay Redis capacity (default: 8589934592).
+  --monitor-assembler-active-transactions N
+  --monitor-assembler-events-per-transaction N
+  --monitor-assembler-active-bytes N
+  --monitor-assembler-completed-transactions N
+  --monitor-assembler-retained-identity-bytes N
+                             Assembler capacities (defaults: monitor defaults).
+  --monitor-pending-client-records N
   --monitor-pending-client-bytes N
                              Joiner pending-client capacity (default: 3221225472).
+  --monitor-pending-cdc-slots N
+  --monitor-pending-cdc-bytes N
+  --monitor-retained-identity-records N
   --monitor-retained-identity-bytes N
                              Joiner retained-identity capacity (default: 2147483648).
+  --monitor-events-per-transaction N
   --monitor-bootstrap-state-rows N
                              Joiner bootstrap row capacity (default: 10000000).
   --monitor-bootstrap-state-bytes N
                              Joiner bootstrap byte capacity (default: 268435456).
+  --monitor-checker-state-bytes N
+                             Checker state capacity (default: 536870912).
+  --maximum-capacity-utilization-percent N
+                             Require every high-water mark below N percent (default: 70).
   --output-max-bytes N       Artifact limit, at most 100 GiB (default: 100 GiB).
   --replay-timeout-seconds N Per-stream replay limit (default: 1800).
   --docker-timeout-seconds N Bounded Docker daemon operation limit (default: 30).
@@ -202,12 +229,52 @@ parse_arguments() {
         REDIS_MAXMEMORY_BYTES=${2:?missing --redis-maxmemory-bytes value}
         shift 2
         ;;
+      --monitor-assembler-active-transactions)
+        MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS=${2:?missing --monitor-assembler-active-transactions value}
+        shift 2
+        ;;
+      --monitor-assembler-events-per-transaction)
+        MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION=${2:?missing --monitor-assembler-events-per-transaction value}
+        shift 2
+        ;;
+      --monitor-assembler-active-bytes)
+        MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES=${2:?missing --monitor-assembler-active-bytes value}
+        shift 2
+        ;;
+      --monitor-assembler-completed-transactions)
+        MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=${2:?missing --monitor-assembler-completed-transactions value}
+        shift 2
+        ;;
+      --monitor-assembler-retained-identity-bytes)
+        MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-assembler-retained-identity-bytes value}
+        shift 2
+        ;;
+      --monitor-pending-client-records)
+        MONITOR_MAX_PENDING_CLIENT_RECORDS=${2:?missing --monitor-pending-client-records value}
+        shift 2
+        ;;
       --monitor-pending-client-bytes)
         MONITOR_MAX_PENDING_CLIENT_BYTES=${2:?missing --monitor-pending-client-bytes value}
         shift 2
         ;;
+      --monitor-pending-cdc-slots)
+        MONITOR_MAX_PENDING_CDC_SLOTS=${2:?missing --monitor-pending-cdc-slots value}
+        shift 2
+        ;;
+      --monitor-pending-cdc-bytes)
+        MONITOR_MAX_PENDING_CDC_BYTES=${2:?missing --monitor-pending-cdc-bytes value}
+        shift 2
+        ;;
+      --monitor-retained-identity-records)
+        MONITOR_MAX_RETAINED_IDENTITY_RECORDS=${2:?missing --monitor-retained-identity-records value}
+        shift 2
+        ;;
       --monitor-retained-identity-bytes)
         MONITOR_MAX_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-retained-identity-bytes value}
+        shift 2
+        ;;
+      --monitor-events-per-transaction)
+        MONITOR_MAX_EVENTS_PER_TRANSACTION=${2:?missing --monitor-events-per-transaction value}
         shift 2
         ;;
       --monitor-bootstrap-state-rows)
@@ -216,6 +283,14 @@ parse_arguments() {
         ;;
       --monitor-bootstrap-state-bytes)
         MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${2:?missing --monitor-bootstrap-state-bytes value}
+        shift 2
+        ;;
+      --monitor-checker-state-bytes)
+        MONITOR_MAX_CHECKER_STATE_BYTES=${2:?missing --monitor-checker-state-bytes value}
+        shift 2
+        ;;
+      --maximum-capacity-utilization-percent)
+        MAXIMUM_CAPACITY_UTILIZATION_PERCENT=${2:?missing --maximum-capacity-utilization-percent value}
         shift 2
         ;;
       --output-max-bytes)
@@ -254,10 +329,24 @@ parse_arguments() {
   require_unsigned_integer seed "$RANDOM_SEED"
   require_unsigned_integer cooldown-seconds "$COOLDOWN_SECONDS"
   require_capacity_bytes redis-maxmemory-bytes "$REDIS_MAXMEMORY_BYTES"
+  require_capacity_count monitor-assembler-active-transactions "$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS"
+  require_capacity_count monitor-assembler-events-per-transaction "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION"
+  require_capacity_bytes monitor-assembler-active-bytes "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES"
+  require_capacity_count monitor-assembler-completed-transactions "$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS"
+  require_capacity_bytes monitor-assembler-retained-identity-bytes "$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES"
+  require_capacity_count monitor-pending-client-records "$MONITOR_MAX_PENDING_CLIENT_RECORDS"
   require_capacity_bytes monitor-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES"
+  require_capacity_count monitor-pending-cdc-slots "$MONITOR_MAX_PENDING_CDC_SLOTS"
+  require_capacity_bytes monitor-pending-cdc-bytes "$MONITOR_MAX_PENDING_CDC_BYTES"
+  require_capacity_count monitor-retained-identity-records "$MONITOR_MAX_RETAINED_IDENTITY_RECORDS"
   require_capacity_bytes monitor-retained-identity-bytes "$MONITOR_MAX_RETAINED_IDENTITY_BYTES"
+  require_capacity_count monitor-events-per-transaction "$MONITOR_MAX_EVENTS_PER_TRANSACTION"
   require_capacity_count monitor-bootstrap-state-rows "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS"
   require_capacity_bytes monitor-bootstrap-state-bytes "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES"
+  require_capacity_bytes monitor-checker-state-bytes "$MONITOR_MAX_CHECKER_STATE_BYTES"
+  require_positive_integer maximum-capacity-utilization-percent "$MAXIMUM_CAPACITY_UTILIZATION_PERCENT"
+  (( MAXIMUM_CAPACITY_UTILIZATION_PERCENT <= 100 )) ||
+    die "maximum-capacity-utilization-percent may not exceed 100"
   require_capacity_bytes output-max-bytes "$OUTPUT_MAX_BYTES"
   (( OUTPUT_MAX_BYTES <= 107374182400 )) ||
     die "output-max-bytes may not exceed 107374182400"
@@ -807,7 +896,20 @@ write_trial_metadata() {
   local repetition=$3
   local position=$4
   local roster_json
+  local capacity_json
   roster_json=$(printf '%s\n' "${STAGES[@]}" | jq -Rsc 'split("\n")[:-1]')
+  capacity_json=$(printf '%s' \
+    "{\"monitor_max_assembler_active_transactions\":$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS" \
+    ",\"monitor_max_assembler_events_per_transaction\":$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION" \
+    ",\"monitor_max_assembler_active_bytes\":$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES" \
+    ",\"monitor_max_assembler_completed_transactions\":$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS" \
+    ",\"monitor_max_assembler_retained_identity_bytes\":$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES" \
+    ",\"monitor_max_pending_client_records\":$MONITOR_MAX_PENDING_CLIENT_RECORDS" \
+    ",\"monitor_max_pending_cdc_slots\":$MONITOR_MAX_PENDING_CDC_SLOTS" \
+    ",\"monitor_max_pending_cdc_bytes\":$MONITOR_MAX_PENDING_CDC_BYTES" \
+    ",\"monitor_max_retained_identity_records\":$MONITOR_MAX_RETAINED_IDENTITY_RECORDS" \
+    ",\"monitor_max_events_per_transaction\":$MONITOR_MAX_EVENTS_PER_TRANSACTION" \
+    ",\"monitor_max_checker_state_bytes\":$MONITOR_MAX_CHECKER_STATE_BYTES}")
   python3 - "$trial_dir/metadata.json" "$stage" "$repetition" "$position" \
     "$REPETITIONS" "$RANDOM_SEED" "$RUN_ID" "$EXPECTED_DURATION_SECONDS" \
     "$roster_json" "$CORPUS_DIR" "$SOURCE_TRIAL_MANIFEST_SHA256" \
@@ -815,7 +917,8 @@ write_trial_metadata() {
     "$WORKLOAD_TRANSACTIONS" "$SI_MONITORING_HEAD" "$CO_CHECKER_HEAD" \
     "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
     "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
-    "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" <<'PY'
+    "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
+    "$capacity_json" "$MAXIMUM_CAPACITY_UTILIZATION_PERCENT" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -848,7 +951,9 @@ document = {
     "monitor_max_retained_identity_bytes": int(values[20]),
     "monitor_max_bootstrap_state_rows": int(values[21]),
     "monitor_max_bootstrap_state_bytes": int(values[22]),
+    "maximum_capacity_utilization_percent": int(values[24]),
 }
+document.update(json.loads(values[23]))
 Path(values[0]).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 }
@@ -874,6 +979,23 @@ run_monitor() {
   local overall_timeout_ms=$(( MONITOR_TIMEOUT_SECONDS * 1000 ))
   local outer_timeout=$(( MONITOR_TIMEOUT_SECONDS + 30 ))
   local measurement_timeout=$(( outer_timeout + 60 ))
+  local capacity_args=(
+    --max-assembler-active-transactions "$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS"
+    --max-assembler-events-per-transaction "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION"
+    --max-assembler-active-bytes "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES"
+    --max-assembler-completed-transactions "$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS"
+    --max-assembler-retained-identity-bytes "$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES"
+    --max-pending-client-records "$MONITOR_MAX_PENDING_CLIENT_RECORDS"
+    --max-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES"
+    --max-pending-cdc-slots "$MONITOR_MAX_PENDING_CDC_SLOTS"
+    --max-pending-cdc-bytes "$MONITOR_MAX_PENDING_CDC_BYTES"
+    --max-retained-identity-records "$MONITOR_MAX_RETAINED_IDENTITY_RECORDS"
+    --max-retained-identity-bytes "$MONITOR_MAX_RETAINED_IDENTITY_BYTES"
+    --max-events-per-transaction "$MONITOR_MAX_EVENTS_PER_TRANSACTION"
+    --max-bootstrap-state-rows "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS"
+    --max-bootstrap-state-bytes "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES"
+    --max-checker-state-bytes "$MONITOR_MAX_CHECKER_STATE_BYTES"
+  )
   record_command "$trial_dir/commands.txt" timeout --foreground --signal=TERM --kill-after=10 \
     "$measurement_timeout" "$MEASURED_COMMAND" \
     --resource-output "$trial_dir/resource_samples.csv" \
@@ -886,10 +1008,7 @@ run_monitor() {
     --run-id "$RUN_ID" --overall-timeout-ms "$overall_timeout_ms" \
     --processing-mode "$processing_mode" \
     --metrics-output "$trial_dir/monitor_metrics.json" \
-    --max-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
-    --max-retained-identity-bytes "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
-    --max-bootstrap-state-rows "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" \
-    --max-bootstrap-state-bytes "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES"
+    "${capacity_args[@]}"
   local status=0
   set +e
   timeout --foreground --signal=TERM --kill-after=10 "$measurement_timeout" \
@@ -904,10 +1023,7 @@ run_monitor() {
     --run-id "$RUN_ID" --overall-timeout-ms "$overall_timeout_ms" \
     --processing-mode "$processing_mode" \
     --metrics-output "$trial_dir/monitor_metrics.json" \
-    --max-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
-    --max-retained-identity-bytes "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
-    --max-bootstrap-state-rows "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" \
-    --max-bootstrap-state-bytes "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
+    "${capacity_args[@]}" \
     >"$trial_dir/monitor.stdout.log" 2>"$trial_dir/monitor.stderr.log"
   status=$?
   set -e
@@ -990,11 +1106,81 @@ integer(at(metrics, "process", "system_cpu_nanoseconds"), "system CPU")
 integer(at(metrics, "process", "max_rss_kib"), "max RSS", 1)
 if at(metrics, "process", "user_cpu_nanoseconds") + at(metrics, "process", "system_cpu_nanoseconds") <= 0:
     fail("monitor consumed no CPU")
-if at(metrics, "limits", "joiner", "max_pending_client_bytes") != metadata.get("monitor_max_pending_client_bytes") or \
-        at(metrics, "limits", "joiner", "max_retained_identity_bytes") != metadata.get("monitor_max_retained_identity_bytes") or \
-        at(metrics, "limits", "joiner", "max_bootstrap_state_rows") != metadata.get("monitor_max_bootstrap_state_rows") or \
-        at(metrics, "limits", "joiner", "max_bootstrap_state_bytes") != metadata.get("monitor_max_bootstrap_state_bytes"):
-    fail("monitor resource limits differ from metadata")
+limit_checks = (
+    (("assembler", "max_active_transactions"), "monitor_max_assembler_active_transactions"),
+    (("assembler", "max_events_per_transaction"), "monitor_max_assembler_events_per_transaction"),
+    (("assembler", "max_active_bytes"), "monitor_max_assembler_active_bytes"),
+    (("assembler", "max_completed_transactions"), "monitor_max_assembler_completed_transactions"),
+    (("assembler", "max_retained_identity_bytes"), "monitor_max_assembler_retained_identity_bytes"),
+    (("joiner", "max_pending_client_records"), "monitor_max_pending_client_records"),
+    (("joiner", "max_pending_client_bytes"), "monitor_max_pending_client_bytes"),
+    (("joiner", "max_pending_cdc_slots"), "monitor_max_pending_cdc_slots"),
+    (("joiner", "max_pending_cdc_bytes"), "monitor_max_pending_cdc_bytes"),
+    (("joiner", "max_retained_identity_records"), "monitor_max_retained_identity_records"),
+    (("joiner", "max_retained_identity_bytes"), "monitor_max_retained_identity_bytes"),
+    (("joiner", "max_events_per_transaction"), "monitor_max_events_per_transaction"),
+    (("joiner", "max_bootstrap_state_rows"), "monitor_max_bootstrap_state_rows"),
+    (("joiner", "max_bootstrap_state_bytes"), "monitor_max_bootstrap_state_bytes"),
+    (("joiner", "max_checker_state_bytes"), "monitor_max_checker_state_bytes"),
+)
+for metric_path, metadata_name in limit_checks:
+    if at(metrics, "limits", *metric_path) != metadata.get(metadata_name):
+        fail(f"monitor limit {'.'.join(metric_path)} differs from metadata")
+for metric_name, metadata_name in (
+    ("max_retained_state_bytes", "monitor_max_checker_state_bytes"),
+    ("max_events_per_transaction", "monitor_max_events_per_transaction"),
+    ("max_mapped_identity_records", "monitor_max_retained_identity_records"),
+    ("max_mapped_identity_bytes", "monitor_max_retained_identity_bytes"),
+):
+    if at(metrics, "limits", "checker", metric_name) != metadata.get(metadata_name):
+        fail(f"checker limit {metric_name} differs from metadata")
+threshold = integer(
+    metadata.get("maximum_capacity_utilization_percent"),
+    "maximum capacity utilization percent",
+    1,
+)
+if threshold > 100:
+    fail("maximum capacity utilization percent exceeds 100")
+capacity_checks = (
+    (("assembler", "active_transactions_high_water"), ("assembler", "max_active_transactions")),
+    (("assembler", "observed_events_per_transaction_high_water"), ("assembler", "max_events_per_transaction")),
+    (("assembler", "active_assembly_high_water_bytes"), ("assembler", "max_active_bytes")),
+    (("assembler", "completed_transactions"), ("assembler", "max_completed_transactions")),
+    (("assembler", "retained_identity_high_water_bytes"), ("assembler", "max_retained_identity_bytes")),
+    (("joiner", "pending_client_high_water_records"), ("joiner", "max_pending_client_records")),
+    (("joiner", "pending_client_high_water_bytes"), ("joiner", "max_pending_client_bytes")),
+    (("joiner", "pending_cdc_high_water_slots"), ("joiner", "max_pending_cdc_slots")),
+    (("joiner", "pending_cdc_high_water_bytes"), ("joiner", "max_pending_cdc_bytes")),
+    (("joiner", "retained_identity_high_water_records"), ("joiner", "max_retained_identity_records")),
+    (("joiner", "retained_identity_high_water_bytes"), ("joiner", "max_retained_identity_bytes")),
+    (("joiner", "released_events_per_transaction_high_water"), ("joiner", "max_events_per_transaction")),
+    (("joiner", "bootstrap_state_high_water_rows"), ("joiner", "max_bootstrap_state_rows")),
+    (("joiner", "bootstrap_state_high_water_bytes"), ("joiner", "max_bootstrap_state_bytes")),
+    (("checker", "mapped_identity_high_water_records"), ("checker", "max_mapped_identity_records")),
+    (("checker", "mapped_identity_high_water_bytes"), ("checker", "max_mapped_identity_bytes")),
+    (("checker", "events_per_transaction_high_water"), ("checker", "max_events_per_transaction")),
+    (("checker", "engine", "peak_retained_state_bytes"), ("checker", "max_retained_state_bytes")),
+)
+for observed_path, limit_path in capacity_checks:
+    observed = integer(at(metrics, *observed_path), ".".join(observed_path))
+    capacity = integer(at(metrics, "limits", *limit_path), ".".join(limit_path), 1)
+    if observed * 100 >= capacity * threshold:
+        fail(
+            f"{'.'.join(observed_path)} reached {observed}/{capacity}, "
+            f"not below {threshold} percent"
+        )
+for name in (
+    "missing_client_head_wait_count",
+    "missing_client_head_wait_total_nanoseconds",
+    "missing_client_head_wait_max_nanoseconds",
+    "drain_invocations",
+    "drain_total_nanoseconds",
+    "drain_max_nanoseconds",
+    "end_fence_drain_nanoseconds",
+):
+    integer(at(metrics, "joiner", name), f"joiner.{name}")
+if at(metrics, "joiner", "end_fence_drain_current_nanoseconds") != 0:
+    fail("end-fence drain timing remained active at terminal measurement")
 if at(metrics, "assembler", "accepted_raw_records") != raw_cdc:
     fail("monitor did not consume the exact raw CDC corpus")
 if at(metrics, "assembler", "completed_bootstrap_transactions") != bootstrap or \

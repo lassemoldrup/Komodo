@@ -18,7 +18,7 @@ import statistics
 import subprocess
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence, TextIO
@@ -160,6 +160,9 @@ def analyze_benchbase(
     starts_us: list[Decimal] = []
     completions_us: list[Decimal] = []
     transaction_counts: Counter[str] = Counter()
+    transaction_latencies: dict[str, list[int]] = defaultdict(list)
+    phase_ids: list[int] = []
+    seen_phase_ids: set[int] = set()
 
     for row_number, row in enumerate(raw_rows, start=2):
         name = row.get("Transaction Name")
@@ -176,6 +179,14 @@ def analyze_benchbase(
         starts_us.append(start_us)
         completions_us.append(start_us + latency)
         transaction_counts[name] += 1
+        transaction_latencies[name].append(latency)
+        phase_id = _nonnegative_int(
+            row.get("Phase Id (index in config file)"),
+            f"raw CSV row {row_number} phase ID",
+        )
+        if phase_id not in seen_phase_ids:
+            seen_phase_ids.add(phase_id)
+            phase_ids.append(phase_id)
 
     _require(
         len(latencies) == measured_count,
@@ -207,6 +218,24 @@ def analyze_benchbase(
     else:
         latency_stats = {name: NA for name in ("mean", "p50", "p95", "p99", "max")}
 
+    elapsed_seconds = elapsed_ns / 1_000_000_000.0
+    transaction_types = {}
+    for name in sorted(transaction_counts):
+        values = transaction_latencies[name]
+        transaction_types[name] = {
+            "logical_invocation_count": transaction_counts[name],
+            "logical_invocations_per_second": (
+                transaction_counts[name] / elapsed_seconds if elapsed_seconds > 0 else NA
+            ),
+            "latency_microseconds": {
+                "mean": statistics.fmean(values),
+                "p50": _nearest_rank(values, 0.50),
+                "p95": _nearest_rank(values, 0.95),
+                "p99": _nearest_rank(values, 0.99),
+                "max": max(values),
+            },
+        }
+
     return {
         "measured_count": measured_count,
         "elapsed_time_nanoseconds": elapsed_ns,
@@ -217,6 +246,13 @@ def analyze_benchbase(
         "measured_start_epoch_ms": measured_start_ms,
         "measured_end_epoch_ms": measured_end_ms,
         "transaction_counts": dict(sorted(transaction_counts.items())),
+        "transaction_types": transaction_types,
+        "phase_ids": phase_ids,
+        "new_order_logical_invocations_per_minute": (
+            transaction_counts["NewOrder"] * 60.0 / elapsed_seconds
+            if elapsed_seconds > 0
+            else NA
+        ),
     }
 
 
@@ -227,6 +263,184 @@ def analyze_benchbase_files(raw_csv: Path, summary_json: Path) -> dict[str, Any]
         summary = json.load(summary_stream)
     _require(isinstance(summary, dict), "BenchBase summary JSON is not an object")
     return analyze_benchbase(rows, summary)
+
+
+OUTCOME_COUNTERS = (
+    "logical_transactions_started",
+    "successful_transactions",
+    "terminal_aborted_transactions",
+    "physical_attempts_started",
+    "definitively_aborted_attempts",
+    "retry_attempts",
+    "retryable_failure_events",
+    "error_transactions",
+    "unknown_status_transactions",
+    "ambiguous_attempts",
+    "retry_different_events",
+)
+
+
+def analyze_transaction_outcomes(
+    document: Mapping[str, Any], benchbase: Mapping[str, Any]
+) -> dict[str, Any]:
+    _require(document.get("kind") == "transaction_outcomes", "outcome artifact kind differs")
+    _require(document.get("scope") == "measurement_window", "outcome artifact scope differs")
+    benchmark = document.get("benchmark")
+    _require(isinstance(benchmark, str) and benchmark, "outcome benchmark is missing")
+    _require(
+        document.get("window_semantics") == "fully_contained_logical_invocations",
+        "outcome window semantics differ",
+    )
+    elapsed_ns = _nonnegative_int(document.get("elapsed_nanoseconds"), "outcome elapsed_nanoseconds")
+    _require(elapsed_ns > 0, "outcome elapsed_nanoseconds is zero")
+    _require(
+        elapsed_ns == _nonnegative_int(benchbase.get("elapsed_time_nanoseconds"), "BenchBase elapsed"),
+        "outcome and BenchBase elapsed windows differ",
+    )
+    measured_requests = _nonnegative_int(document.get("measured_requests"), "outcome measured_requests")
+    _require(
+        measured_requests == _nonnegative_int(benchbase.get("measured_count"), "BenchBase measured count"),
+        "outcome and BenchBase measured request counts differ",
+    )
+    phase_ids = document.get("phase_ids")
+    _require(
+        isinstance(phase_ids, list)
+        and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in phase_ids)
+        and len(phase_ids) == len(set(phase_ids)),
+        "outcome phase_ids are invalid",
+    )
+    _require(phase_ids == benchbase.get("phase_ids"), "outcome/raw measurement phase IDs differ")
+    raw_types = benchbase.get("transaction_types")
+    raw_counts = benchbase.get("transaction_counts")
+    outcome_types = document.get("transaction_types")
+    totals = document.get("totals")
+    _require(isinstance(raw_types, Mapping), "BenchBase transaction types are missing")
+    _require(isinstance(raw_counts, Mapping), "BenchBase transaction counts are missing")
+    _require(isinstance(outcome_types, Mapping) and outcome_types, "outcome transaction types are missing")
+    _require(isinstance(totals, Mapping), "outcome totals are missing")
+    _require(set(raw_types).issubset(outcome_types), "raw transaction type is absent from outcomes")
+    elapsed_seconds = elapsed_ns / 1_000_000_000.0
+    normalized: dict[str, Any] = {}
+    summed: Counter[str] = Counter()
+    for transaction_type in sorted(outcome_types):
+        source = outcome_types[transaction_type]
+        _require(isinstance(source, Mapping), f"{transaction_type} outcomes are not an object")
+        counters = {
+            name: _nonnegative_int(source.get(name), f"{transaction_type}.{name}")
+            for name in OUTCOME_COUNTERS
+        }
+        _require(
+            counters["logical_transactions_started"]
+            == counters["successful_transactions"]
+            + counters["terminal_aborted_transactions"]
+            + counters["error_transactions"]
+            + counters["unknown_status_transactions"],
+            f"{transaction_type} logical outcome algebra differs",
+        )
+        _require(
+            counters["physical_attempts_started"]
+            == counters["successful_transactions"]
+            + counters["definitively_aborted_attempts"]
+            + counters["ambiguous_attempts"],
+            f"{transaction_type} physical attempt algebra differs",
+        )
+        _require(
+            counters["retry_attempts"]
+            == counters["physical_attempts_started"]
+            - counters["logical_transactions_started"],
+            f"{transaction_type} retry algebra differs",
+        )
+        _require(
+            counters["ambiguous_attempts"] == counters["unknown_status_transactions"],
+            f"{transaction_type} ambiguous/unknown algebra differs",
+        )
+        retry_failure_events = (
+            counters["retryable_failure_events"]
+            + counters["retry_different_events"]
+        )
+        _require(
+            counters["retry_attempts"]
+            <= retry_failure_events
+            <= counters["retry_attempts"] + counters["terminal_aborted_transactions"],
+            f"{transaction_type} retry failure event algebra differs",
+        )
+        _require(
+            counters["logical_transactions_started"]
+            == _nonnegative_int(raw_counts.get(transaction_type, 0), f"raw {transaction_type} count"),
+            f"{transaction_type} raw/outcome logical counts differ",
+        )
+        for name, value in counters.items():
+            summed[name] += value
+        rates = {
+            f"{name}_per_second": value / elapsed_seconds
+            for name, value in counters.items()
+        }
+        rates["attempts_per_second"] = (
+            counters["physical_attempts_started"] / elapsed_seconds
+        )
+        rates["physical_attempts_per_second"] = rates["attempts_per_second"]
+        failed_transactions = (
+            counters["error_transactions"] + counters["unknown_status_transactions"]
+        )
+        rates["failed_transactions_per_second"] = failed_transactions / elapsed_seconds
+        raw_type = raw_types.get(transaction_type)
+        latency = (
+            raw_type["latency_microseconds"]
+            if isinstance(raw_type, Mapping)
+            else {name: NA for name in ("mean", "p50", "p95", "p99", "max")}
+        )
+        normalized[transaction_type] = {
+            **counters,
+            "failed_transactions": failed_transactions,
+            **rates,
+            "latency_microseconds": latency,
+        }
+    for name in OUTCOME_COUNTERS:
+        _require(
+            _nonnegative_int(totals.get(name), f"totals.{name}") == summed[name],
+            f"outcome total {name} differs from per-type sum",
+        )
+    return {
+        "kind": "transaction_outcome_metrics",
+        "benchmark": benchmark,
+        "scope": "measurement_window",
+        "window_semantics": "fully_contained_logical_invocations",
+        "elapsed_time_nanoseconds": elapsed_ns,
+        "measured_requests": measured_requests,
+        "phase_ids": phase_ids,
+        "transaction_types": normalized,
+        "totals": {
+            **dict(summed),
+            "failed_transactions": (
+                summed["error_transactions"] + summed["unknown_status_transactions"]
+            ),
+            **{
+                f"{name}_per_second": value / elapsed_seconds
+                for name, value in summed.items()
+            },
+            "failed_transactions_per_second": (
+                summed["error_transactions"] + summed["unknown_status_transactions"]
+            ) / elapsed_seconds,
+        },
+        "successful_transactions_per_second": (
+            summed["successful_transactions"] / elapsed_seconds
+            if elapsed_seconds > 0
+            else NA
+        ),
+        "physical_attempts_per_second": (
+            summed["physical_attempts_started"] / elapsed_seconds
+            if elapsed_seconds > 0
+            else NA
+        ),
+        "new_order_per_minute": (
+            normalized.get("NewOrder", {}).get("successful_transactions", 0)
+            * 60.0
+            / elapsed_seconds
+            if elapsed_seconds > 0
+            else NA
+        ),
+        "new_order_rate_label": "NewOrder/min",
+    }
 
 
 def parse_xrange_entries(document: Any) -> list[tuple[str, list[tuple[str, str]]]]:
@@ -1090,6 +1304,15 @@ def _benchbase_command(args: argparse.Namespace) -> None:
     )
 
 
+def _outcomes_command(args: argparse.Namespace) -> None:
+    _emit_metrics(
+        args,
+        analyze_transaction_outcomes(
+            _load_json(args.outcomes_json), _load_json(args.benchbase_metrics_json)
+        ),
+    )
+
+
 def _redis_command(args: argparse.Namespace) -> None:
     _emit_metrics(
         args,
@@ -1205,6 +1428,14 @@ def build_parser() -> argparse.ArgumentParser:
     benchbase.add_argument("--summary-json", required=True)
     _add_metric_outputs(benchbase)
     benchbase.set_defaults(handler=_benchbase_command)
+
+    outcomes = subparsers.add_parser(
+        "analyze-outcomes", help="validate measurement-window per-type outcomes"
+    )
+    outcomes.add_argument("--outcomes-json", required=True)
+    outcomes.add_argument("--benchbase-metrics-json", required=True)
+    _add_metric_outputs(outcomes)
+    outcomes.set_defaults(handler=_outcomes_command)
 
     redis = subparsers.add_parser("analyze-redis", help="analyze a Redis CDC XRANGE JSON dump")
     redis.add_argument("--input-json", required=True)

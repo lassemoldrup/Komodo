@@ -30,26 +30,47 @@ NEED_MONITOR=0
 
 BASELINE_ROOT=${BLACKBOX_PERFORMANCE_BASELINE_ROOT:-}
 OUTPUT_ROOT=${BLACKBOX_PERFORMANCE_OUTPUT_ROOT:-}
+BENCHMARK=${BLACKBOX_PERFORMANCE_BENCHMARK:-ycsb}
 REPETITIONS=${BLACKBOX_PERFORMANCE_REPETITIONS:-3}
 TERMINALS=${BLACKBOX_PERFORMANCE_TERMINALS:-4}
 SCALE_FACTOR=${BLACKBOX_PERFORMANCE_SCALE_FACTOR:-10}
 FIELD_SIZE=${BLACKBOX_PERFORMANCE_FIELD_SIZE:-32}
 LOADER_THREADS=${BLACKBOX_PERFORMANCE_LOADER_THREADS:-1}
 LOADER_BATCH_SIZE=${BLACKBOX_PERFORMANCE_LOADER_BATCH_SIZE:-128}
+LOADER_TIMESTAMP_UTC=${BLACKBOX_PERFORMANCE_LOADER_TIMESTAMP_UTC:-2000-01-01T00:00:00Z}
 WARMUP_SECONDS=${BLACKBOX_PERFORMANCE_WARMUP_SECONDS:-5}
 DURATION_SECONDS=${BLACKBOX_PERFORMANCE_DURATION_SECONDS:-20}
 COOLDOWN_SECONDS=${BLACKBOX_PERFORMANCE_COOLDOWN_SECONDS:-2}
 RANDOM_SEED=${BLACKBOX_PERFORMANCE_RANDOM_SEED:-20260818}
+TRANSACTION_MIX=${BLACKBOX_PERFORMANCE_MIX:-}
+RATE=${BLACKBOX_PERFORMANCE_RATE:-unlimited}
+DRAIN_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_DRAIN_TIMEOUT_SECONDS:-30}
+HIGH_WATER_THRESHOLD_PERCENT=${BLACKBOX_PERFORMANCE_HIGH_WATER_THRESHOLD_PERCENT:-70}
 RESOURCE_INTERVAL_SECONDS=${BLACKBOX_PERFORMANCE_RESOURCE_INTERVAL_SECONDS:-1}
+BLACKBOX_BOOTSTRAP_MAX_ROWS=${BLACKBOX_PERFORMANCE_BOOTSTRAP_MAX_ROWS:-1000000}
+BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES=${BLACKBOX_PERFORMANCE_BOOTSTRAP_MAX_INPUT_BYTES:-4294967296}
+BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES=${BLACKBOX_PERFORMANCE_BOOTSTRAP_MAX_CANONICAL_BYTES:-2147483648}
 REDIS_MAXMEMORY_BYTES=${BLACKBOX_PERFORMANCE_REDIS_MAXMEMORY_BYTES:-8589934592}
+MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS=${BLACKBOX_PERFORMANCE_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS:-1024}
+MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION=${BLACKBOX_PERFORMANCE_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION:-100000}
+MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES:-268435456}
+MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=${BLACKBOX_PERFORMANCE_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS:-10000000}
+MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES:-268435456}
+MONITOR_MAX_PENDING_CLIENT_RECORDS=${BLACKBOX_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_RECORDS:-1000000}
 MONITOR_MAX_PENDING_CLIENT_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_BYTES:-1073741824}
+MONITOR_MAX_PENDING_CDC_SLOTS=${BLACKBOX_PERFORMANCE_MONITOR_MAX_PENDING_CDC_SLOTS:-1000000}
+MONITOR_MAX_PENDING_CDC_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_PENDING_CDC_BYTES:-268435456}
+MONITOR_MAX_RETAINED_IDENTITY_RECORDS=${BLACKBOX_PERFORMANCE_MONITOR_MAX_RETAINED_IDENTITY_RECORDS:-10000000}
 MONITOR_MAX_RETAINED_IDENTITY_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_RETAINED_IDENTITY_BYTES:-2147483648}
+MONITOR_MAX_EVENTS_PER_TRANSACTION=${BLACKBOX_PERFORMANCE_MONITOR_MAX_EVENTS_PER_TRANSACTION:-101000}
 MONITOR_MAX_BOOTSTRAP_STATE_ROWS=${BLACKBOX_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_ROWS:-10000000}
 MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_BYTES:-268435456}
+MONITOR_MAX_CHECKER_STATE_BYTES=${BLACKBOX_PERFORMANCE_MONITOR_MAX_CHECKER_STATE_BYTES:-536870912}
 OUTPUT_MAX_BYTES=${BLACKBOX_PERFORMANCE_OUTPUT_MAX_BYTES:-107374182400}
 COMPOSE_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_COMPOSE_TIMEOUT_SECONDS:-300}
 LOADER_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_LOADER_TIMEOUT_SECONDS:-600}
 TRIAL_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_TRIAL_TIMEOUT_SECONDS:-1800}
+STATUS_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_STATUS_TIMEOUT_SECONDS:-120}
 JAVA_FLAGS_TEXT=${BLACKBOX_PERFORMANCE_JAVA_FLAGS:--Xms1g -Xmx1g -XX:+AlwaysPreTouch -XX:+UseG1GC}
 JAVA_FLAGS=()
 SMOKE=0
@@ -79,10 +100,11 @@ OUTPUT_LIMIT_SENTINEL=
 
 usage() {
   cat >&2 <<'EOF'
-usage: run_blackbox_performance.sh --baseline-root PATH [--output-root PATH] [OPTIONS]
+usage: run_blackbox_performance.sh [--benchmark ycsb|tpcc] [--baseline-root PATH] [--output-root PATH] [OPTIONS]
 
 Options:
   --smoke                    Run selected real stages once with the smoke configuration.
+  --benchmark NAME           ycsb (default) or tpcc.
   --stage NAME               Run this stage; repeat to select multiple stages (default: all).
                              Selection uses canonical order; duplicate names are rejected.
                              Names: benchbase_uninstrumented, read_capture_encoding,
@@ -91,22 +113,61 @@ Options:
   --repetitions N            Measured repetitions (default: 3).
   --terminals N              BenchBase terminals (default: 4).
   --scale-factor N           YCSB scale factor (default: 10).
+  --warehouses N             TPC-C warehouse count (default: 1).
   --field-size N             Bytes per YCSB field (default: 32).
   --loader-threads N         Fixed BenchBase loader concurrency (must be 1).
   --loader-batch-size N      Rows committed per loader batch (default: 128).
+  --loader-timestamp-utc UTC Fixed loader timestamp in canonical UTC whole-second
+                             form (default: 2000-01-01T00:00:00Z).
   --warmup-seconds N         Warmup duration (default: 5).
-  --duration-seconds N       Requested measurement duration (default: 20).
+  --duration-seconds N       Requested duration (YCSB: 20; TPC-C: 120).
+  --mix CSV                  Transaction weights (TPC-C default: 45,43,4,4,4).
+  --rate VALUE               BenchBase rate (default: unlimited).
+  --drain-timeout-seconds N  Maximum end-of-workload to verdict tail (default: 30).
+  --status-timeout-seconds N Lifecycle acknowledgement timeout
+                             (YCSB: 120; TPC-C: 900).
+  --high-water-threshold-percent P
+                             Maximum configured-capacity use (default: 70).
   --cooldown-seconds N       Cooldown after a trial (default: 2).
   --seed N                   Fixed BenchBase/order seed (default: 20260818).
   --redis-maxmemory-bytes N  Redis noeviction capacity (default: 8589934592).
+  --bootstrap-scan-max-rows N
+                             Coordinator scan row capacity (default: 1000000).
+  --bootstrap-scan-max-input-bytes N
+                             Coordinator scan input capacity (default: 4294967296).
+  --bootstrap-scan-max-canonical-bytes N
+                             Coordinator canonical-byte capacity (default: 2147483648).
+  --monitor-assembler-active-transactions N
+                             Raw CDC concurrent-transaction capacity (default: 1024).
+  --monitor-assembler-events-per-transaction N
+                             Raw CDC per-transaction event capacity (default: 100000).
+  --monitor-assembler-active-bytes N
+                             Raw CDC active-byte capacity (default: 268435456).
+  --monitor-assembler-completed-transactions N
+                             Raw CDC retained completion capacity (default: 10000000).
+  --monitor-assembler-retained-identity-bytes N
+                             Raw CDC identity byte capacity (default: 268435456).
+  --monitor-pending-client-records N
+                             Joiner pending-client record capacity (default: 1000000).
   --monitor-pending-client-bytes N
                              Joiner pending-client capacity (default: 1073741824).
+  --monitor-pending-cdc-slots N
+                             Joiner pending-CDC slot capacity (default: 1000000).
+  --monitor-pending-cdc-bytes N
+                             Joiner pending-CDC byte capacity (default: 268435456).
+  --monitor-retained-identity-records N
+                             Joiner retained-identity record capacity (default: 10000000).
   --monitor-retained-identity-bytes N
                              Joiner identity capacity (default: 2147483648).
+  --monitor-events-per-transaction N
+                             Join/check per-transaction event capacity (default: 101000).
   --monitor-bootstrap-state-rows N
                              Joiner bootstrap row capacity (default: 10000000).
   --monitor-bootstrap-state-bytes N
-                             Joiner bootstrap byte capacity (default: 268435456).
+                             Joiner bootstrap byte capacity (YCSB: 268435456;
+                             TPC-C: 1073741824).
+  --monitor-checker-state-bytes N
+                             Checker canonical-state capacity (default: 536870912).
   --output-max-bytes N       Artifact budget (default: 107374182400).
   --print-stage-order        Print the deterministic rotated order and exit.
   --verify-inputs-only       Validate environment/worktrees/output safety and exit (smoke only).
@@ -139,6 +200,17 @@ require_positive_integer() {
 }
 
 
+require_signed_32_integer() {
+  local name=$1
+  local value=$2
+  [[ $value =~ ^-?(0|[1-9][0-9]*)$ ]] ||
+    die "$name must be a canonical signed decimal integer: $value"
+  python3 -c \
+    'import sys; value = int(sys.argv[1]); raise SystemExit(0 if -(2**31) <= value <= 2**31 - 1 else 1)' \
+    "$value" || die "$name exceeds the BenchBase signed 32-bit range: $value"
+}
+
+
 require_capacity_bytes() {
   local name=$1
   local value=$2
@@ -157,6 +229,18 @@ require_capacity_count() {
   python3 -c \
     'import sys; value = int(sys.argv[1]); raise SystemExit(0 if value <= 9223372036854775807 else 1)' \
     "$value" || die "$name exceeds the signed 64-bit count range: $value"
+}
+
+
+require_canonical_utc_second() {
+  local name=$1
+  local value=$2
+  [[ $value =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+    die "$name must use canonical UTC whole-second form YYYY-MM-DDTHH:MM:SSZ: $value"
+  python3 -c \
+    'import datetime as dt, sys; dt.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")' \
+    "$value" 2>/dev/null ||
+    die "$name is not a valid UTC calendar timestamp: $value"
 }
 
 
@@ -206,8 +290,35 @@ configure_stages() {
 
 
 parse_arguments() {
+  local index argument
+  local arguments=("$@")
+  for (( index = 0; index < ${#arguments[@]}; index++ )); do
+    argument=${arguments[$index]}
+    if [[ $argument == --benchmark ]]; then
+      (( index + 1 < ${#arguments[@]} )) || die "missing --benchmark value"
+      BENCHMARK=${arguments[$((index + 1))]}
+    fi
+  done
+  if [[ $BENCHMARK == tpcc ]]; then
+    [[ -v BLACKBOX_PERFORMANCE_SCALE_FACTOR ]] || SCALE_FACTOR=1
+    [[ -v BLACKBOX_PERFORMANCE_TERMINALS ]] || TERMINALS=4
+    [[ -v BLACKBOX_PERFORMANCE_DURATION_SECONDS ]] || DURATION_SECONDS=120
+    [[ -v BLACKBOX_PERFORMANCE_WARMUP_SECONDS ]] || WARMUP_SECONDS=5
+    [[ -v BLACKBOX_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_ROWS ]] || \
+      MONITOR_MAX_BOOTSTRAP_STATE_ROWS=1000000
+    [[ -v BLACKBOX_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_BYTES ]] || \
+      MONITOR_MAX_BOOTSTRAP_STATE_BYTES=1073741824
+    [[ -v BLACKBOX_PERFORMANCE_STATUS_TIMEOUT_SECONDS ]] || STATUS_TIMEOUT_SECONDS=900
+    [[ -n $TRANSACTION_MIX ]] || TRANSACTION_MIX=45,43,4,4,4
+  else
+    [[ -n $TRANSACTION_MIX ]] || TRANSACTION_MIX=50,0,0,50,0,0
+  fi
   while (( $# > 0 )); do
     case "$1" in
+      --benchmark)
+        BENCHMARK=${2:?missing --benchmark value}
+        shift 2
+        ;;
       --baseline-root)
         BASELINE_ROOT=${2:?missing --baseline-root value}
         shift 2
@@ -229,7 +340,13 @@ parse_arguments() {
         shift 2
         ;;
       --scale-factor)
+        [[ $BENCHMARK == ycsb ]] || die "--scale-factor is available only for ycsb; use --warehouses"
         SCALE_FACTOR=${2:?missing --scale-factor value}
+        shift 2
+        ;;
+      --warehouses)
+        [[ $BENCHMARK == tpcc ]] || die "--warehouses is available only for tpcc"
+        SCALE_FACTOR=${2:?missing --warehouses value}
         shift 2
         ;;
       --field-size)
@@ -244,12 +361,36 @@ parse_arguments() {
         LOADER_BATCH_SIZE=${2:?missing --loader-batch-size value}
         shift 2
         ;;
+      --loader-timestamp-utc)
+        LOADER_TIMESTAMP_UTC=${2:?missing --loader-timestamp-utc value}
+        shift 2
+        ;;
       --warmup-seconds)
         WARMUP_SECONDS=${2:?missing --warmup-seconds value}
         shift 2
         ;;
       --duration-seconds)
         DURATION_SECONDS=${2:?missing --duration-seconds value}
+        shift 2
+        ;;
+      --mix)
+        TRANSACTION_MIX=${2:?missing --mix value}
+        shift 2
+        ;;
+      --rate)
+        RATE=${2:?missing --rate value}
+        shift 2
+        ;;
+      --drain-timeout-seconds)
+        DRAIN_TIMEOUT_SECONDS=${2:?missing --drain-timeout-seconds value}
+        shift 2
+        ;;
+      --status-timeout-seconds)
+        STATUS_TIMEOUT_SECONDS=${2:?missing --status-timeout-seconds value}
+        shift 2
+        ;;
+      --high-water-threshold-percent)
+        HIGH_WATER_THRESHOLD_PERCENT=${2:?missing --high-water-threshold-percent value}
         shift 2
         ;;
       --cooldown-seconds)
@@ -264,12 +405,64 @@ parse_arguments() {
         REDIS_MAXMEMORY_BYTES=${2:?missing --redis-maxmemory-bytes value}
         shift 2
         ;;
+      --bootstrap-scan-max-rows)
+        BLACKBOX_BOOTSTRAP_MAX_ROWS=${2:?missing --bootstrap-scan-max-rows value}
+        shift 2
+        ;;
+      --bootstrap-scan-max-input-bytes)
+        BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES=${2:?missing --bootstrap-scan-max-input-bytes value}
+        shift 2
+        ;;
+      --bootstrap-scan-max-canonical-bytes)
+        BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES=${2:?missing --bootstrap-scan-max-canonical-bytes value}
+        shift 2
+        ;;
+      --monitor-assembler-active-transactions)
+        MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS=${2:?missing --monitor-assembler-active-transactions value}
+        shift 2
+        ;;
+      --monitor-assembler-events-per-transaction)
+        MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION=${2:?missing --monitor-assembler-events-per-transaction value}
+        shift 2
+        ;;
+      --monitor-assembler-active-bytes)
+        MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES=${2:?missing --monitor-assembler-active-bytes value}
+        shift 2
+        ;;
+      --monitor-assembler-completed-transactions)
+        MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=${2:?missing --monitor-assembler-completed-transactions value}
+        shift 2
+        ;;
+      --monitor-assembler-retained-identity-bytes)
+        MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-assembler-retained-identity-bytes value}
+        shift 2
+        ;;
+      --monitor-pending-client-records)
+        MONITOR_MAX_PENDING_CLIENT_RECORDS=${2:?missing --monitor-pending-client-records value}
+        shift 2
+        ;;
       --monitor-pending-client-bytes)
         MONITOR_MAX_PENDING_CLIENT_BYTES=${2:?missing --monitor-pending-client-bytes value}
         shift 2
         ;;
+      --monitor-pending-cdc-slots)
+        MONITOR_MAX_PENDING_CDC_SLOTS=${2:?missing --monitor-pending-cdc-slots value}
+        shift 2
+        ;;
+      --monitor-pending-cdc-bytes)
+        MONITOR_MAX_PENDING_CDC_BYTES=${2:?missing --monitor-pending-cdc-bytes value}
+        shift 2
+        ;;
+      --monitor-retained-identity-records)
+        MONITOR_MAX_RETAINED_IDENTITY_RECORDS=${2:?missing --monitor-retained-identity-records value}
+        shift 2
+        ;;
       --monitor-retained-identity-bytes)
         MONITOR_MAX_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-retained-identity-bytes value}
+        shift 2
+        ;;
+      --monitor-events-per-transaction)
+        MONITOR_MAX_EVENTS_PER_TRANSACTION=${2:?missing --monitor-events-per-transaction value}
         shift 2
         ;;
       --monitor-bootstrap-state-rows)
@@ -278,6 +471,10 @@ parse_arguments() {
         ;;
       --monitor-bootstrap-state-bytes)
         MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${2:?missing --monitor-bootstrap-state-bytes value}
+        shift 2
+        ;;
+      --monitor-checker-state-bytes)
+        MONITOR_MAX_CHECKER_STATE_BYTES=${2:?missing --monitor-checker-state-bytes value}
         shift 2
         ;;
       --output-max-bytes)
@@ -309,15 +506,20 @@ parse_arguments() {
 
   if (( SMOKE == 1 )); then
     REPETITIONS=1
-    TERMINALS=2
+    TERMINALS=$([[ $BENCHMARK == tpcc ]] && printf 4 || printf 2)
     SCALE_FACTOR=1
     FIELD_SIZE=32
     LOADER_THREADS=1
-    WARMUP_SECONDS=1
+    WARMUP_SECONDS=$([[ $BENCHMARK == tpcc ]] && printf 0 || printf 1)
     DURATION_SECONDS=2
     COOLDOWN_SECONDS=0
   fi
   configure_stages
+  [[ $BENCHMARK == ycsb || $BENCHMARK == tpcc ]] ||
+    die "benchmark must be ycsb or tpcc"
+  if [[ $BENCHMARK == tpcc ]]; then
+    NEED_CURRENT_BENCHBASE=1
+  fi
   require_positive_integer repetitions "$REPETITIONS"
   require_positive_integer terminals "$TERMINALS"
   require_positive_integer scale-factor "$SCALE_FACTOR"
@@ -327,19 +529,66 @@ parse_arguments() {
   require_positive_integer loader-batch-size "$LOADER_BATCH_SIZE"
   (( LOADER_BATCH_SIZE <= 2147483647 )) ||
     die "loader-batch-size exceeds the BenchBase signed 32-bit range"
+  require_canonical_utc_second loader-timestamp-utc "$LOADER_TIMESTAMP_UTC"
   require_unsigned_integer warmup-seconds "$WARMUP_SECONDS"
   require_positive_integer duration-seconds "$DURATION_SECONDS"
+  require_positive_integer drain-timeout-seconds "$DRAIN_TIMEOUT_SECONDS"
+  require_positive_integer status-timeout-seconds "$STATUS_TIMEOUT_SECONDS"
   require_unsigned_integer cooldown-seconds "$COOLDOWN_SECONDS"
-  require_unsigned_integer seed "$RANDOM_SEED"
+  require_signed_32_integer seed "$RANDOM_SEED"
+  [[ $RATE == unlimited || $RATE =~ ^[1-9][0-9]*$ ]] ||
+    die "rate must be unlimited or a positive integer"
+  if [[ $RATE != unlimited ]]; then
+    (( RATE <= 2147483647 )) || die "rate exceeds the BenchBase signed 32-bit range"
+  fi
+  [[ $HIGH_WATER_THRESHOLD_PERCENT =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+    die "high-water-threshold-percent must be numeric"
+  awk -v value="$HIGH_WATER_THRESHOLD_PERCENT" \
+    'BEGIN { exit !(value > 0 && value <= 100) }' ||
+    die "high-water-threshold-percent must be in (0,100]"
+  local expected_weights
+  expected_weights=$([[ $BENCHMARK == tpcc ]] && printf 5 || printf 6)
+  [[ $TRANSACTION_MIX =~ ^[0-9]+([.][0-9]+)?(,[0-9]+([.][0-9]+)?)*$ ]] ||
+    die "mix must be a comma-separated numeric list"
+  [[ $(awk -F, '{print NF}' <<<"$TRANSACTION_MIX") == "$expected_weights" ]] ||
+    die "$BENCHMARK mix must contain $expected_weights weights"
+  awk -F, '{sum=0; for(i=1;i<=NF;i++) sum+=$i; exit !(sum > 99.999 && sum < 100.001)}' \
+    <<<"$TRANSACTION_MIX" || die "mix weights must sum to 100"
   require_capacity_bytes redis-maxmemory-bytes "$REDIS_MAXMEMORY_BYTES"
+  require_capacity_count bootstrap-scan-max-rows "$BLACKBOX_BOOTSTRAP_MAX_ROWS"
+  require_capacity_bytes bootstrap-scan-max-input-bytes "$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES"
+  require_capacity_bytes bootstrap-scan-max-canonical-bytes \
+    "$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES"
+  require_capacity_count monitor-assembler-active-transactions \
+    "$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS"
+  require_capacity_count monitor-assembler-events-per-transaction \
+    "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION"
+  require_capacity_bytes monitor-assembler-active-bytes \
+    "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES"
+  require_capacity_count monitor-assembler-completed-transactions \
+    "$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS"
+  require_capacity_bytes monitor-assembler-retained-identity-bytes \
+    "$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES"
+  require_capacity_count monitor-pending-client-records \
+    "$MONITOR_MAX_PENDING_CLIENT_RECORDS"
   require_capacity_bytes monitor-pending-client-bytes \
     "$MONITOR_MAX_PENDING_CLIENT_BYTES"
+  require_capacity_count monitor-pending-cdc-slots \
+    "$MONITOR_MAX_PENDING_CDC_SLOTS"
+  require_capacity_bytes monitor-pending-cdc-bytes \
+    "$MONITOR_MAX_PENDING_CDC_BYTES"
+  require_capacity_count monitor-retained-identity-records \
+    "$MONITOR_MAX_RETAINED_IDENTITY_RECORDS"
   require_capacity_bytes monitor-retained-identity-bytes \
     "$MONITOR_MAX_RETAINED_IDENTITY_BYTES"
+  require_capacity_count monitor-events-per-transaction \
+    "$MONITOR_MAX_EVENTS_PER_TRANSACTION"
   require_capacity_count monitor-bootstrap-state-rows \
     "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS"
   require_capacity_bytes monitor-bootstrap-state-bytes \
     "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES"
+  require_capacity_bytes monitor-checker-state-bytes \
+    "$MONITOR_MAX_CHECKER_STATE_BYTES"
   require_capacity_bytes output-max-bytes "$OUTPUT_MAX_BYTES"
   (( OUTPUT_MAX_BYTES <= 107374182400 )) ||
     die "output-max-bytes may not exceed the canonical 107374182400-byte cap"
@@ -360,7 +609,7 @@ print_stage_order() {
   printf 'repetition,stage_order_position,stage\n'
   local repetition position offset index
   for (( repetition = 1; repetition <= REPETITIONS; repetition++ )); do
-    offset=$(( (RANDOM_SEED + repetition - 1) % ${#STAGES[@]} ))
+    offset=$(( ((RANDOM_SEED % ${#STAGES[@]}) + ${#STAGES[@]} + repetition - 1) % ${#STAGES[@]} ))
     for (( position = 1; position <= ${#STAGES[@]}; position++ )); do
       index=$(( (offset + position - 1) % ${#STAGES[@]} ))
       printf '%s,%s,%s\n' "$repetition" "$position" "${STAGES[$index]}"
@@ -399,27 +648,31 @@ verify_repository() {
 
 
 verify_inputs() {
-  [[ -n $BASELINE_ROOT ]] || die "--baseline-root is required"
-  BASELINE_ROOT=$(realpath -e "$BASELINE_ROOT") || die "baseline root does not exist"
-  verify_repository baseline "$BASELINE_ROOT"
   verify_repository current-benchbase "$CURRENT_BENCHBASE_ROOT"
   verify_repository si-monitoring "$ROOT"
   verify_repository co-checker "$CO_CHECKER_ROOT"
-  [[ $BASELINE_ROOT != "$(realpath -e "$CURRENT_BENCHBASE_ROOT")" ]] ||
-    die "baseline must be a separate worktree, not the current BenchBase worktree"
-
-  BASELINE_HEAD=$(git -C "$BASELINE_ROOT" rev-parse HEAD)
   CURRENT_BENCHBASE_HEAD=$(git -C "$CURRENT_BENCHBASE_ROOT" rev-parse HEAD)
   SI_MONITORING_HEAD=$(git -C "$ROOT" rev-parse HEAD)
   CO_CHECKER_HEAD=$(git -C "$CO_CHECKER_ROOT" rev-parse HEAD)
-  [[ $BASELINE_HEAD == "$EXPECTED_BASELINE_HEAD" ]] ||
-    die "baseline head must be exactly $EXPECTED_BASELINE_HEAD, found $BASELINE_HEAD"
-  if git -C "$BASELINE_ROOT" symbolic-ref -q HEAD >/dev/null; then
-    die "baseline worktree must be detached at $EXPECTED_BASELINE_HEAD"
-  fi
-  if repo_dirty "$BASELINE_ROOT"; then
-    BASELINE_DIRTY=1
-    die "baseline worktree must be clean"
+  if [[ $BENCHMARK == ycsb ]]; then
+    [[ -n $BASELINE_ROOT ]] || die "--baseline-root is required for ycsb"
+    BASELINE_ROOT=$(realpath -e "$BASELINE_ROOT") || die "baseline root does not exist"
+    verify_repository baseline "$BASELINE_ROOT"
+    [[ $BASELINE_ROOT != "$(realpath -e "$CURRENT_BENCHBASE_ROOT")" ]] ||
+      die "baseline must be a separate worktree, not the current BenchBase worktree"
+    BASELINE_HEAD=$(git -C "$BASELINE_ROOT" rev-parse HEAD)
+    [[ $BASELINE_HEAD == "$EXPECTED_BASELINE_HEAD" ]] ||
+      die "baseline head must be exactly $EXPECTED_BASELINE_HEAD, found $BASELINE_HEAD"
+    if git -C "$BASELINE_ROOT" symbolic-ref -q HEAD >/dev/null; then
+      die "baseline worktree must be detached at $EXPECTED_BASELINE_HEAD"
+    fi
+    if repo_dirty "$BASELINE_ROOT"; then
+      BASELINE_DIRTY=1
+      die "baseline worktree must be clean"
+    fi
+  else
+    BASELINE_ROOT=$(realpath -e "$CURRENT_BENCHBASE_ROOT")
+    BASELINE_HEAD=$CURRENT_BENCHBASE_HEAD
   fi
 
   repo_dirty "$CURRENT_BENCHBASE_ROOT" && CURRENT_BENCHBASE_DIRTY=1
@@ -447,15 +700,19 @@ verify_inputs() {
 
 
 verify_repositories_unchanged() {
-  [[ $(git -C "$BASELINE_ROOT" rev-parse HEAD) == "$BASELINE_HEAD" ]] ||
-    die "historical BenchBase head changed during measurement"
+  if [[ $BENCHMARK == ycsb ]]; then
+    [[ $(git -C "$BASELINE_ROOT" rev-parse HEAD) == "$BASELINE_HEAD" ]] ||
+      die "historical BenchBase head changed during measurement"
+  fi
   [[ $(git -C "$CURRENT_BENCHBASE_ROOT" rev-parse HEAD) == "$CURRENT_BENCHBASE_HEAD" ]] ||
     die "current BenchBase head changed during measurement"
   [[ $(git -C "$ROOT" rev-parse HEAD) == "$SI_MONITORING_HEAD" ]] ||
     die "si-monitoring head changed during measurement"
   [[ $(git -C "$CO_CHECKER_ROOT" rev-parse HEAD) == "$CO_CHECKER_HEAD" ]] ||
     die "co-checker head changed during measurement"
-  repo_dirty "$BASELINE_ROOT" && die "historical BenchBase became dirty during measurement"
+  if [[ $BENCHMARK == ycsb ]]; then
+    repo_dirty "$BASELINE_ROOT" && die "historical BenchBase became dirty during measurement"
+  fi
   if (( SMOKE == 0 )); then
     ! repo_dirty "$CURRENT_BENCHBASE_ROOT" || die "current BenchBase became dirty during measurement"
     ! repo_dirty "$ROOT" || die "si-monitoring became dirty during measurement"
@@ -624,7 +881,24 @@ write_system_provenance() {
     "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
     "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
     "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
-    "$OUTPUT_MAX_BYTES" <<'PY'
+    "$OUTPUT_MAX_BYTES" "$BENCHMARK" "$TERMINALS" "$SCALE_FACTOR" \
+    "$DURATION_SECONDS" "$REPETITIONS" "$TRANSACTION_MIX" \
+    "$DRAIN_TIMEOUT_SECONDS" "$HIGH_WATER_THRESHOLD_PERCENT" \
+    "$RATE" "$WARMUP_SECONDS" \
+    "$RANDOM_SEED" "$LOADER_BATCH_SIZE" "$LOADER_THREADS" \
+    "$STATUS_TIMEOUT_SECONDS" \
+    "$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS" \
+    "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION" \
+    "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES" \
+    "$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS" \
+    "$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES" \
+    "$MONITOR_MAX_PENDING_CLIENT_RECORDS" \
+    "$MONITOR_MAX_PENDING_CDC_SLOTS" "$MONITOR_MAX_PENDING_CDC_BYTES" \
+    "$MONITOR_MAX_RETAINED_IDENTITY_RECORDS" \
+    "$MONITOR_MAX_EVENTS_PER_TRANSACTION" \
+    "$MONITOR_MAX_CHECKER_STATE_BYTES" \
+    "$BLACKBOX_BOOTSTRAP_MAX_ROWS" "$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
+    "$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES" "$LOADER_TIMESTAMP_UTC" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -638,6 +912,37 @@ Path(sys.argv[1]).write_text(
             "monitor_max_bootstrap_state_rows": int(sys.argv[5]),
             "monitor_max_bootstrap_state_bytes": int(sys.argv[6]),
             "output_max_bytes": int(sys.argv[7]),
+            "benchmark": sys.argv[8],
+            "terminals": int(sys.argv[9]),
+            "warehouses_or_scale_factor": int(sys.argv[10]),
+            "warehouses": int(sys.argv[10]) if sys.argv[8] == "tpcc" else None,
+            "scale_factor": int(sys.argv[10]) if sys.argv[8] == "ycsb" else None,
+            "duration_seconds": int(sys.argv[11]),
+            "repetitions": int(sys.argv[12]),
+            "transaction_mix": [float(value) for value in sys.argv[13].split(",")],
+            "drain_timeout_seconds": int(sys.argv[14]),
+            "high_water_threshold_percent": float(sys.argv[15]),
+            "rate": sys.argv[16],
+            "warmup_seconds": int(sys.argv[17]),
+            "random_seed": int(sys.argv[18]),
+            "loader_batch_size": int(sys.argv[19]),
+            "loader_threads": int(sys.argv[20]),
+            "status_timeout_seconds": int(sys.argv[21]),
+            "monitor_max_assembler_active_transactions": int(sys.argv[22]),
+            "monitor_max_assembler_events_per_transaction": int(sys.argv[23]),
+            "monitor_max_assembler_active_bytes": int(sys.argv[24]),
+            "monitor_max_assembler_completed_transactions": int(sys.argv[25]),
+            "monitor_max_assembler_retained_identity_bytes": int(sys.argv[26]),
+            "monitor_max_pending_client_records": int(sys.argv[27]),
+            "monitor_max_pending_cdc_slots": int(sys.argv[28]),
+            "monitor_max_pending_cdc_bytes": int(sys.argv[29]),
+            "monitor_max_retained_identity_records": int(sys.argv[30]),
+            "monitor_max_events_per_transaction": int(sys.argv[31]),
+            "monitor_max_checker_state_bytes": int(sys.argv[32]),
+            "bootstrap_scan_max_rows": int(sys.argv[33]),
+            "bootstrap_scan_max_input_bytes": int(sys.argv[34]),
+            "bootstrap_scan_max_canonical_bytes": int(sys.argv[35]),
+            "loader_timestamp_utc": sys.argv[36],
         },
         indent=2,
         sort_keys=True,
@@ -669,29 +974,51 @@ generate_configs() {
   python3 - \
     "$BASELINE_CONFIG" "$CURRENT_CONFIG" "$TERMINALS" "$SCALE_FACTOR" \
     "$FIELD_SIZE" "$LOADER_THREADS" "$LOADER_BATCH_SIZE" "$WARMUP_SECONDS" \
-    "$DURATION_SECONDS" "$RANDOM_SEED" <<'PY'
+    "$DURATION_SECONDS" "$RANDOM_SEED" "$BENCHMARK" "$TRANSACTION_MIX" "$RATE" \
+    "$LOADER_TIMESTAMP_UTC" <<'PY'
 import sys
 from pathlib import Path
 
 baseline, current = (Path(sys.argv[1]), Path(sys.argv[2]))
-terminals, scale, field_size, loader_threads, loader_batch_size, warmup, duration, seed = sys.argv[3:]
+(
+    terminals, scale, field_size, loader_threads, loader_batch_size, warmup,
+    duration, seed, benchmark, mix, rate, loader_timestamp_utc,
+) = sys.argv[3:]
 
 def document(instrumented: bool) -> str:
-    loader_declaration = "" if not instrumented else """
+    adapter_enabled = instrumented or benchmark == "tpcc"
+    loader_declaration = "" if not adapter_enabled else """
     <loaderDeclaredCountsFile>${env:BLACKBOX_LOADER_DECLARED_COUNTS_FILE}</loaderDeclaredCountsFile>"""
-    blackbox = "" if not instrumented else """
+    blackbox = "" if not adapter_enabled else f"""
     <blackbox>
-        <mode>${env:BLACKBOX_MEASUREMENT_MODE}</mode>
-        <runId>${env:BLACKBOX_ACTIVE_RUN_ID}</runId>
+        <mode>${{env:BLACKBOX_MEASUREMENT_MODE}}</mode>
+        <runId>${{env:BLACKBOX_ACTIVE_RUN_ID}}</runId>
         <redis>
-            <host>${env:BLACKBOX_REDIS_HOST}</host>
-            <port>${env:BLACKBOX_REDIS_PORT}</port>
+            <host>${{env:BLACKBOX_REDIS_HOST}}</host>
+            <port>${{env:BLACKBOX_REDIS_PORT}}</port>
         </redis>
         <declaredIsolation>REPEATABLE_READ</declaredIsolation>
-        <benchmark>ycsb</benchmark>
-        <sessionIdPrefix>ycsb/worker/</sessionIdPrefix>
+        <benchmark>{benchmark}</benchmark>
+        <sessionIdPrefix>{benchmark}/worker/</sessionIdPrefix>
     </blackbox>
 """
+    if benchmark == "tpcc":
+        benchmark_fields = ""
+        transaction_types = """
+        <transactiontype><name>NewOrder</name></transactiontype>
+        <transactiontype><name>Payment</name></transactiontype>
+        <transactiontype><name>OrderStatus</name></transactiontype>
+        <transactiontype><name>Delivery</name></transactiontype>
+        <transactiontype><name>StockLevel</name></transactiontype>"""
+    else:
+        benchmark_fields = f"    <fieldSize>{field_size}</fieldSize>\n"
+        transaction_types = """
+        <transactiontype><name>ReadRecord</name></transactiontype>
+        <transactiontype><name>InsertRecord</name></transactiontype>
+        <transactiontype><name>ScanRecord</name></transactiontype>
+        <transactiontype><name>UpdateRecord</name></transactiontype>
+        <transactiontype><name>DeleteRecord</name></transactiontype>
+        <transactiontype><name>ReadModifyWriteRecord</name></transactiontype>"""
     return f"""<?xml version=\"1.0\"?>
 <parameters>
     <type>MARIADB</type>
@@ -701,29 +1028,25 @@ def document(instrumented: bool) -> str:
     <password>app_pw</password>
     <isolation>TRANSACTION_REPEATABLE_READ</isolation>
     <batchsize>{loader_batch_size}</batchsize>
+    <loaderTimestamp>{loader_timestamp_utc}</loaderTimestamp>
 {loader_declaration}
     <retries>3</retries>
     <randomSeed>{seed}</randomSeed>
 {blackbox}
     <scalefactor>{scale}</scalefactor>
-    <fieldSize>{field_size}</fieldSize>
+{benchmark_fields.rstrip()}
     <loaderThreads>{loader_threads}</loaderThreads>
     <terminals>{terminals}</terminals>
     <works>
         <work>
             <warmup>{warmup}</warmup>
             <time>{duration}</time>
-            <rate>unlimited</rate>
-            <weights>50,0,0,50,0,0</weights>
+            <rate>{rate}</rate>
+            <weights>{mix}</weights>
         </work>
     </works>
     <transactiontypes>
-        <transactiontype><name>ReadRecord</name></transactiontype>
-        <transactiontype><name>InsertRecord</name></transactiontype>
-        <transactiontype><name>ScanRecord</name></transactiontype>
-        <transactiontype><name>UpdateRecord</name></transactiontype>
-        <transactiontype><name>DeleteRecord</name></transactiontype>
-        <transactiontype><name>ReadModifyWriteRecord</name></transactiontype>
+{transaction_types}
     </transactiontypes>
 </parameters>
 """
@@ -750,11 +1073,13 @@ build_artifacts() {
     package
   )
 
-  record_command "$build_commands" mvn "${common_maven[@]}" "-DbuildDirectory=$baseline_build"
-  (
-    cd "$BASELINE_ROOT"
-    mvn "${common_maven[@]}" "-DbuildDirectory=$baseline_build"
-  ) >"$OUTPUT_ROOT/build-baseline.log" 2>&1
+  if [[ $BENCHMARK == ycsb ]]; then
+    record_command "$build_commands" mvn "${common_maven[@]}" "-DbuildDirectory=$baseline_build"
+    (
+      cd "$BASELINE_ROOT"
+      mvn "${common_maven[@]}" "-DbuildDirectory=$baseline_build"
+    ) >"$OUTPUT_ROOT/build-baseline.log" 2>&1
+  fi
 
   if (( NEED_CURRENT_BENCHBASE == 1 )); then
     record_command "$build_commands" mvn "${common_maven[@]}" "-DbuildDirectory=$current_build"
@@ -774,17 +1099,22 @@ build_artifacts() {
     cmake --build "$monitor_build" >"$OUTPUT_ROOT/build-monitor.log" 2>&1
   fi
 
-  local baseline_jars
-  mapfile -t baseline_jars < <(find "$baseline_build" -type f -name benchbase.jar | sort)
-  (( ${#baseline_jars[@]} == 1 )) || die "expected one historical benchbase.jar"
-  BASELINE_DIST=$(dirname "${baseline_jars[0]}")
-  [[ -f $BASELINE_DIST/benchbase.jar ]] || die "historical BenchBase distribution is missing"
+  if [[ $BENCHMARK == ycsb ]]; then
+    local baseline_jars
+    mapfile -t baseline_jars < <(find "$baseline_build" -type f -name benchbase.jar | sort)
+    (( ${#baseline_jars[@]} == 1 )) || die "expected one historical benchbase.jar"
+    BASELINE_DIST=$(dirname "${baseline_jars[0]}")
+    [[ -f $BASELINE_DIST/benchbase.jar ]] || die "historical BenchBase distribution is missing"
+  fi
   if (( NEED_CURRENT_BENCHBASE == 1 )); then
     local current_jars
     mapfile -t current_jars < <(find "$current_build" -type f -name benchbase.jar | sort)
     (( ${#current_jars[@]} == 1 )) || die "expected one current benchbase.jar"
     CURRENT_DIST=$(dirname "${current_jars[0]}")
     [[ -f $CURRENT_DIST/benchbase.jar ]] || die "current BenchBase distribution is missing"
+    if [[ $BENCHMARK == tpcc ]]; then
+      BASELINE_DIST=$CURRENT_DIST
+    fi
   fi
   if (( NEED_MONITOR == 1 )); then
     MONITOR_BIN="$monitor_build/blackbox_run_monitor"
@@ -795,7 +1125,7 @@ build_artifacts() {
 
 wait_for_container() {
   local container=$1
-  local deadline=$(( $(date +%s) + 180 ))
+  local deadline=$(( $(date +%s) + STATUS_TIMEOUT_SECONDS ))
   while (( $(date +%s) <= deadline )); do
     local state
     state=$(docker inspect --format \
@@ -812,7 +1142,7 @@ wait_for_container() {
 
 
 wait_for_cdc() {
-  local deadline=$(( $(date +%s) + 180 ))
+  local deadline=$(( $(date +%s) + STATUS_TIMEOUT_SECONDS ))
   while (( $(date +%s) <= deadline )); do
     if docker logs cdc-debezium 2>&1 | grep -q 'Starting streaming'; then
       return 0
@@ -829,7 +1159,7 @@ wait_for_cdc() {
 wait_for_cdc_fence() {
   local phase=$1
   local trial_dir=$2
-  local deadline=$(( $(date +%s) + 180 ))
+  local deadline=$(( $(date +%s) + STATUS_TIMEOUT_SECONDS ))
   while (( $(date +%s) <= deadline )); do
     blackbox_redis --json XREVRANGE cdc + - COUNT 1000 >"$trial_dir/cdc_wait.json"
     if python3 - "$trial_dir/cdc_wait.json" "$phase" "$BLACKBOX_ACTIVE_RUN_ID" <<'PY'
@@ -898,20 +1228,31 @@ PY
 
 
 verify_empty_schema() {
-  local application_rows fence_rows marker_rows isolation tables
+  local fence_rows marker_rows isolation tables expected_tables
   tables=$(blackbox_database_query \
     "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='benchbase' ORDER BY TABLE_NAME")
-  [[ $tables == $'checker_run_fence\nsession_txn\nusertable' ]] ||
+  expected_tables=$(
+    blackbox_adapter_contract |
+      jq -r '[.application_tables[] | split(".")[1]] +
+        ["checker_run_fence", "session_txn"] | sort | .[]'
+  )
+  [[ $tables == "$expected_tables" ]] ||
     die "fresh trial schema does not have the exact expected table roster"
-  application_rows=$(blackbox_database_query 'SELECT COUNT(*) FROM usertable')
+  local qualified table application_rows
+  while IFS= read -r qualified; do
+    [[ -n $qualified ]] || continue
+    table=${qualified#benchbase.}
+    application_rows=$(blackbox_database_query "SELECT COUNT(*) FROM \`$table\`")
+    application_rows=${application_rows//[[:space:]]/}
+    [[ $application_rows == 0 ]] || die "fresh trial table $qualified contains rows"
+  done < <(blackbox_adapter_contract | jq -r '.application_tables[]')
   fence_rows=$(blackbox_database_query 'SELECT COUNT(*) FROM checker_run_fence')
   marker_rows=$(blackbox_database_query 'SELECT COUNT(*) FROM session_txn')
   isolation=$(blackbox_database_query 'SELECT @@innodb_snapshot_isolation')
-  application_rows=${application_rows//[[:space:]]/}
   fence_rows=${fence_rows//[[:space:]]/}
   marker_rows=${marker_rows//[[:space:]]/}
   isolation=${isolation//[[:space:]]/}
-  [[ $application_rows == 0 && $fence_rows == 0 && $marker_rows == 0 ]] ||
+  [[ $fence_rows == 0 && $marker_rows == 0 ]] ||
     die "fresh trial schema contains rows"
   [[ $isolation == 1 ]] || die "MariaDB snapshot isolation is disabled"
   if [[ $(blackbox_redis --raw PING 2>/dev/null || true) == PONG ]]; then
@@ -951,7 +1292,7 @@ expected_sessions() {
   local separator=
   local worker
   for (( worker = 1; worker <= TERMINALS; worker++ )); do
-    output+="${separator}ycsb/worker/$worker"
+    output+="${separator}${BENCHMARK}/worker/$worker"
     separator=,
   done
   printf '%s' "$output"
@@ -974,7 +1315,23 @@ write_trial_metadata() {
     "$SMOKE" "$REPETITIONS" "$REDIS_MAXMEMORY_BYTES" \
     "$MONITOR_MAX_PENDING_CLIENT_BYTES" "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
     "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
-    "$OUTPUT_MAX_BYTES" "$STAGE_ROSTER" <<'PY'
+    "$OUTPUT_MAX_BYTES" "$STAGE_ROSTER" "$BENCHMARK" "$TRANSACTION_MIX" \
+    "$RATE" "$DRAIN_TIMEOUT_SECONDS" "$HIGH_WATER_THRESHOLD_PERCENT" \
+    "$RESOURCE_INTERVAL_SECONDS" \
+    "$COOLDOWN_SECONDS" "$COMPOSE_TIMEOUT_SECONDS" "$LOADER_TIMEOUT_SECONDS" \
+    "$TRIAL_TIMEOUT_SECONDS" "$STATUS_TIMEOUT_SECONDS" \
+    "$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS" \
+    "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION" \
+    "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES" \
+    "$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS" \
+    "$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES" \
+    "$MONITOR_MAX_PENDING_CLIENT_RECORDS" \
+    "$MONITOR_MAX_PENDING_CDC_SLOTS" "$MONITOR_MAX_PENDING_CDC_BYTES" \
+    "$MONITOR_MAX_RETAINED_IDENTITY_RECORDS" \
+    "$MONITOR_MAX_EVENTS_PER_TRANSACTION" \
+    "$MONITOR_MAX_CHECKER_STATE_BYTES" \
+    "$BLACKBOX_BOOTSTRAP_MAX_ROWS" "$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
+    "$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES" "$LOADER_TIMESTAMP_UTC" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -988,7 +1345,7 @@ document = {
     "trial_id": values[3],
     "run_id": values[4],
     "terminals": int(values[5]),
-    "scale_factor": int(values[6]),
+    "scale_factor": int(values[6]) if values[31] == "ycsb" else None,
     "field_size": int(values[7]),
     "loader_threads": int(values[8]),
     "loader_batch_size": int(values[9]),
@@ -996,7 +1353,7 @@ document = {
     "requested_duration_seconds": int(values[11]),
     "random_seed": int(values[12]),
     "isolation": "REPEATABLE_READ",
-    "rate": "unlimited",
+    "rate": values[33],
     "redis_host": "host.docker.internal",
     "redis_port": 6379,
     "database_host": "host.docker.internal",
@@ -1021,6 +1378,37 @@ document = {
     "monitor_max_bootstrap_state_bytes": int(values[28]),
     "output_max_bytes": int(values[29]),
     "configured_stages": values[30].split(","),
+    "benchmark": values[31],
+    "transaction_mix": [float(value) for value in values[32].split(",")],
+    "warehouses": int(values[6]) if values[31] == "tpcc" else None,
+    "drain_timeout_seconds": int(values[34]),
+    "high_water_threshold_percent": float(values[35]),
+    "resource_interval_seconds": float(values[36]),
+    "cooldown_seconds": int(values[37]),
+    "compose_timeout_seconds": int(values[38]),
+    "loader_timeout_seconds": int(values[39]),
+    "trial_timeout_seconds": int(values[40]),
+    "status_timeout_seconds": int(values[41]),
+    "monitor_max_assembler_active_transactions": int(values[42]),
+    "monitor_max_assembler_events_per_transaction": int(values[43]),
+    "monitor_max_assembler_active_bytes": int(values[44]),
+    "monitor_max_assembler_completed_transactions": int(values[45]),
+    "monitor_max_assembler_retained_identity_bytes": int(values[46]),
+    "monitor_max_pending_client_records": int(values[47]),
+    "monitor_max_pending_cdc_slots": int(values[48]),
+    "monitor_max_pending_cdc_bytes": int(values[49]),
+    "monitor_max_retained_identity_records": int(values[50]),
+    "monitor_max_events_per_transaction": int(values[51]),
+    "monitor_max_checker_state_bytes": int(values[52]),
+    "bootstrap_scan_max_rows": int(values[53]),
+    "bootstrap_scan_max_input_bytes": int(values[54]),
+    "bootstrap_scan_max_canonical_bytes": int(values[55]),
+    "loader_timestamp_utc": values[56],
+    "baseline_profile": (
+        "current_evidence_disabled_compatibility"
+        if values[31] == "tpcc"
+        else "historical_uninstrumented"
+    ),
 }
 path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -1100,7 +1488,7 @@ run_loader() {
   local commands="$trial_dir/commands.txt"
   local command=(
     java "${JAVA_FLAGS[@]}" -jar "$distribution/benchbase.jar"
-    -b ycsb -c "$config"
+    -b "$BENCHMARK" -c "$config"
     --create=false --load=true --execute=false
     --directory "$trial_dir/loader_results"
   )
@@ -1136,18 +1524,20 @@ validate_independent_loader_state() {
 
 validate_loader_report() {
   local report=$1
-  local expected_rows=$(( SCALE_FACTOR * 1000 ))
-  jq -e --argjson batch_size "$LOADER_BATCH_SIZE" --argjson rows "$expected_rows" '
+  jq -e --arg benchmark "$BENCHMARK" --argjson batch_size "$LOADER_BATCH_SIZE" \
+    --argjson scale "$SCALE_FACTOR" '
     .kind == "loader_validation" and
-    .benchmark == "ycsb" and
+    .benchmark == $benchmark and
     .loader_batch_size == $batch_size and
-    .scale_parameter == null and
+    (if $benchmark == "tpcc" then
+       .scale_parameter == {"name":"warehouses","value":$scale}
+     else .scale_parameter == null end) and
     .validated == true and
     ((.declaration_available == true and
-      .declared_table_row_counts == [{"table":"benchbase.usertable","row_count":$rows}]) or
+      .declared_table_row_counts == .expected_table_row_counts) or
      (.declaration_available == false and .declared_table_row_counts == null)) and
-    .expected_table_row_counts == [{"table":"benchbase.usertable","row_count":$rows}] and
-    .observed_table_row_counts == [{"table":"benchbase.usertable","row_count":$rows}]
+    .expected_table_row_counts == .observed_table_row_counts and
+    (.observed_table_row_counts | length) > 0
   ' "$report" >/dev/null || die "loader validation report is malformed"
 }
 
@@ -1163,15 +1553,14 @@ capture_bootstrap() {
 
 validate_bootstrap() {
   local manifest=$1
-  local expected_rows=$(( SCALE_FACTOR * 1000 ))
-  jq -e --argjson expected "$expected_rows" \
+  local loader_report
+  loader_report="$(dirname "$manifest")/loader_validation.json"
+  jq -e --slurpfile loader "$loader_report" \
     '.kind == "bootstrap_manifest" and
-     (.table_row_counts | length) == 1 and
-     .table_row_counts[0].table == "benchbase.usertable" and
-     .table_row_counts[0].row_count == $expected and
+     (.table_row_counts | sort_by(.table)) ==
+       ($loader[0].observed_table_row_counts | sort_by(.table)) and
      (.canonical_state_digest | test("^[0-9a-f]{64}$"))' \
-    "$manifest" >/dev/null ||
-    die "bootstrap manifest does not contain the expected $expected_rows YCSB rows"
+    "$manifest" >/dev/null || die "bootstrap manifest differs from loader validation"
 }
 
 
@@ -1218,7 +1607,7 @@ run_direct_workload() {
     *) die "not a direct stage: $stage" ;;
   esac
   workload_container_arguments "$include_redis" "$include_cdc"
-  local sample_duration=$(( WARMUP_SECONDS + DURATION_SECONDS + 120 ))
+  local sample_duration=$TRIAL_TIMEOUT_SECONDS
   local command=(
     "$MEASURED_COMMAND"
     --resource-output "$trial_dir/resource_samples.csv"
@@ -1227,7 +1616,7 @@ run_direct_workload() {
     --sample-interval-seconds "$RESOURCE_INTERVAL_SECONDS"
     "${WORKLOAD_CONTAINERS[@]}"
     -- java "${JAVA_FLAGS[@]}" -jar "$distribution/benchbase.jar"
-    -b ycsb -c "$config"
+    -b "$BENCHMARK" -c "$config"
     --create=false --load=false --execute=true
     --directory "$trial_dir/benchbase_results"
   )
@@ -1276,10 +1665,10 @@ run_full_stage() {
   local processing_mode=audited
   [[ $stage == assembly_join ]] && processing_mode=join-only
   workload_container_arguments 1 1
-  local sample_duration=$(( WARMUP_SECONDS + DURATION_SECONDS + 120 ))
+  local sample_duration=$TRIAL_TIMEOUT_SECONDS
   local loader_args=(
     java "${JAVA_FLAGS[@]}" -jar "$CURRENT_DIST/benchbase.jar"
-    -b ycsb -c "$CURRENT_CONFIG"
+    -b "$BENCHMARK" -c "$CURRENT_CONFIG"
     --create=false --load=true --execute=false
     --directory "$trial_dir/loader_results"
   )
@@ -1291,7 +1680,7 @@ run_full_stage() {
     --sample-interval-seconds "$RESOURCE_INTERVAL_SECONDS"
     "${WORKLOAD_CONTAINERS[@]}"
     -- java "${JAVA_FLAGS[@]}" -jar "$CURRENT_DIST/benchbase.jar"
-    -b ycsb -c "$CURRENT_CONFIG"
+    -b "$BENCHMARK" -c "$CURRENT_CONFIG"
     --create=false --load=false --execute=true
     --directory "$trial_dir/benchbase_results"
   )
@@ -1315,16 +1704,33 @@ run_full_stage() {
     "BLACKBOX_LOADER_COMMAND=$loader_command" \
     "BLACKBOX_WORKLOAD_COMMAND=$workload_command" \
     "BLACKBOX_EXPECTED_SESSION_IDS=$session_roster" \
+    "BLACKBOX_BENCHMARK=$BENCHMARK" \
+    "BLACKBOX_LOADER_SCALE_VALUE=$SCALE_FACTOR" \
     BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
     BLACKBOX_MEASUREMENT_MODE=audited \
     "BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES=$REDIS_MAXMEMORY_BYTES" \
+    "BLACKBOX_BOOTSTRAP_MAX_ROWS=$BLACKBOX_BOOTSTRAP_MAX_ROWS" \
+    "BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES=$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
+    "BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES=$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES" \
+    "BLACKBOX_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS=$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS" \
+    "BLACKBOX_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION=$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION" \
+    "BLACKBOX_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES=$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES" \
+    "BLACKBOX_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS" \
+    "BLACKBOX_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES" \
+    "BLACKBOX_MONITOR_MAX_PENDING_CLIENT_RECORDS=$MONITOR_MAX_PENDING_CLIENT_RECORDS" \
     "BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES=$MONITOR_MAX_PENDING_CLIENT_BYTES" \
+    "BLACKBOX_MONITOR_MAX_PENDING_CDC_SLOTS=$MONITOR_MAX_PENDING_CDC_SLOTS" \
+    "BLACKBOX_MONITOR_MAX_PENDING_CDC_BYTES=$MONITOR_MAX_PENDING_CDC_BYTES" \
+    "BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_RECORDS=$MONITOR_MAX_RETAINED_IDENTITY_RECORDS" \
     "BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES=$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+    "BLACKBOX_MONITOR_MAX_EVENTS_PER_TRANSACTION=$MONITOR_MAX_EVENTS_PER_TRANSACTION" \
     "BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_ROWS=$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" \
     "BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_BYTES=$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
+    "BLACKBOX_MONITOR_MAX_CHECKER_STATE_BYTES=$MONITOR_MAX_CHECKER_STATE_BYTES" \
     BLACKBOX_REDIS_HOST=host.docker.internal BLACKBOX_REDIS_PORT=6379 \
     "BLACKBOX_LOADER_TIMEOUT_SECONDS=$LOADER_TIMEOUT_SECONDS" \
     "BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=$TRIAL_TIMEOUT_SECONDS" \
+    "BLACKBOX_STATUS_TIMEOUT_SECONDS=$STATUS_TIMEOUT_SECONDS" \
     timeout --foreground --signal=TERM --kill-after=10 "$TRIAL_TIMEOUT_SECONDS" "$E2E"
 
   local status=0
@@ -1340,17 +1746,34 @@ run_full_stage() {
   BLACKBOX_LOADER_COMMAND="$loader_command" \
   BLACKBOX_WORKLOAD_COMMAND="$workload_command" \
   BLACKBOX_EXPECTED_SESSION_IDS="$session_roster" \
+  BLACKBOX_BENCHMARK="$BENCHMARK" \
+  BLACKBOX_LOADER_SCALE_VALUE="$SCALE_FACTOR" \
   BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
   BLACKBOX_MEASUREMENT_MODE=audited \
   BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES" \
+  BLACKBOX_BOOTSTRAP_MAX_ROWS="$BLACKBOX_BOOTSTRAP_MAX_ROWS" \
+  BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES="$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
+  BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES="$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES" \
+  BLACKBOX_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS="$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS" \
+  BLACKBOX_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION="$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION" \
+  BLACKBOX_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES="$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES" \
+  BLACKBOX_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS="$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS" \
+  BLACKBOX_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES="$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES" \
+  BLACKBOX_MONITOR_MAX_PENDING_CLIENT_RECORDS="$MONITOR_MAX_PENDING_CLIENT_RECORDS" \
   BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$MONITOR_MAX_PENDING_CLIENT_BYTES" \
+  BLACKBOX_MONITOR_MAX_PENDING_CDC_SLOTS="$MONITOR_MAX_PENDING_CDC_SLOTS" \
+  BLACKBOX_MONITOR_MAX_PENDING_CDC_BYTES="$MONITOR_MAX_PENDING_CDC_BYTES" \
+  BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_RECORDS="$MONITOR_MAX_RETAINED_IDENTITY_RECORDS" \
   BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+  BLACKBOX_MONITOR_MAX_EVENTS_PER_TRANSACTION="$MONITOR_MAX_EVENTS_PER_TRANSACTION" \
   BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_ROWS="$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" \
   BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_BYTES="$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
+  BLACKBOX_MONITOR_MAX_CHECKER_STATE_BYTES="$MONITOR_MAX_CHECKER_STATE_BYTES" \
   BLACKBOX_REDIS_HOST=host.docker.internal \
   BLACKBOX_REDIS_PORT=6379 \
   BLACKBOX_LOADER_TIMEOUT_SECONDS="$LOADER_TIMEOUT_SECONDS" \
   BLACKBOX_WORKLOAD_TIMEOUT_SECONDS="$TRIAL_TIMEOUT_SECONDS" \
+  BLACKBOX_STATUS_TIMEOUT_SECONDS="$STATUS_TIMEOUT_SECONDS" \
     timeout --foreground --signal=TERM --kill-after=10 "$TRIAL_TIMEOUT_SECONDS" "$E2E" \
       >"$trial_dir/workload.log" 2>&1
   status=$?
@@ -1510,6 +1933,24 @@ analyze_trial() {
     --raw-csv "${raw_files[0]}" --summary-json "${summary_files[0]}" \
     --output-json "$trial_dir/benchbase_metrics.json" \
     --output-csv "$trial_dir/benchbase_metrics.csv"
+  if [[ $BENCHMARK == tpcc ]]; then
+    local outcome_files
+    mapfile -t outcome_files < <(
+      find "$trial_dir/benchbase_results" -maxdepth 1 -name '*.outcomes.json' -type f | sort
+    )
+    (( ${#outcome_files[@]} == 1 )) ||
+      die "expected one BenchBase measurement-window outcomes JSON in $trial_dir"
+    record_command "$trial_dir/commands.txt" python3 "$ANALYZER" analyze-outcomes \
+      --outcomes-json "${outcome_files[0]}" \
+      --benchbase-metrics-json "$trial_dir/benchbase_metrics.json" \
+      --output-json "$trial_dir/outcome_metrics.json" \
+      --output-csv "$trial_dir/outcome_metrics.csv"
+    python3 "$ANALYZER" analyze-outcomes \
+      --outcomes-json "${outcome_files[0]}" \
+      --benchbase-metrics-json "$trial_dir/benchbase_metrics.json" \
+      --output-json "$trial_dir/outcome_metrics.json" \
+      --output-csv "$trial_dir/outcome_metrics.csv"
+  fi
   local measured_start measured_end redis_end window_definition
   measured_start=$(jq -er '.measured_start_epoch_ms' "$trial_dir/benchbase_metrics.json")
   measured_end=$(jq -er '.measured_end_epoch_ms' "$trial_dir/benchbase_metrics.json")
@@ -1589,7 +2030,7 @@ PY
     )
     local worker
     for (( worker = 1; worker <= TERMINALS; worker++ )); do
-      capture_args+=(--expected-session "ycsb/worker/$worker")
+      capture_args+=(--expected-session "$BENCHMARK/worker/$worker")
     done
     record_command "$trial_dir/commands.txt" python3 "$REPORTER" "${capture_args[@]}"
     python3 "$REPORTER" "${capture_args[@]}"
@@ -1651,13 +2092,18 @@ run_trial() {
     local loader_config=$BASELINE_CONFIG
     local loader_declaration_available=0
     local loader_mode=disabled
+    if [[ $BENCHMARK == tpcc ]]; then
+      loader_distribution=$CURRENT_DIST
+      loader_declaration_available=1
+      export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
+    fi
     if [[ $stage == read_capture_encoding || $stage == read_capture_encoding_redis ]]; then
       loader_distribution=$CURRENT_DIST
       loader_config=$CURRENT_CONFIG
       loader_declaration_available=1
       loader_mode=capture_encoding
       export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
-    else
+    elif [[ $BENCHMARK == ycsb ]]; then
       unset BLACKBOX_LOADER_DECLARED_COUNTS_FILE
     fi
     run_loader "$trial_dir" "$loader_distribution" "$loader_config" "$loader_mode"
@@ -1714,12 +2160,18 @@ run_cdc_trial() {
   capture_host_before "$trial_dir"
   capture_versions "$trial_dir"
   export BLACKBOX_ACTIVE_RUN_ID=$run_id
-  unset BLACKBOX_LOADER_DECLARED_COUNTS_FILE
+  local declaration_available=0
+  if [[ $BENCHMARK == tpcc ]]; then
+    declaration_available=1
+    export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
+  else
+    unset BLACKBOX_LOADER_DECLARED_COUNTS_FILE
+  fi
   record_command "$trial_dir/commands.txt" blackbox_commit_fence RUN_START
   blackbox_commit_fence RUN_START
   wait_for_cdc_fence RUN_START "$trial_dir"
   run_loader "$trial_dir" "$BASELINE_DIST" "$BASELINE_CONFIG" disabled
-  validate_independent_loader_state "$trial_dir" 0
+  validate_independent_loader_state "$trial_dir" "$declaration_available"
   capture_bootstrap "$trial_dir"
   record_command "$trial_dir/commands.txt" blackbox_commit_fence LOAD_FINISHED
   blackbox_commit_fence LOAD_FINISHED
@@ -1758,16 +2210,18 @@ finalize_reports() {
   local overhead="$OUTPUT_ROOT/overhead.csv"
   local headline_csv="$OUTPUT_ROOT/headline_results.csv"
   local headline_markdown="$OUTPUT_ROOT/headline_results.md"
+  local transactions="$OUTPUT_ROOT/transaction_results.csv"
   local artifact_index="$OUTPUT_ROOT/artifact_index.csv"
   local commands="$OUTPUT_ROOT/report-commands.txt"
   record_command "$commands" python3 "$REPORTER" aggregate \
     --root "$OUTPUT_ROOT" --raw-output "$raw" --overhead-output "$overhead" \
-    --artifact-index-output "$artifact_index"
+    --artifact-index-output "$artifact_index" --transaction-output "$transactions"
   python3 "$REPORTER" aggregate \
     --root "$OUTPUT_ROOT" \
     --raw-output "$raw" \
     --overhead-output "$overhead" \
-    --artifact-index-output "$artifact_index"
+    --artifact-index-output "$artifact_index" \
+    --transaction-output "$transactions"
   record_command "$commands" python3 "$REPORTER" headline \
     --input-csv "$raw" --csv-output "$headline_csv" \
     --markdown-output "$headline_markdown"
@@ -1804,21 +2258,42 @@ main() {
     print_stage_order
     return 0
   fi
+  BLACKBOX_ADAPTER_SCHEMA_FILE="$ROOT/mariadb/initdb/adapters/${BENCHMARK}.sql"
+  [[ -f $BLACKBOX_ADAPTER_SCHEMA_FILE ]] ||
+    die "selected adapter schema file is missing: $BLACKBOX_ADAPTER_SCHEMA_FILE"
+  export BLACKBOX_ADAPTER_SCHEMA_FILE
   export BLACKBOX_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES"
   export BLACKBOX_LOADER_BATCH_SIZE="$LOADER_BATCH_SIZE"
+  export BLACKBOX_BENCHMARK="$BENCHMARK"
+  export BLACKBOX_LOADER_SCALE_VALUE="$SCALE_FACTOR"
   verify_canonical_container
   verify_inputs
   if (( VERIFY_INPUTS_ONLY == 1 )); then
-    printf 'verified baseline=%s output=%s stages=%s loader_batch_size=%s redis_maxmemory_bytes=%s monitor_pending_client_bytes=%s monitor_retained_identity_bytes=%s monitor_bootstrap_state_rows=%s monitor_bootstrap_state_bytes=%s output_max_bytes=%s\n' \
+    printf 'verified benchmark=%s adapter_schema_file=%s baseline=%s output=%s stages=%s repetitions=%s terminals=%s scale_value=%s warmup_seconds=%s duration_seconds=%s mix=%s rate=%s drain_timeout_seconds=%s status_timeout_seconds=%s high_water_threshold_percent=%s loader_batch_size=%s loader_timestamp_utc=%s redis_maxmemory_bytes=%s bootstrap_scan_max_rows=%s bootstrap_scan_max_input_bytes=%s bootstrap_scan_max_canonical_bytes=%s monitor_assembler_active_transactions=%s monitor_assembler_events_per_transaction=%s monitor_assembler_active_bytes=%s monitor_assembler_completed_transactions=%s monitor_assembler_retained_identity_bytes=%s monitor_pending_client_records=%s monitor_pending_client_bytes=%s monitor_pending_cdc_slots=%s monitor_pending_cdc_bytes=%s monitor_retained_identity_records=%s monitor_retained_identity_bytes=%s monitor_events_per_transaction=%s monitor_bootstrap_state_rows=%s monitor_bootstrap_state_bytes=%s monitor_checker_state_bytes=%s output_max_bytes=%s\n' \
+      "$BENCHMARK" "$BLACKBOX_ADAPTER_SCHEMA_FILE" \
       "$BASELINE_HEAD" "$OUTPUT_ROOT" "$STAGE_ROSTER" \
-      "$LOADER_BATCH_SIZE" \
-      "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
+      "$REPETITIONS" "$TERMINALS" "$SCALE_FACTOR" "$WARMUP_SECONDS" \
+      "$DURATION_SECONDS" "$TRANSACTION_MIX" "$RATE" \
+      "$DRAIN_TIMEOUT_SECONDS" "$STATUS_TIMEOUT_SECONDS" \
+      "$HIGH_WATER_THRESHOLD_PERCENT" "$LOADER_BATCH_SIZE" "$LOADER_TIMESTAMP_UTC" \
+      "$REDIS_MAXMEMORY_BYTES" \
+      "$BLACKBOX_BOOTSTRAP_MAX_ROWS" "$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
+      "$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES" \
+      "$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS" \
+      "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION" \
+      "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES" \
+      "$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS" \
+      "$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES" \
+      "$MONITOR_MAX_PENDING_CLIENT_RECORDS" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
+      "$MONITOR_MAX_PENDING_CDC_SLOTS" "$MONITOR_MAX_PENDING_CDC_BYTES" \
+      "$MONITOR_MAX_RETAINED_IDENTITY_RECORDS" \
       "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
+      "$MONITOR_MAX_EVENTS_PER_TRANSACTION" \
       "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
+      "$MONITOR_MAX_CHECKER_STATE_BYTES" \
       "$OUTPUT_MAX_BYTES"
     return 0
   fi
-
   mkdir -p "$OUTPUT_ROOT"
   start_output_guard
   write_system_provenance "$OUTPUT_ROOT/provenance"
@@ -1835,7 +2310,7 @@ main() {
 
   local repetition position offset index stage
   for (( repetition = 1; repetition <= REPETITIONS; repetition++ )); do
-    offset=$(( (RANDOM_SEED + repetition - 1) % ${#STAGES[@]} ))
+    offset=$(( ((RANDOM_SEED % ${#STAGES[@]}) + ${#STAGES[@]} + repetition - 1) % ${#STAGES[@]} ))
     for (( position = 1; position <= ${#STAGES[@]}; position++ )); do
       index=$(( (offset + position - 1) % ${#STAGES[@]} ))
       stage=${STAGES[$index]}

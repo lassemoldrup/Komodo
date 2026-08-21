@@ -279,27 +279,60 @@ set -euo pipefail
 trap 'echo "monitor:stop" >>"$EVENT_LOG"; exit 0' TERM INT
 processing_mode=audited
 metrics_output=
+assembler_active_transactions=1024
+assembler_events_per_transaction=100000
+assembler_active_bytes=268435456
+assembler_completed_transactions=10000000
+assembler_retained_identity_bytes=268435456
+pending_client_records=1000000
 pending_client_bytes=268435456
+pending_cdc_slots=1000000
+pending_cdc_bytes=268435456
+retained_identity_records=10000000
 retained_identity_bytes=536870912
+events_per_transaction=101000
 bootstrap_state_rows=10000000
 bootstrap_state_bytes=268435456
+checker_state_bytes=536870912
 while (( $# > 0 )); do
   case "$1" in
     --processing-mode) processing_mode=$2; shift 2 ;;
     --metrics-output) metrics_output=$2; shift 2 ;;
+    --max-assembler-active-transactions) assembler_active_transactions=$2; shift 2 ;;
+    --max-assembler-events-per-transaction) assembler_events_per_transaction=$2; shift 2 ;;
+    --max-assembler-active-bytes) assembler_active_bytes=$2; shift 2 ;;
+    --max-assembler-completed-transactions) assembler_completed_transactions=$2; shift 2 ;;
+    --max-assembler-retained-identity-bytes) assembler_retained_identity_bytes=$2; shift 2 ;;
+    --max-pending-client-records) pending_client_records=$2; shift 2 ;;
     --max-pending-client-bytes) pending_client_bytes=$2; shift 2 ;;
+    --max-pending-cdc-slots) pending_cdc_slots=$2; shift 2 ;;
+    --max-pending-cdc-bytes) pending_cdc_bytes=$2; shift 2 ;;
+    --max-retained-identity-records) retained_identity_records=$2; shift 2 ;;
     --max-retained-identity-bytes) retained_identity_bytes=$2; shift 2 ;;
+    --max-events-per-transaction) events_per_transaction=$2; shift 2 ;;
     --max-bootstrap-state-rows) bootstrap_state_rows=$2; shift 2 ;;
     --max-bootstrap-state-bytes) bootstrap_state_bytes=$2; shift 2 ;;
+    --max-checker-state-bytes) checker_state_bytes=$2; shift 2 ;;
     *) echo "unexpected monitor argument: $1" >&2; exit 2 ;;
   esac
 done
 echo 'monitor:start' >>"$EVENT_LOG"
 echo "monitor:mode:$processing_mode" >>"$EVENT_LOG"
+echo "monitor:assembler-active-transactions:$assembler_active_transactions" >>"$EVENT_LOG"
+echo "monitor:assembler-events-per-transaction:$assembler_events_per_transaction" >>"$EVENT_LOG"
+echo "monitor:assembler-active-bytes:$assembler_active_bytes" >>"$EVENT_LOG"
+echo "monitor:assembler-completed-transactions:$assembler_completed_transactions" >>"$EVENT_LOG"
+echo "monitor:assembler-retained-identity-bytes:$assembler_retained_identity_bytes" >>"$EVENT_LOG"
+echo "monitor:pending-client-records:$pending_client_records" >>"$EVENT_LOG"
 echo "monitor:pending-client-bytes:$pending_client_bytes" >>"$EVENT_LOG"
+echo "monitor:pending-cdc-slots:$pending_cdc_slots" >>"$EVENT_LOG"
+echo "monitor:pending-cdc-bytes:$pending_cdc_bytes" >>"$EVENT_LOG"
+echo "monitor:retained-identity-records:$retained_identity_records" >>"$EVENT_LOG"
 echo "monitor:retained-identity-bytes:$retained_identity_bytes" >>"$EVENT_LOG"
+echo "monitor:events-per-transaction:$events_per_transaction" >>"$EVENT_LOG"
 echo "monitor:bootstrap-state-rows:$bootstrap_state_rows" >>"$EVENT_LOG"
 echo "monitor:bootstrap-state-bytes:$bootstrap_state_bytes" >>"$EVENT_LOG"
+echo "monitor:checker-state-bytes:$checker_state_bytes" >>"$EVENT_LOG"
 while ! grep -q '^fence:END_FENCE$' "$EVENT_LOG"; do
   sleep 0.05
 done
@@ -556,10 +589,21 @@ run_case() {
       BLACKBOX_MONITOR_COMMAND="$case_root/bin/monitor" \
       BLACKBOX_PROCESSING_MODE="$processing_mode" \
       BLACKBOX_MONITOR_METRICS_PATH="$metrics_path" \
+      BLACKBOX_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS="${TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS:-}" \
+      BLACKBOX_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION="${TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION:-}" \
+      BLACKBOX_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES="${TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES:-}" \
+      BLACKBOX_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS="${TEST_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS:-}" \
+      BLACKBOX_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES="${TEST_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES:-}" \
+      BLACKBOX_MONITOR_MAX_PENDING_CLIENT_RECORDS="${TEST_MONITOR_MAX_PENDING_CLIENT_RECORDS:-}" \
       BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$pending_client_bytes" \
+      BLACKBOX_MONITOR_MAX_PENDING_CDC_SLOTS="${TEST_MONITOR_MAX_PENDING_CDC_SLOTS:-}" \
+      BLACKBOX_MONITOR_MAX_PENDING_CDC_BYTES="${TEST_MONITOR_MAX_PENDING_CDC_BYTES:-}" \
+      BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_RECORDS="${TEST_MONITOR_MAX_RETAINED_IDENTITY_RECORDS:-}" \
       BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$retained_identity_bytes" \
+      BLACKBOX_MONITOR_MAX_EVENTS_PER_TRANSACTION="${TEST_MONITOR_MAX_EVENTS_PER_TRANSACTION:-}" \
       BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_ROWS="${bootstrap_state_rows:-10000000}" \
       BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_BYTES="${bootstrap_state_bytes:-268435456}" \
+      BLACKBOX_MONITOR_MAX_CHECKER_STATE_BYTES="${TEST_MONITOR_MAX_CHECKER_STATE_BYTES:-}" \
       BLACKBOX_BENCHMARK="$benchmark" \
       BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="${EXPECTED_REDIS_MAXMEMORY_BYTES:-}" \
       BLACKBOX_RUN_ID_PATH="$run_id_path" \
@@ -675,19 +719,63 @@ if grep -Eq 'PASS|VIOLATION|INVALID' "$CASE_ROOT/stdout" "$CASE_ROOT/stderr"; th
 fi
 
 export EXPECTED_REDIS_MAXMEMORY_BYTES=8589934592
+export TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS=111
+export TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION=112
+export TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES=113
+export TEST_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=114
+export TEST_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=115
+export TEST_MONITOR_MAX_PENDING_CLIENT_RECORDS=116
+export TEST_MONITOR_MAX_PENDING_CDC_SLOTS=117
+export TEST_MONITOR_MAX_PENDING_CDC_BYTES=118
+export TEST_MONITOR_MAX_RETAINED_IDENTITY_RECORDS=119
+export TEST_MONITOR_MAX_EVENTS_PER_TRANSACTION=120
+export TEST_MONITOR_MAX_CHECKER_STATE_BYTES=121
 run_case capacity_override 0 0 0 0 0 0 '' join-only 0 2147483648 1073741824 \
   ycsb 128 0 0 1000000 1073741824
 unset EXPECTED_REDIS_MAXMEMORY_BYTES
+unset TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS
+unset TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION
+unset TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES
+unset TEST_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS
+unset TEST_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES
+unset TEST_MONITOR_MAX_PENDING_CLIENT_RECORDS
+unset TEST_MONITOR_MAX_PENDING_CDC_SLOTS
+unset TEST_MONITOR_MAX_PENDING_CDC_BYTES
+unset TEST_MONITOR_MAX_RETAINED_IDENTITY_RECORDS
+unset TEST_MONITOR_MAX_EVENTS_PER_TRANSACTION
+unset TEST_MONITOR_MAX_CHECKER_STATE_BYTES
 [[ $CASE_STATUS == 0 ]] ||
   fail "capacity override lifecycle exited $CASE_STATUS: $(cat "$CASE_ROOT/stderr")"
+grep -q '^monitor:assembler-active-transactions:111$' "$CASE_LOG" ||
+  fail 'coordinator did not pass assembler active-transaction capacity'
+grep -q '^monitor:assembler-events-per-transaction:112$' "$CASE_LOG" ||
+  fail 'coordinator did not pass assembler event capacity'
+grep -q '^monitor:assembler-active-bytes:113$' "$CASE_LOG" ||
+  fail 'coordinator did not pass assembler active-byte capacity'
+grep -q '^monitor:assembler-completed-transactions:114$' "$CASE_LOG" ||
+  fail 'coordinator did not pass assembler completed-transaction capacity'
+grep -q '^monitor:assembler-retained-identity-bytes:115$' "$CASE_LOG" ||
+  fail 'coordinator did not pass assembler identity capacity'
+grep -q '^monitor:pending-client-records:116$' "$CASE_LOG" ||
+  fail 'coordinator did not pass pending-client record capacity'
 grep -q '^monitor:pending-client-bytes:1073741824$' "$CASE_LOG" ||
   fail 'coordinator did not pass the pending-client byte override'
+grep -q '^monitor:pending-cdc-slots:117$' "$CASE_LOG" ||
+  fail 'coordinator did not pass pending-CDC slot capacity'
+grep -q '^monitor:pending-cdc-bytes:118$' "$CASE_LOG" ||
+  fail 'coordinator did not pass pending-CDC byte capacity'
+grep -q '^monitor:retained-identity-records:119$' "$CASE_LOG" ||
+  fail 'coordinator did not pass retained-identity record capacity'
 grep -q '^monitor:retained-identity-bytes:2147483648$' "$CASE_LOG" ||
   fail 'coordinator did not pass the retained-identity byte override'
+grep -q '^monitor:events-per-transaction:120$' "$CASE_LOG" ||
+  fail 'coordinator did not pass per-transaction event capacity'
 grep -q '^monitor:bootstrap-state-rows:1000000$' "$CASE_LOG" ||
   fail 'coordinator did not pass the bootstrap-state row override'
 grep -q '^monitor:bootstrap-state-bytes:1073741824$' "$CASE_LOG" ||
   fail 'coordinator did not pass the bootstrap-state byte override'
+grep -q '^monitor:checker-state-bytes:121$' "$CASE_LOG" ||
+  fail 'coordinator did not pass checker-state capacity'
 [[ $(jq -r '.limits.joiner.max_pending_client_bytes' \
   "$CASE_ROOT/monitor-metrics.json") == 1073741824 ]] ||
   fail 'pending-client capacity override is absent from monitor provenance'
@@ -700,6 +788,28 @@ grep -q '^monitor:bootstrap-state-bytes:1073741824$' "$CASE_LOG" ||
 [[ $(jq -r '.limits.joiner.max_bootstrap_state_bytes' \
   "$CASE_ROOT/monitor-metrics.json") == 1073741824 ]] ||
   fail 'bootstrap-state byte override is absent from monitor provenance'
+
+invalid_limit_index=0
+for invalid_limit_name in \
+  TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS \
+  TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION \
+  TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES \
+  TEST_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS \
+  TEST_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES \
+  TEST_MONITOR_MAX_PENDING_CLIENT_RECORDS \
+  TEST_MONITOR_MAX_PENDING_CDC_SLOTS \
+  TEST_MONITOR_MAX_PENDING_CDC_BYTES \
+  TEST_MONITOR_MAX_RETAINED_IDENTITY_RECORDS \
+  TEST_MONITOR_MAX_EVENTS_PER_TRANSACTION \
+  TEST_MONITOR_MAX_CHECKER_STATE_BYTES; do
+  invalid_limit_index=$((invalid_limit_index + 1))
+  export "$invalid_limit_name=0"
+  run_case "invalid_monitor_limit_$invalid_limit_index" 0
+  unset "$invalid_limit_name"
+  [[ $CASE_STATUS != 0 ]] || fail "$invalid_limit_name accepted zero"
+  grep -q 'must be a positive decimal count or byte limit' "$CASE_ROOT/stderr" ||
+    fail "$invalid_limit_name lacked a stable validation diagnostic"
+done
 
 run_case join_only_loader_failure 0 0 9 0 0 0 '' join-only
 [[ $CASE_STATUS == 1 ]] ||

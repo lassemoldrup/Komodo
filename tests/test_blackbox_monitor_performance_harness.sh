@@ -63,13 +63,35 @@ if "$RUNNER" --corpus-dir "$PLACEHOLDER_CORPUS" --output-root "$PLACEHOLDER_OUTP
   --output-max-bytes 107374182401 --print-stage-order >/dev/null 2>&1; then
   fail "output limit above 100 GiB was accepted"
 fi
-for option in --monitor-bootstrap-state-rows --monitor-bootstrap-state-bytes; do
+for option in \
+  --monitor-assembler-active-transactions \
+  --monitor-assembler-events-per-transaction \
+  --monitor-assembler-active-bytes \
+  --monitor-assembler-completed-transactions \
+  --monitor-assembler-retained-identity-bytes \
+  --monitor-pending-client-records \
+  --monitor-pending-client-bytes \
+  --monitor-pending-cdc-slots \
+  --monitor-pending-cdc-bytes \
+  --monitor-retained-identity-records \
+  --monitor-retained-identity-bytes \
+  --monitor-events-per-transaction \
+  --monitor-bootstrap-state-rows \
+  --monitor-bootstrap-state-bytes \
+  --monitor-checker-state-bytes; do
   for invalid in 0 9223372036854775808; do
     if "$RUNNER" --corpus-dir "$PLACEHOLDER_CORPUS" --output-root "$PLACEHOLDER_OUTPUT" \
         "$option" "$invalid" --print-stage-order >/dev/null 2>&1; then
       fail "$option accepted $invalid"
     fi
   done
+done
+for invalid in 0 101; do
+  if "$RUNNER" --corpus-dir "$PLACEHOLDER_CORPUS" --output-root "$PLACEHOLDER_OUTPUT" \
+      --maximum-capacity-utilization-percent "$invalid" \
+      --print-stage-order >/dev/null 2>&1; then
+    fail "capacity utilization threshold accepted $invalid"
+  fi
 done
 
 "$RUNNER" --help 2>&1 | grep -q -- '--expected-duration-seconds' ||
@@ -78,6 +100,14 @@ done
   fail "help omits the monitor bootstrap-state row limit"
 "$RUNNER" --help 2>&1 | grep -q -- '--monitor-bootstrap-state-bytes' ||
   fail "help omits the monitor bootstrap-state byte limit"
+"$RUNNER" --help 2>&1 | grep -q -- '--monitor-assembler-active-transactions' ||
+  fail "help omits assembler capacities"
+"$RUNNER" --help 2>&1 | grep -q -- '--monitor-pending-cdc-slots' ||
+  fail "help omits pending CDC capacities"
+"$RUNNER" --help 2>&1 | grep -q -- '--monitor-checker-state-bytes' ||
+  fail "help omits checker capacity"
+"$RUNNER" --help 2>&1 | grep -q -- '--maximum-capacity-utilization-percent' ||
+  fail "help omits capacity utilization threshold"
 
 # shellcheck source=scripts/run_blackbox_monitor_performance.sh
 . "$RUNNER"
