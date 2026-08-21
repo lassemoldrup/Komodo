@@ -95,6 +95,11 @@ struct TransactionJoinerMetrics {
   std::uint64_t joined_read_events = 0;
   std::uint64_t joined_write_events = 0;
   std::uint64_t joined_ordered_events = 0;
+  // Active matching/release time for successfully joined workload
+  // transactions. Time inside CheckerAdapter is explicitly excluded, and the
+  // maximum is per joined transaction.
+  std::uint64_t workload_processing_total_nanoseconds = 0;
+  std::uint64_t workload_processing_max_nanoseconds = 0;
   std::uint64_t client_first_matches = 0;
   std::uint64_t cdc_first_matches = 0;
   std::size_t pending_client_records = 0;

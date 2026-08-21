@@ -380,7 +380,8 @@ public:
           .max_mapped_identity_records =
               config_.limits.max_retained_identity_records,
           .max_mapped_identity_bytes =
-              config_.limits.max_retained_identity_bytes});
+              config_.limits.max_retained_identity_bytes,
+          .monotonic_clock_nanoseconds = monotonic_clock_nanoseconds_});
     }
     expected_sessions_.insert(config_.expected_session_ids.begin(),
                               config_.expected_session_ids.end());
@@ -523,6 +524,10 @@ public:
         .joined_read_events = joined_read_events_,
         .joined_write_events = joined_write_events_,
         .joined_ordered_events = joined_ordered_events_,
+        .workload_processing_total_nanoseconds =
+            workload_processing_total_nanoseconds_,
+        .workload_processing_max_nanoseconds =
+            workload_processing_max_nanoseconds_,
         .client_first_matches = client_first_matches_,
         .cdc_first_matches = cdc_first_matches_,
         .pending_client_records = client_by_correlation_.size(),
@@ -1326,6 +1331,19 @@ private:
     drain_max_nanoseconds_ = std::max(drain_max_nanoseconds_, duration);
   }
 
+  [[nodiscard]] static std::uint64_t
+  elapsedNanoseconds(const std::uint64_t started,
+                     const std::uint64_t finished) noexcept {
+    return finished >= started ? finished - started : 0U;
+  }
+
+  void recordWorkloadProcessing(const std::uint64_t duration) noexcept {
+    workload_processing_total_nanoseconds_ =
+        saturatingAdd(workload_processing_total_nanoseconds_, duration);
+    workload_processing_max_nanoseconds_ =
+        std::max(workload_processing_max_nanoseconds_, duration);
+  }
+
   void drainReadyPrefix() {
     const auto started = monotonic_clock_nanoseconds_();
     if (drain_invocations_ != std::numeric_limits<std::uint64_t>::max()) {
@@ -1417,6 +1435,7 @@ private:
         fail(MonitorErrorCode::FenceOrderInvalid,
              "workload CDC transaction is outside the workload prefix");
       }
+      const auto workload_processing_started = monotonic_clock_nanoseconds_();
       const auto correlation = *head.correlation_id;
       const auto client = client_by_correlation_.find(correlation);
       if (client == client_by_correlation_.end()) {
@@ -1428,9 +1447,15 @@ private:
       requireJoinedEventCapacity(client->second.transaction.reads.size(),
                                  head.writes.size());
       closeMissingClientHeadWait(correlation);
+      auto joiner_processing_nanoseconds = std::uint64_t{0};
+      auto joiner_processing_resumed = workload_processing_started;
       if (checker_.has_value()) {
+        const auto joiner_processing_paused = monotonic_clock_nanoseconds_();
+        joiner_processing_nanoseconds = elapsedNanoseconds(
+            workload_processing_started, joiner_processing_paused);
         checker_->consumeWorkload(next_checker_commit_seq_,
                                   client->second.transaction, head.writes);
+        joiner_processing_resumed = monotonic_clock_nanoseconds_();
       }
       ++next_checker_commit_seq_;
       ++joined_workload_transactions_;
@@ -1443,6 +1468,12 @@ private:
       client_by_correlation_.erase(client);
       pending_cdc_correlations_.erase(correlation);
       popCdcHead();
+      const auto workload_processing_finished = monotonic_clock_nanoseconds_();
+      joiner_processing_nanoseconds =
+          saturatingAdd(joiner_processing_nanoseconds,
+                        elapsedNanoseconds(joiner_processing_resumed,
+                                           workload_processing_finished));
+      recordWorkloadProcessing(joiner_processing_nanoseconds);
     }
   }
 
@@ -1486,6 +1517,8 @@ private:
   std::uint64_t joined_read_events_ = 0;
   std::uint64_t joined_write_events_ = 0;
   std::uint64_t joined_ordered_events_ = 0;
+  std::uint64_t workload_processing_total_nanoseconds_ = 0;
+  std::uint64_t workload_processing_max_nanoseconds_ = 0;
   std::uint64_t released_bootstrap_write_events_ = 0;
   std::uint64_t released_ordered_events_ = 0;
   std::uint64_t bootstrap_transactions_ = 0;

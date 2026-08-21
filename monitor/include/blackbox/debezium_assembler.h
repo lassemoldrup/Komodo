@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -34,6 +35,7 @@ struct DebeziumAssemblerConfig {
   std::size_t max_active_bytes = 256U * 1024U * 1024U;
   std::size_t max_completed_transactions = 10000000;
   std::size_t max_retained_identity_bytes = 256U * 1024U * 1024U;
+  std::function<std::uint64_t()> monotonic_clock_nanoseconds = {};
 };
 
 struct DebeziumAssemblerMetrics {
@@ -49,6 +51,14 @@ struct DebeziumAssemblerMetrics {
   std::uint64_t completed_workload_transactions = 0;
   std::uint64_t raw_row_events = 0;
   std::uint64_t normalized_write_events = 0;
+  std::uint64_t workload_normalized_write_events = 0;
+  // Successful accept() calls only. Workload processing aggregates the
+  // BEGIN, row, and END calls for transactions ultimately classified as
+  // WorkloadMarked; its maximum is per completed workload transaction.
+  std::uint64_t accept_total_nanoseconds = 0;
+  std::uint64_t accept_max_nanoseconds = 0;
+  std::uint64_t workload_processing_total_nanoseconds = 0;
+  std::uint64_t workload_processing_max_nanoseconds = 0;
   std::size_t active_transactions = 0;
   std::size_t active_transactions_high_water = 0;
   std::size_t observed_events_per_transaction_high_water = 0;

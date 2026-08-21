@@ -462,11 +462,34 @@ void testDrainDurationClock() {
   joiner.processEndFence();
   const auto metrics = joiner.metrics();
   BLACKBOX_CHECK(metrics.drain_invocations > 0U);
-  BLACKBOX_CHECK(metrics.drain_total_nanoseconds ==
+  BLACKBOX_CHECK(metrics.drain_total_nanoseconds >=
                  metrics.drain_invocations * 10U);
-  BLACKBOX_CHECK(metrics.drain_max_nanoseconds == 10U);
+  BLACKBOX_CHECK(metrics.drain_max_nanoseconds >= 10U);
+  BLACKBOX_CHECK(metrics.workload_processing_total_nanoseconds == 10U);
+  BLACKBOX_CHECK(metrics.workload_processing_max_nanoseconds == 10U);
   BLACKBOX_CHECK(metrics.end_fence_drain_current_nanoseconds == 0U);
   BLACKBOX_CHECK(metrics.end_fence_drain_nanoseconds > 0U);
+}
+
+void testWorkloadComponentTimingExcludesChecker() {
+  std::uint64_t now = 0U;
+  auto joiner_config = config();
+  joiner_config.monotonic_clock_nanoseconds = [&] {
+    now += 10U;
+    return now;
+  };
+  TransactionJoiner joiner(std::move(joiner_config));
+  openWorkload(joiner);
+  joiner.acceptClientPayload(clientPayload(session_one, 1U, 1U, 1U));
+  joiner.acceptCdcTransaction(workload(2U, session_one, 1U));
+
+  const auto metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.joined_workload_transactions == 1U);
+  BLACKBOX_CHECK(metrics.workload_processing_total_nanoseconds == 20U);
+  BLACKBOX_CHECK(metrics.workload_processing_max_nanoseconds == 20U);
+  BLACKBOX_CHECK(metrics.checker.workload_transactions == 1U);
+  BLACKBOX_CHECK(metrics.checker.workload_consume_total_nanoseconds == 10U);
+  BLACKBOX_CHECK(metrics.checker.workload_consume_max_nanoseconds == 10U);
 }
 
 void testOrderedJoiningWithoutCheckerExecution() {
@@ -1120,6 +1143,7 @@ int runTransactionJoinerTests() {
   testStrictReadyPrefixAndEndDeferral();
   testHeadWaitClockAndCombinedJoinBufferPeak();
   testDrainDurationClock();
+  testWorkloadComponentTimingExcludesChecker();
   testOrderedJoiningWithoutCheckerExecution();
   testEndFenceCannotPassMissingClient();
   testBootstrapGateAndAnchorLowerBound();

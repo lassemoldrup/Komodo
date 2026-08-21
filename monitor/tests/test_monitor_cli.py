@@ -510,6 +510,11 @@ def check_join_only_early_failure_artifact(executable):
             "active_assembly_high_water_bytes",
             "retained_identity_high_water_records",
             "retained_identity_high_water_bytes",
+            "workload_normalized_write_events",
+            "accept_total_nanoseconds",
+            "accept_max_nanoseconds",
+            "workload_processing_total_nanoseconds",
+            "workload_processing_max_nanoseconds",
         } <= measurement["assembler"].keys()
         assert {
             "pending_client_high_water_records",
@@ -528,11 +533,17 @@ def check_join_only_early_failure_artifact(executable):
             "drain_total_nanoseconds",
             "drain_max_nanoseconds",
             "end_fence_drain_nanoseconds",
+            "workload_processing_total_nanoseconds",
+            "workload_processing_max_nanoseconds",
         } <= measurement["joiner"].keys()
         assert {
             "mapped_identity_high_water_records",
             "mapped_identity_high_water_bytes",
             "events_per_transaction_high_water",
+            "workload_read_events",
+            "workload_write_events",
+            "workload_consume_total_nanoseconds",
+            "workload_consume_max_nanoseconds",
         } <= measurement["checker"].keys()
         assert "peak_retained_state_bytes" in measurement["checker"]["engine"]
         assert_no_audited_result(measurement)

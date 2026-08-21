@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -27,6 +28,21 @@ namespace {
 using Json = nlohmann::json;
 
 constexpr std::uint64_t kMaxJsonSafeInteger = 9007199254740991ULL;
+
+[[nodiscard]] std::uint64_t steadyClockNanoseconds() noexcept {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+[[nodiscard]] constexpr std::uint64_t
+saturatingAdd(const std::uint64_t current,
+              const std::uint64_t additional) noexcept {
+  return additional > std::numeric_limits<std::uint64_t>::max() - current
+             ? std::numeric_limits<std::uint64_t>::max()
+             : current + additional;
+}
 
 struct StreamId {
   std::uint64_t milliseconds = 0;
@@ -168,6 +184,10 @@ class DebeziumTxnAssembler::Impl final {
 public:
   explicit Impl(DebeziumAssemblerConfig config) : config_(std::move(config)) {
     validateConfig();
+    monotonic_clock_nanoseconds_ = config_.monotonic_clock_nanoseconds;
+    if (!monotonic_clock_nanoseconds_) {
+      monotonic_clock_nanoseconds_ = steadyClockNanoseconds;
+    }
   }
 
   [[nodiscard]] std::optional<CdcTransaction>
@@ -186,6 +206,9 @@ public:
       rememberFailure(error);
       throw error;
     }
+    const auto accept_started = monotonic_clock_nanoseconds_();
+    current_timed_structural_id_.reset();
+    completed_processing_before_current_ = 0U;
     try {
       if (record.key_json.size() > config_.max_active_bytes ||
           record.envelope_json.size() >
@@ -202,24 +225,23 @@ public:
       }
       const bool has_status = envelope.contains("status");
       const bool has_operation = envelope.contains("op");
+      std::optional<CdcTransaction> completed;
       if (has_status == has_operation) {
         if (!has_status && envelope.contains("ddl")) {
           acceptStartupSchemaSnapshot(key, envelope);
-          recordAcceptedRaw(record);
-          return std::nullopt;
+        } else {
+          fail(CdcErrorCode::CdcRecordMalformed,
+               "Debezium record must be exactly one of transaction metadata "
+               "or row data");
         }
-        fail(CdcErrorCode::CdcRecordMalformed,
-             "Debezium record must be exactly one of transaction metadata or "
-             "row data");
+      } else if (has_status) {
+        completed = acceptTransactionMetadata(record, key, envelope);
+      } else {
+        acceptRow(record, key, envelope);
       }
-      if (has_status) {
-        auto completed = acceptTransactionMetadata(record, key, envelope);
-        recordAcceptedRaw(record);
-        return completed;
-      }
-      acceptRow(record, key, envelope);
       recordAcceptedRaw(record);
-      return std::nullopt;
+      recordAcceptProcessing(accept_started, completed);
+      return completed;
     } catch (const CdcAssemblerError &error) {
       rememberFailure(error);
       throw;
@@ -321,6 +343,13 @@ public:
         .completed_workload_transactions = completed_workload_transactions_,
         .raw_row_events = raw_row_events_,
         .normalized_write_events = normalized_write_events_,
+        .workload_normalized_write_events = workload_normalized_write_events_,
+        .accept_total_nanoseconds = accept_total_nanoseconds_,
+        .accept_max_nanoseconds = accept_max_nanoseconds_,
+        .workload_processing_total_nanoseconds =
+            workload_processing_total_nanoseconds_,
+        .workload_processing_max_nanoseconds =
+            workload_processing_max_nanoseconds_,
         .active_transactions = active_.size(),
         .active_transactions_high_water = active_transactions_high_water_,
         .observed_events_per_transaction_high_water =
@@ -371,6 +400,7 @@ private:
     std::vector<RowEvent> rows;
     std::unordered_map<std::string, std::uint64_t> table_counts;
     std::size_t raw_bytes = 0;
+    std::uint64_t processing_nanoseconds = 0;
   };
 
   struct Failure {
@@ -403,6 +433,36 @@ private:
         accepted_raw_bytes_,
         static_cast<std::uint64_t>(record.key_json.size()) +
             static_cast<std::uint64_t>(record.envelope_json.size()));
+  }
+
+  void recordAcceptProcessing(
+      const std::uint64_t started,
+      const std::optional<CdcTransaction> &completed) noexcept {
+    const auto finished = monotonic_clock_nanoseconds_();
+    const auto duration = finished >= started ? finished - started : 0U;
+    accept_total_nanoseconds_ =
+        saturatingAdd(accept_total_nanoseconds_, duration);
+    accept_max_nanoseconds_ = std::max(accept_max_nanoseconds_, duration);
+
+    if (completed.has_value()) {
+      const auto transaction_duration =
+          saturatingAdd(completed_processing_before_current_, duration);
+      if (completed->kind == CdcTransactionKind::WorkloadMarked) {
+        workload_processing_total_nanoseconds_ = saturatingAdd(
+            workload_processing_total_nanoseconds_, transaction_duration);
+        workload_processing_max_nanoseconds_ = std::max(
+            workload_processing_max_nanoseconds_, transaction_duration);
+      }
+      return;
+    }
+    if (!current_timed_structural_id_.has_value()) {
+      return;
+    }
+    const auto active = active_.find(*current_timed_structural_id_);
+    if (active != active_.end()) {
+      active->second.processing_nanoseconds =
+          saturatingAdd(active->second.processing_nanoseconds, duration);
+    }
   }
 
   void rememberFailure(const CdcAssemblerError &error) {
@@ -1078,6 +1138,7 @@ private:
       transaction.begin_stream_id = record.stream_id;
       transaction.raw_bytes = raw_bytes;
       active_.emplace(envelope_id, std::move(transaction));
+      current_timed_structural_id_ = envelope_id;
       active_transactions_high_water_ =
           std::max(active_transactions_high_water_, active_.size());
       ++begin_metadata_records_;
@@ -1097,6 +1158,7 @@ private:
       fail(CdcErrorCode::CdcBeginMissing,
            "Debezium END has no matching active BEGIN");
     }
+    current_timed_structural_id_ = envelope_id;
     auto completed = completeTransaction(active, envelope, record.stream_id);
     ++end_metadata_records_;
     return completed;
@@ -1208,6 +1270,7 @@ private:
       fail(CdcErrorCode::CdcBeginMissing,
            "row event has no matching active Debezium BEGIN");
     }
+    current_timed_structural_id_ = transaction_id;
 
     QualifiedTable table;
     validateSource(member(envelope, "source", "row envelope"), transaction_id,
@@ -1351,6 +1414,8 @@ private:
     const auto raw_row_count = active->second.rows.size();
     const auto normalized_write_count = assembled.writes.size();
     const auto classification = assembled.kind;
+    completed_processing_before_current_ =
+        active->second.processing_nanoseconds;
     reserveRetainedIdentityBytes(structural_id.size());
     active_.erase(active);
     active_bytes_ -= released_bytes;
@@ -1372,6 +1437,9 @@ private:
       break;
     case CdcTransactionKind::WorkloadMarked:
       ++completed_workload_transactions_;
+      workload_normalized_write_events_ =
+          saturatingAdd(workload_normalized_write_events_,
+                        static_cast<std::uint64_t>(normalized_write_count));
       break;
     }
     return assembled;
@@ -1804,6 +1872,7 @@ private:
   }
 
   DebeziumAssemblerConfig config_;
+  std::function<std::uint64_t()> monotonic_clock_nanoseconds_;
   std::unordered_map<std::string, QualifiedTable> application_tables_;
   QualifiedTable marker_table_;
   QualifiedTable fence_table_;
@@ -1827,6 +1896,11 @@ private:
   std::uint64_t completed_workload_transactions_ = 0;
   std::uint64_t raw_row_events_ = 0;
   std::uint64_t normalized_write_events_ = 0;
+  std::uint64_t workload_normalized_write_events_ = 0;
+  std::uint64_t accept_total_nanoseconds_ = 0;
+  std::uint64_t accept_max_nanoseconds_ = 0;
+  std::uint64_t workload_processing_total_nanoseconds_ = 0;
+  std::uint64_t workload_processing_max_nanoseconds_ = 0;
   std::size_t active_transactions_high_water_ = 0;
   std::size_t observed_events_per_transaction_high_water_ = 0;
   std::size_t active_bytes_ = 0;
@@ -1837,6 +1911,8 @@ private:
   std::size_t startup_schema_snapshot_records_ = 0;
   std::size_t startup_schema_create_index_ = 0;
   std::optional<Failure> failure_;
+  std::optional<std::string> current_timed_structural_id_;
+  std::uint64_t completed_processing_before_current_ = 0;
   std::string current_stream_id_;
   bool saw_startup_schema_snapshot_ = false;
   bool startup_schema_snapshot_finished_ = false;

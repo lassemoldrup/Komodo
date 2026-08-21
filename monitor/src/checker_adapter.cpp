@@ -316,6 +316,11 @@ public:
         .write_events = write_events_,
         .consume_total_nanoseconds = consume_total_nanoseconds_,
         .consume_max_nanoseconds = consume_max_nanoseconds_,
+        .workload_read_events = workload_read_events_,
+        .workload_write_events = workload_write_events_,
+        .workload_consume_total_nanoseconds =
+            workload_consume_total_nanoseconds_,
+        .workload_consume_max_nanoseconds = workload_consume_max_nanoseconds_,
         .mapped_identity_records = mapped_identity_records_,
         .mapped_identity_bytes = mapped_identity_bytes_,
         .mapped_identity_high_water_records =
@@ -541,7 +546,8 @@ private:
   void recordConsumeMetrics(const std::size_t read_count,
                             const std::size_t write_count,
                             const std::uint64_t start_nanoseconds,
-                            const std::uint64_t end_nanoseconds) noexcept {
+                            const std::uint64_t end_nanoseconds,
+                            const bool workload) noexcept {
     const auto duration = end_nanoseconds >= start_nanoseconds
                               ? end_nanoseconds - start_nanoseconds
                               : 0U;
@@ -560,6 +566,16 @@ private:
     consume_total_nanoseconds_ =
         saturating_add(consume_total_nanoseconds_, duration);
     consume_max_nanoseconds_ = std::max(consume_max_nanoseconds_, duration);
+    if (workload) {
+      workload_read_events_ = saturating_add(
+          workload_read_events_, static_cast<std::uint64_t>(read_count));
+      workload_write_events_ = saturating_add(
+          workload_write_events_, static_cast<std::uint64_t>(write_count));
+      workload_consume_total_nanoseconds_ =
+          saturating_add(workload_consume_total_nanoseconds_, duration);
+      workload_consume_max_nanoseconds_ =
+          std::max(workload_consume_max_nanoseconds_, duration);
+    }
   }
 
   void consume(const std::uint64_t commit_seq,
@@ -598,7 +614,7 @@ private:
     const auto result = engine_.consume(metadata, events);
     const auto consume_end = monotonic_clock_nanoseconds_();
     recordConsumeMetrics(reads.size(), writes.size(), consume_start,
-                         consume_end);
+                         consume_end, external != nullptr);
     if (result.error.has_value()) {
       fail(checkerErrorCode(result.error->code, external != nullptr),
            std::string("SnapshotSOWWEngine rejected transaction: ") +
@@ -660,6 +676,10 @@ private:
   std::uint64_t write_events_ = 0;
   std::uint64_t consume_total_nanoseconds_ = 0;
   std::uint64_t consume_max_nanoseconds_ = 0;
+  std::uint64_t workload_read_events_ = 0;
+  std::uint64_t workload_write_events_ = 0;
+  std::uint64_t workload_consume_total_nanoseconds_ = 0;
+  std::uint64_t workload_consume_max_nanoseconds_ = 0;
   std::size_t mapped_identity_records_ = 0;
   std::size_t mapped_identity_bytes_ = 0;
   std::size_t mapped_identity_high_water_records_ = 0;

@@ -201,6 +201,10 @@ void testConsumeTimingAndEventCounters() {
   BLACKBOX_CHECK(metrics.write_events == 2U);
   BLACKBOX_CHECK(metrics.consume_total_nanoseconds == 43U);
   BLACKBOX_CHECK(metrics.consume_max_nanoseconds == 25U);
+  BLACKBOX_CHECK(metrics.workload_read_events == 2U);
+  BLACKBOX_CHECK(metrics.workload_write_events == 1U);
+  BLACKBOX_CHECK(metrics.workload_consume_total_nanoseconds == 7U);
+  BLACKBOX_CHECK(metrics.workload_consume_max_nanoseconds == 7U);
   BLACKBOX_CHECK(metrics.events_per_transaction_high_water == 3U);
   BLACKBOX_CHECK(metrics.mapped_identity_high_water_records ==
                  metrics.mapped_identity_records);

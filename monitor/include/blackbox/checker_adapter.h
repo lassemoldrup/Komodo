@@ -68,6 +68,12 @@ struct CheckerAdapterMetrics {
   std::uint64_t write_events = 0;
   std::uint64_t consume_total_nanoseconds = 0;
   std::uint64_t consume_max_nanoseconds = 0;
+  // Workload-only counters and time spent inside the checker engine consume
+  // call. Bootstrap and phase-anchor transactions are excluded.
+  std::uint64_t workload_read_events = 0;
+  std::uint64_t workload_write_events = 0;
+  std::uint64_t workload_consume_total_nanoseconds = 0;
+  std::uint64_t workload_consume_max_nanoseconds = 0;
   std::size_t mapped_identity_records = 0;
   std::size_t mapped_identity_bytes = 0;
   std::size_t mapped_identity_high_water_records = 0;

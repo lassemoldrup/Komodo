@@ -643,7 +643,13 @@ void checkMeasurementMetrics() {
   const auto captured =
       loadFixtureNamed("mariadb_debezium_3_6_1_full_lifecycle.json");
   const auto records = recordsFromFixture(captured);
-  DebeziumTxnAssembler assembler(assemblerConfig());
+  std::uint64_t now = 0U;
+  auto config = assemblerConfig();
+  config.monotonic_clock_nanoseconds = [&] {
+    now += 10U;
+    return now;
+  };
+  DebeziumTxnAssembler assembler(std::move(config));
   std::uint64_t expected_raw_bytes = 0U;
   for (const auto &record : records) {
     expected_raw_bytes += static_cast<std::uint64_t>(record.key_json.size());
@@ -667,6 +673,11 @@ void checkMeasurementMetrics() {
   BLACKBOX_CHECK(metrics.completed_workload_transactions == 7U);
   BLACKBOX_CHECK(metrics.raw_row_events == 23U);
   BLACKBOX_CHECK(metrics.normalized_write_events == 9U);
+  BLACKBOX_CHECK(metrics.workload_normalized_write_events == 7U);
+  BLACKBOX_CHECK(metrics.accept_total_nanoseconds == 550U);
+  BLACKBOX_CHECK(metrics.accept_max_nanoseconds == 10U);
+  BLACKBOX_CHECK(metrics.workload_processing_total_nanoseconds == 320U);
+  BLACKBOX_CHECK(metrics.workload_processing_max_nanoseconds == 70U);
   BLACKBOX_CHECK(metrics.active_transactions == 0U);
   BLACKBOX_CHECK(metrics.active_transactions_high_water == 1U);
   BLACKBOX_CHECK(metrics.observed_events_per_transaction_high_water == 5U);
