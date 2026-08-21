@@ -320,6 +320,35 @@ district snapshot Present read, while its workload CDC transaction remains
 marker-only; stock rows and aggregate-derived evidence are rejected by the
 focused acceptance validator.
 
+Run the standard one-warehouse/four-terminal mix and retain its bounded replay
+corpus with:
+
+```bash
+./tests/run_tpcc_full_mix_acceptance.sh \
+  --benchbase-dist /path/to/benchbase-mariadb \
+  --monitor-bin /path/to/blackbox_run_monitor \
+  --resource-exhaustion-metrics /path/to/recorded-invalid-monitor-metrics.json \
+  --output-dir /path/to/new-full-mix-output
+```
+
+The profile fixes weights `45,43,4,4,4`, requires positive results for every
+transaction type, validates all four sessions and all nine bootstrap tables,
+and accepts only reconciled `PASS` or checker-attributed `VIOLATION`. It records
+stream checksums and a size-bounded full CDC/client replay manifest. Run the
+required offline fail-closed injections against that capture with:
+
+```bash
+./tests/run_tpcc_full_mix_mutations.sh \
+  --corpus-dir /path/to/new-full-mix-output \
+  --monitor-bin /path/to/blackbox_run_monitor \
+  --output-dir /path/to/new-mutation-output
+```
+
+The mutation runner drops a client, a workload CDC transaction, and a workload
+CDC row, then injects a wrong JSON-typed client value and a RunManifest table
+roster mismatch. Every replay must end `INVALID`; aggregate, predicate,
+implicit-DML, and locking-read exclusions are not used as negative tests.
+
 ## Performance measurement
 
 Create the required detached, clean pre-instrumentation worktree once, from the

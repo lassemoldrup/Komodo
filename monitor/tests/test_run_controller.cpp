@@ -15,8 +15,11 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <numeric>
 #include <optional>
+#include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1334,6 +1337,343 @@ void testStockLevelFocusedReconciliationAndMalformedEvidence() {
   run_case(absent_district, FinalOutcome::Violation);
 }
 
+void testCapturedTpccFullMixAndStructuralFailures() {
+  enum class Mutation {
+    None,
+    DropClient,
+    DropCdc,
+    WrongTypedValue,
+    ResourceExhaustion,
+  };
+  struct Result {
+    FinalOutcome outcome = FinalOutcome::Invalid;
+    blackbox::ReconciliationSummary reconciliation;
+    blackbox::TransactionJoinerMetrics metrics;
+    std::vector<blackbox::RunDiagnostic> diagnostics;
+  };
+
+  const auto fixture = loadTpccTransactionFixture();
+  const auto client_fixture = loadTpccClientFixture();
+  const auto manifest = blackbox::ProtocolRecordParser{}.parseRunManifest(
+      client_fixture.at("run_manifest").dump());
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  BLACKBOX_REQUIRE(manifest.expected_session_ids.size() == 1U);
+  BLACKBOX_CHECK(manifest.expected_session_ids[0] == "tpcc/worker/1");
+  BLACKBOX_REQUIRE(manifest.application_table_allowlist.size() == 9U);
+  std::set<std::string> manifest_tables(
+      manifest.application_table_allowlist.begin(),
+      manifest.application_table_allowlist.end());
+  std::set<std::string> adapter_tables;
+  for (const auto &table : adapter.tables()) {
+    adapter_tables.emplace(table.name);
+  }
+  BLACKBOX_CHECK(manifest_tables == adapter_tables);
+  std::set<std::string> bootstrap_tables;
+  for (const auto &entry :
+       fixture.at("bootstrap_manifest").at("table_row_counts")) {
+    BLACKBOX_CHECK(entry.at("row_count").get<std::uint64_t>() > 0U);
+    bootstrap_tables.insert(entry.at("table").get<std::string>());
+  }
+  BLACKBOX_CHECK(bootstrap_tables == adapter_tables);
+
+  std::set<std::string> semantic_types;
+  for (const auto &entry : client_fixture.at("semantic_transactions")) {
+    semantic_types.insert(
+        entry.at("client_txn").at("txn_type").get<std::string>());
+  }
+  BLACKBOX_CHECK(semantic_types ==
+                 std::set<std::string>({"NewOrder", "Payment", "OrderStatus",
+                                        "Delivery", "StockLevel"}));
+  std::map<std::string, std::size_t> published_per_type;
+  for (const auto field : {"semantic_transactions", "synthetic_join_clients"}) {
+    for (const auto &entry : client_fixture.at(field)) {
+      ++published_per_type
+          [entry.at("client_txn").at("txn_type").get<std::string>()];
+    }
+  }
+  const std::map<std::string, std::size_t> expected_fixture_type_counts = {
+      {"Delivery", 1U},
+      {"NewOrder", 2U},
+      {"OrderStatus", 1U},
+      {"Payment", 3U},
+      {"StockLevel", 1U}};
+  BLACKBOX_CHECK(published_per_type == expected_fixture_type_counts);
+
+  const auto run = [&](const Mutation mutation) {
+    auto transactions = assembleTpccFixture(fixture);
+    if (transactions.size() != 12U) {
+      throw std::runtime_error("captured TPC-C transaction roster changed");
+    }
+    std::map<std::string, Json> clients_by_cdc_transaction;
+    for (const auto field :
+         {"semantic_transactions", "synthetic_join_clients"}) {
+      for (const auto &entry : client_fixture.at(field)) {
+        clients_by_cdc_transaction.emplace(
+            entry.at("cdc_transaction").get<std::string>(),
+            entry.at("client_txn"));
+      }
+    }
+    if (clients_by_cdc_transaction.size() != 8U) {
+      throw std::runtime_error("captured TPC-C client roster changed");
+    }
+    if (mutation == Mutation::WrongTypedValue) {
+      clients_by_cdc_transaction.at(
+          "payment_shape")["reads"][0]["value_bytes_base64"] = "AA==";
+    }
+
+    blackbox::RunControllerConfig config;
+    if (mutation == Mutation::ResourceExhaustion) {
+      config.joiner_limits.max_pending_client_records = 1U;
+    }
+    RunController controller(manifest, config);
+    discardStatuses(controller);
+    controller.acceptCdcTransaction(std::move(transactions[0]));
+    controller.acceptCdcTransaction(std::move(transactions[1]));
+    controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
+    controller.acceptCdcTransaction(std::move(transactions[2]));
+
+    if (mutation == Mutation::ResourceExhaustion) {
+      for (std::size_t index = 3U; index <= 10U; ++index) {
+        const auto transaction_name =
+            fixture.at("transactions")[index].at("name").get<std::string>();
+        controller.acceptClientPayload(
+            clients_by_cdc_transaction.at(transaction_name).dump());
+      }
+      for (std::size_t index = 3U; index <= 10U; ++index) {
+        controller.acceptCdcTransaction(std::move(transactions[index]));
+      }
+    } else {
+      bool cdc_dropped = false;
+      for (std::size_t index = 3U; index <= 10U; ++index) {
+        const auto transaction_name =
+            fixture.at("transactions")[index].at("name").get<std::string>();
+        const auto found = clients_by_cdc_transaction.find(transaction_name);
+        if (found == clients_by_cdc_transaction.end()) {
+          throw std::runtime_error("captured TPC-C join mapping is incomplete");
+        }
+        const bool drop_client = mutation == Mutation::DropClient &&
+                                 transaction_name == "insert_then_delete";
+        const bool drop_cdc = mutation == Mutation::DropCdc &&
+                              transaction_name == "primary_key_change";
+        if (!drop_client) {
+          controller.acceptClientPayload(found->second.dump());
+        }
+        if (drop_cdc) {
+          cdc_dropped = true;
+        } else {
+          if (cdc_dropped) {
+            --transactions[index].cdc_seq;
+          }
+          controller.acceptCdcTransaction(std::move(transactions[index]));
+        }
+      }
+      if (cdc_dropped) {
+        --transactions[11].cdc_seq;
+      }
+    }
+    controller.acceptClientPayload(client_fixture.at("session_done").dump());
+    controller.acceptCdcTransaction(std::move(transactions[11]));
+    controller.onInputIdle();
+
+    if (!controller.terminal() || !controller.finalOutcome().has_value() ||
+        !controller.finalReconciliation().has_value()) {
+      throw std::runtime_error("captured TPC-C run did not finalize");
+    }
+    return Result{.outcome = *controller.finalOutcome(),
+                  .reconciliation = *controller.finalReconciliation(),
+                  .metrics = controller.joinerMetrics(),
+                  .diagnostics = controller.diagnostics()};
+  };
+
+  const auto has_code = [](const Result &result, const std::string_view code) {
+    return std::any_of(
+        result.diagnostics.begin(), result.diagnostics.end(),
+        [&](const auto &diagnostic) { return diagnostic.code == code; });
+  };
+  const auto positive = run(Mutation::None);
+  BLACKBOX_CHECK(positive.outcome == FinalOutcome::Pass);
+  BLACKBOX_CHECK(positive.reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(positive.reconciliation.bootstrap_manifest_validated);
+  BLACKBOX_CHECK(positive.reconciliation.end_fence_seen);
+  BLACKBOX_CHECK(positive.reconciliation.expected_sessions == 1U);
+  BLACKBOX_CHECK(positive.reconciliation.completed_sessions == 1U);
+  BLACKBOX_CHECK(positive.reconciliation.accepted_client_transactions == 8U);
+  BLACKBOX_CHECK(positive.reconciliation.joined_workload_transactions == 8U);
+  BLACKBOX_CHECK(positive.reconciliation.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(positive.reconciliation.unmatched_workload_cdc_slots == 0U);
+  BLACKBOX_CHECK(positive.reconciliation.ambiguous_attempts == 0U);
+  BLACKBOX_CHECK(positive.metrics.marker_only_workload_transactions == 2U);
+  BLACKBOX_CHECK(positive.metrics.joined_read_events == 13U);
+  BLACKBOX_CHECK(positive.metrics.joined_write_events == 18U);
+
+  const auto dropped_client = run(Mutation::DropClient);
+  BLACKBOX_CHECK(dropped_client.outcome == FinalOutcome::Invalid);
+  BLACKBOX_CHECK(!dropped_client.reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(dropped_client.reconciliation.unmatched_workload_cdc_slots >
+                 0U);
+
+  const auto dropped_cdc = run(Mutation::DropCdc);
+  BLACKBOX_CHECK(dropped_cdc.outcome == FinalOutcome::Invalid);
+  BLACKBOX_CHECK(!dropped_cdc.reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(dropped_cdc.reconciliation.unmatched_client_records > 0U);
+
+  const auto wrong_typed = run(Mutation::WrongTypedValue);
+  BLACKBOX_CHECK(wrong_typed.outcome == FinalOutcome::Invalid);
+  BLACKBOX_CHECK(!wrong_typed.reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(has_code(wrong_typed, "CANONICAL_ENCODING_FAILED"));
+
+  const auto exhausted = run(Mutation::ResourceExhaustion);
+  BLACKBOX_CHECK(exhausted.outcome == FinalOutcome::Invalid);
+  BLACKBOX_CHECK(!exhausted.reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(has_code(exhausted, "JOIN_BUFFER_LIMIT_EXCEEDED"));
+}
+
+void testTpccStandardMixSessionAccounting() {
+  constexpr std::array<std::string_view, 5> transaction_types = {
+      "NewOrder", "Payment", "OrderStatus", "Delivery", "StockLevel"};
+  constexpr std::array<unsigned int, 5> standard_weights = {45U, 43U, 4U, 4U,
+                                                            4U};
+  BLACKBOX_CHECK(std::accumulate(standard_weights.begin(),
+                                 standard_weights.end(), 0U) == 100U);
+
+  auto manifest = tpccManifest();
+  manifest.expected_session_ids = {"tpcc/worker/1", "tpcc/worker/2",
+                                   "tpcc/worker/3", "tpcc/worker/4"};
+  RunController controller(manifest);
+  openTpccWorkload(controller);
+
+  const std::vector<ClientRead> no_reads;
+  const auto client_record = [&](const std::string &session,
+                                 const std::uint64_t session_seq,
+                                 const std::uint64_t txn_id,
+                                 const std::string_view txn_type,
+                                 const std::uint64_t unique) {
+    return Json{
+        {"kind", "client_txn"},
+        {"run_id", run_id},
+        {"session_id", session},
+        {"session_seq", session_seq},
+        {"logical_txn_id", uuid(unique, '3')},
+        {"attempt_id", uuid(unique, '4')},
+        {"txn_type", txn_type},
+        {"correlation_kind", "session_txn"},
+        {"correlation_id",
+         Json{{"run_id", run_id}, {"session_id", session}, {"txn_id", txn_id}}},
+        {"read_count", 0},
+        {"read_digest", blackbox::computeClientReadDigest(no_reads)},
+        {"reads", Json::array()},
+    };
+  };
+  const auto marker_only = [&](const std::uint64_t cdc_seq,
+                               const std::string &session,
+                               const std::uint64_t txn_id) {
+    return CdcTransaction{
+        .cdc_seq = cdc_seq,
+        .kind = CdcTransactionKind::WorkloadMarked,
+        .fence_phase = std::nullopt,
+        .correlation_id = RunScopedCorrelationId{.run_id = std::string(run_id),
+                                                 .session_id = session,
+                                                 .txn_id = txn_id},
+        .writes = {},
+        .begin_stream_id = std::to_string(cdc_seq + 10U) + "-0",
+        .end_stream_id = std::to_string(cdc_seq + 10U) + "-2",
+    };
+  };
+
+  std::map<std::string, std::size_t> published_per_type;
+  std::uint64_t cdc_seq = 2U;
+  for (std::size_t session_index = 0U;
+       session_index < manifest.expected_session_ids.size(); ++session_index) {
+    const auto &session = manifest.expected_session_ids[session_index];
+    std::vector<SessionMarkerEntry> published;
+    for (std::size_t type_index = 0U; type_index < transaction_types.size();
+         ++type_index) {
+      const auto sequence = static_cast<std::uint64_t>(type_index + 1U);
+      const auto unique =
+          static_cast<std::uint64_t>((session_index + 1U) * 100U) + sequence;
+      auto client = client_record(session, sequence, sequence,
+                                  transaction_types[type_index], unique);
+      auto cdc = marker_only(cdc_seq, session, sequence);
+      if (cdc_seq % 2U == 0U) {
+        controller.acceptClientPayload(client.dump());
+        controller.acceptCdcTransaction(std::move(cdc));
+      } else {
+        controller.acceptCdcTransaction(std::move(cdc));
+        controller.acceptClientPayload(client.dump());
+      }
+      published.push_back(
+          SessionMarkerEntry{.session_seq = sequence, .txn_id = sequence});
+      ++published_per_type[std::string(transaction_types[type_index])];
+      ++cdc_seq;
+    }
+
+    if (session_index == 0U) {
+      constexpr std::uint64_t delivery_sequence = 6U;
+      constexpr std::uint64_t committed_attempt = 7U;
+      auto client = client_record(session, delivery_sequence, committed_attempt,
+                                  "Delivery", 106U);
+      controller.acceptCdcTransaction(
+          marker_only(cdc_seq, session, committed_attempt));
+      controller.acceptClientPayload(client.dump());
+      published.push_back(SessionMarkerEntry{.session_seq = delivery_sequence,
+                                             .txn_id = committed_attempt});
+      ++published_per_type["Delivery"];
+      ++cdc_seq;
+    }
+
+    const bool first_session = session_index == 0U;
+    const auto logical = first_session ? 7U : 5U;
+    const auto physical = first_session ? 8U : 5U;
+    const auto successful = first_session ? 6U : 5U;
+    controller.acceptClientPayload(Json{
+        {"kind", "session_done"},
+        {"run_id", run_id},
+        {"session_id", session},
+        {"final_session_seq", logical},
+        {"logical_transactions_started", logical},
+        {"successful_transactions", successful},
+        {"terminal_aborted_transactions", first_session ? 1U : 0U},
+        {"physical_attempts_started", physical},
+        {"definitively_aborted_attempts", first_session ? 2U : 0U},
+        {"published_transactions", successful},
+        {"retry_attempts", first_session ? 1U : 0U},
+        {"ambiguous_attempts", 0},
+        {"rolling_correlation_digest",
+         blackbox::computeRollingSessionMarkerDigest(
+             run_id, session,
+             published)}}.dump());
+  }
+
+  controller.acceptCdcTransaction(control(cdc_seq, RunFencePhase::EndFence));
+  controller.onInputIdle();
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  const auto &reconciliation = *controller.finalReconciliation();
+  BLACKBOX_CHECK(reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(reconciliation.expected_sessions == 4U);
+  BLACKBOX_CHECK(reconciliation.completed_sessions == 4U);
+  BLACKBOX_CHECK(reconciliation.accepted_client_transactions == 21U);
+  BLACKBOX_CHECK(reconciliation.joined_workload_transactions == 21U);
+  BLACKBOX_CHECK(reconciliation.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(reconciliation.unmatched_workload_cdc_slots == 0U);
+  BLACKBOX_CHECK(reconciliation.ambiguous_attempts == 0U);
+  const std::map<std::string, std::size_t> expected_standard_type_counts = {
+      {"Delivery", 5U},
+      {"NewOrder", 4U},
+      {"OrderStatus", 4U},
+      {"Payment", 4U},
+      {"StockLevel", 4U}};
+  BLACKBOX_CHECK(published_per_type == expected_standard_type_counts);
+  const auto metrics = controller.joinerMetrics();
+  BLACKBOX_CHECK(metrics.joined_workload_transactions == 21U);
+  BLACKBOX_CHECK(metrics.marker_only_workload_transactions == 21U);
+  BLACKBOX_CHECK(metrics.joined_read_events == 0U);
+  BLACKBOX_CHECK(metrics.joined_write_events == 0U);
+  BLACKBOX_CHECK(metrics.client_first_matches > 0U);
+  BLACKBOX_CHECK(metrics.cdc_first_matches > 0U);
+}
+
 void testCapturedTpccControllerReconciliation() {
   const auto fixture = loadTpccTransactionFixture();
   const auto client_fixture = loadTpccClientFixture();
@@ -1452,6 +1792,8 @@ int runRunControllerTests() {
   testCapturedDeliveryRetryReconciliation();
   testDeliveryEmptyAndTerminalFailureAlgebra();
   testStockLevelFocusedReconciliationAndMalformedEvidence();
+  testCapturedTpccFullMixAndStructuralFailures();
+  testTpccStandardMixSessionAccounting();
   testCapturedTpccControllerReconciliation();
   return 0;
 }

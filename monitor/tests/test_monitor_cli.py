@@ -390,6 +390,32 @@ def check_tpcc_adapter_enters_main_read(executable):
     print("adapter capability: TPC-C enters the monitor-owned CDC path")
 
 
+def check_tpcc_roster_mismatch_is_invalid(executable):
+    manifest = json.loads(tpcc_manifest_payload())
+    manifest["application_table_allowlist"].remove("benchbase.order_line")
+    payload = json.dumps(manifest, separators=(",", ":"))
+    xreads = 0
+
+    def handler(_connection_id, command):
+        nonlocal xreads
+        if command[0] == b"EVAL":
+            return resp_integer(1)
+        if command[0] == b"XREAD":
+            xreads += 1
+            assert xreads == 1
+            return manifest_xread_reply(payload)
+        if command[0] == b"XADD":
+            return resp_bulk("1-0")
+        raise AssertionError(f"unexpected Redis command: {command!r}")
+
+    with ScriptedRedis(handler) as server:
+        result, _ = run_monitor(executable, server.port, 1000)
+        require_invalid(result, "UNEXPECTED_TABLE")
+        assert xreads == 1
+        assert any(command[0] == b"XADD" for command in server.commands)
+    print("adapter roster: incomplete TPC-C manifest publishes INVALID")
+
+
 def assert_no_audited_result(value):
     if isinstance(value, dict):
         assert "outcome" not in value, value
@@ -550,6 +576,7 @@ def main():
     check_main_read_timeout(args.monitor)
     check_status_timeout(args.monitor)
     check_tpcc_adapter_enters_main_read(args.monitor)
+    check_tpcc_roster_mismatch_is_invalid(args.monitor)
     check_join_only_requires_metrics(args.monitor)
     check_join_only_early_failure_artifact(args.monitor)
     check_joiner_limit_options(args.monitor)

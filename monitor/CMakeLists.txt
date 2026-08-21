@@ -244,4 +244,12 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     FIXTURES_REQUIRED captured_mariadb_full_lifecycle_fixture
     PASS_REGULAR_EXPRESSION "\"completed_transactions\": 11"
   )
+  add_test(
+    NAME blackbox_tpcc_cdc_replay_contract
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tpcc_cdc_replay.py
+            --replay $<TARGET_FILE:blackbox_cdc_replay>
+            --fixture
+            ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures/mariadb_tpcc_transactions.json
+  )
 endif()
