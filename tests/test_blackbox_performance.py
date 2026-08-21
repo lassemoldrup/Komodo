@@ -361,24 +361,24 @@ class RedisAnalysisTest(unittest.TestCase):
     def test_cdc_bytes_boundaries_and_two_lag_endpoints(self) -> None:
         result = performance.analyze_redis_xrange(
             self.document,
-            measured_start_epoch_ms=1000,
-            measured_end_epoch_ms=1030,
+            window_after_stream_id="1000-0",
+            window_through_stream_id="1030-0",
         )
         self.assertEqual(result["input_entry_count"], 5)
         self.assertGreater(result["input_logical_utf8_bytes"], result["logical_utf8_bytes"])
-        self.assertEqual(result["entry_count"], 4)
+        self.assertEqual(result["entry_count"], 3)
         expected_bytes = sum(
             len(field.encode("utf-8")) + len(value.encode("utf-8"))
-            for _, fields in performance.parse_xrange_entries(self.document[:4])
+            for _, fields in performance.parse_xrange_entries(self.document[1:4])
             for field, value in fields
         )
         self.assertEqual(result["logical_utf8_bytes"], expected_bytes)
         self.assertEqual(result["cdc_row_count"], 2)
         self.assertEqual(result["cdc_row_counts_by_operation"], {"c": 1, "u": 1})
         self.assertEqual(result["cdc_row_counts_by_table"], {"benchbase.usertable": 2})
-        self.assertEqual(result["begin_count"], 1)
+        self.assertEqual(result["begin_count"], 0)
         self.assertEqual(result["end_count"], 1)
-        self.assertEqual(result["completed_transaction_count"], 1)
+        self.assertEqual(result["completed_transaction_count"], 0)
         self.assertEqual(result["cdc_delivery_lag_sample_count"], 2)
         self.assertEqual(
             result["cdc_delivery_lag_ms"],
@@ -392,9 +392,9 @@ class RedisAnalysisTest(unittest.TestCase):
 
     def test_cdc_lag_is_na_when_window_has_no_rows(self) -> None:
         result = performance.analyze_redis_xrange(
-            self.document,
-            measured_start_epoch_ms=1500,
-            measured_end_epoch_ms=1600,
+            [self.document[0], self.document[3]],
+            window_after_stream_id="1000-0",
+            window_through_stream_id="1030-0",
         )
         expected = {
             "current": "N/A",
@@ -408,6 +408,81 @@ class RedisAnalysisTest(unittest.TestCase):
         self.assertEqual(result["cdc_delivery_lag_ms"], expected)
         self.assertEqual(result["cdc_source_lag_sample_count"], 0)
         self.assertEqual(result["cdc_source_lag_ms"], expected)
+
+    def test_exact_stream_id_window_prevents_same_millisecond_leakage(self) -> None:
+        document = [
+            redis_entry("1000-0", "boundary", {"status": "END", "id": "before"}),
+            redis_entry(
+                "1000-1",
+                "row",
+                {
+                    "source": {"ts_ms": 999, "table": "usertable"},
+                    "op": "c",
+                    "ts_ms": 999,
+                },
+            ),
+            redis_entry("1000-2", "boundary", {"status": "END", "id": "load"}),
+            redis_entry(
+                "1000-3",
+                "row",
+                {
+                    "source": {"ts_ms": 999, "table": "usertable"},
+                    "op": "u",
+                    "ts_ms": 999,
+                },
+            ),
+            redis_entry("1000-4", "boundary", {"status": "END", "id": "end"}),
+        ]
+
+        result = performance.analyze_redis_xrange(
+            document,
+            window_after_stream_id="1000-2",
+            window_through_stream_id="1000-4",
+        )
+
+        self.assertEqual(result["entry_count"], 2)
+        self.assertEqual(result["cdc_workload_row_count"], 1)
+        self.assertEqual(result["cdc_row_counts_by_operation"], {"u": 1})
+        self.assertEqual(
+            result["selection_window"],
+            {
+                "bounded": True,
+                "after_stream_id": "1000-2",
+                "through_stream_id": "1000-4",
+                "start_exclusive": True,
+                "end_inclusive": True,
+            },
+        )
+
+    def test_cdc_workload_metrics_exclude_lifecycle_fence_rows(self) -> None:
+        document = list(self.document)
+        document.append(
+            redis_entry(
+                "2010-0",
+                '{"run_id":"run"}',
+                {
+                    "before": None,
+                    "after": {"run_id": "run", "phase": "END_FENCE"},
+                    "source": {
+                        "ts_ms": 2000,
+                        "db": "benchbase",
+                        "table": "checker_run_fence",
+                    },
+                    "op": "c",
+                    "ts_ms": 2005,
+                },
+            )
+        )
+
+        result = performance.analyze_redis_xrange(document)
+
+        self.assertEqual(result["cdc_row_count"], 4)
+        self.assertEqual(result["cdc_control_row_count"], 1)
+        self.assertEqual(result["cdc_workload_row_count"], 3)
+        self.assertEqual(result["cdc_workload_delivery_lag_sample_count"], 3)
+        self.assertEqual(result["cdc_workload_source_lag_sample_count"], 3)
+        self.assertEqual(result["cdc_workload_delivery_lag_ms"]["max"], 10)
+        self.assertEqual(result["cdc_workload_source_lag_ms"]["max"], 100)
 
     def test_xrange_rejects_non_increasing_ids(self) -> None:
         with self.assertRaisesRegex(performance.PerformanceDataError, "strictly increasing"):
@@ -614,7 +689,7 @@ class TrialSummaryTest(unittest.TestCase):
     def test_wide_trials_use_median_range_mad_and_documented_overhead(self) -> None:
         rows = [
             {
-                "stage": "baseline",
+                "mode": "baseline",
                 "trial": "1",
                 "throughput": "100",
                 "latency_p95": "10",
@@ -622,7 +697,7 @@ class TrialSummaryTest(unittest.TestCase):
                 "optional": "",
             },
             {
-                "stage": "baseline",
+                "mode": "baseline",
                 "trial": "2",
                 "throughput": "120",
                 "latency_p95": "12",
@@ -630,7 +705,7 @@ class TrialSummaryTest(unittest.TestCase):
                 "optional": "",
             },
             {
-                "stage": "capture",
+                "mode": "capture",
                 "trial": "1",
                 "throughput": "80",
                 "latency_p95": "14",
@@ -638,7 +713,7 @@ class TrialSummaryTest(unittest.TestCase):
                 "optional": "",
             },
             {
-                "stage": "capture",
+                "mode": "capture",
                 "trial": "2",
                 "throughput": "90",
                 "latency_p95": "16",
@@ -646,8 +721,8 @@ class TrialSummaryTest(unittest.TestCase):
                 "optional": "",
             },
         ]
-        summary = performance.summarize_trials(rows, baseline_stage="baseline")
-        by_key = {(row["stage"], row["metric"]): row for row in summary}
+        summary = performance.summarize_trials(rows, baseline_mode="baseline")
+        by_key = {(row["mode"], row["metric"]): row for row in summary}
         baseline_throughput = by_key[("baseline", "throughput")]
         self.assertEqual(
             [
@@ -680,46 +755,46 @@ class TrialSummaryTest(unittest.TestCase):
 
     def test_long_form_trials_are_supported(self) -> None:
         rows = [
-            {"stage": "baseline", "trial": "1", "metric": "throughput", "value": "10"},
-            {"stage": "baseline", "trial": "2", "metric": "throughput", "value": "12"},
-            {"stage": "capture", "trial": "1", "metric": "throughput", "value": "9"},
-            {"stage": "capture", "trial": "2", "metric": "throughput", "value": "11"},
+            {"mode": "baseline", "trial": "1", "metric": "throughput", "value": "10"},
+            {"mode": "baseline", "trial": "2", "metric": "throughput", "value": "12"},
+            {"mode": "capture", "trial": "1", "metric": "throughput", "value": "9"},
+            {"mode": "capture", "trial": "2", "metric": "throughput", "value": "11"},
         ]
-        summary = performance.summarize_trials(rows, baseline_stage="baseline")
+        summary = performance.summarize_trials(rows, baseline_mode="baseline")
         self.assertEqual(len(summary), 2)
         self.assertEqual(summary[0]["median"], 11.0)
         self.assertEqual(summary[1]["median"], 10.0)
 
     def test_trials_without_baseline_keep_descriptive_statistics(self) -> None:
         rows = [
-            {"stage": "assembly_join", "trial": "1", "throughput": "100"},
-            {"stage": "assembly_join", "trial": "2", "throughput": "120"},
+            {"mode": "benchbase_uninstrumented", "trial": "1", "throughput": "100"},
+            {"mode": "benchbase_uninstrumented", "trial": "2", "throughput": "120"},
             {
-                "stage": "assembly_join_check",
+                "mode": "full_e2e",
                 "trial": "1",
                 "throughput": "90",
             },
             {
-                "stage": "assembly_join_check",
+                "mode": "full_e2e",
                 "trial": "2",
                 "throughput": "110",
             },
         ]
         summary = performance.summarize_trials(rows)
-        by_stage = {row["stage"]: row for row in summary}
-        self.assertEqual(by_stage["assembly_join"]["median"], 110.0)
-        self.assertEqual(by_stage["assembly_join_check"]["median"], 100.0)
+        by_mode = {row["mode"]: row for row in summary}
+        self.assertEqual(by_mode["benchbase_uninstrumented"]["median"], 110.0)
+        self.assertEqual(by_mode["full_e2e"]["median"], 100.0)
         for row in summary:
             self.assertEqual(row["overhead_vs_baseline_percent"], "")
             self.assertEqual(row["overhead_direction"], "")
             self.assertEqual(row["overhead_formula"], "")
 
     def test_explicit_absent_trial_baseline_is_rejected(self) -> None:
-        rows = [{"stage": "assembly_join", "trial": "1", "throughput": "100"}]
+        rows = [{"mode": "benchbase_uninstrumented", "trial": "1", "throughput": "100"}]
         with self.assertRaisesRegex(
-            performance.PerformanceDataError, "baseline stage 'missing' is absent"
+            performance.PerformanceDataError, "baseline mode 'missing' is absent"
         ):
-            performance.summarize_trials(rows, baseline_stage="missing")
+            performance.summarize_trials(rows, baseline_mode="missing")
 
     def test_summarize_command_allows_baseline_free_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -728,9 +803,9 @@ class TrialSummaryTest(unittest.TestCase):
             output_csv = root / "summary.csv"
             output_json = root / "summary.json"
             input_csv.write_text(
-                "stage,trial,throughput\n"
-                "assembly_join,1,100\n"
-                "assembly_join_check,1,90\n",
+                "mode,trial,throughput\n"
+                "benchbase_uninstrumented,1,100\n"
+                "full_e2e,1,90\n",
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -751,11 +826,33 @@ class TrialSummaryTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             document = json.loads(output_json.read_text(encoding="utf-8"))
-            self.assertIsNone(document["baseline_stage"])
+            self.assertIsNone(document["baseline_mode"])
             self.assertEqual(document["overhead_formulas"], {})
             with output_csv.open(encoding="utf-8", newline="") as stream:
                 for row in csv.DictReader(stream):
                     self.assertEqual(row["overhead_vs_baseline_percent"], "")
+
+    def test_summarize_command_rejects_legacy_stage_vocabulary(self) -> None:
+        for legacy_arguments in (
+            ("--baseline-stage", "baseline"),
+            ("--stage-column", "stage"),
+        ):
+            with self.subTest(arguments=legacy_arguments):
+                result = subprocess.run(
+                    [
+                        "python3",
+                        str(TOOL),
+                        "summarize-trials",
+                        "--input-csv",
+                        "/does/not/matter.csv",
+                        *legacy_arguments,
+                    ],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("unrecognized arguments", result.stderr)
 
     def test_bounded_copy_is_limited_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

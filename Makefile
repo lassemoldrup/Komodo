@@ -6,7 +6,6 @@ CO_CHECKER_ROOT ?= $(abspath ../co-checker)
 BENCHBASE_ROOT ?= $(abspath ../benchbase)
 PROBE_BUILD_DIR ?= /tmp/db-monitoring-fractured-read-probe-build
 MAVEN ?= mvn
-PERFORMANCE_BASELINE_ROOT ?= /media/newhd/yifan/db-monitoring-builds/blackbox-performance/worktrees/benchbase-2224eec
 PERFORMANCE_OUTPUT_ROOT ?=
 MONITOR_PERFORMANCE_CORPUS_DIR ?= /media/newhd/yifan/db-monitoring-builds/blackbox-performance/measurements/final-120s-20260819T143836Z/trials/repetition-01/06-assembly_join_check
 MONITOR_PERFORMANCE_OUTPUT_ROOT ?=
@@ -105,17 +104,17 @@ test-correctness-live: test-monitor probe-client-build
 	BLACKBOX_MAVEN="$(MAVEN)" \
 		./tests/test_semantic_correctness.sh
 
-## Run all six real performance stages once with the fixed smoke configuration
+## Run both formal performance modes once with the fixed smoke configuration
 performance-smoke:
-	@set -- --smoke --baseline-root "$(PERFORMANCE_BASELINE_ROOT)"; \
+	@set -- --smoke; \
 	if [ -n "$(PERFORMANCE_OUTPUT_ROOT)" ]; then \
 		set -- "$$@" --output-root "$(PERFORMANCE_OUTPUT_ROOT)"; \
 	fi; \
 	./scripts/run_blackbox_performance.sh "$$@"
 
-## Run three rotated measured repetitions of all six performance stages
+## Run three rotated measured repetitions of both formal performance modes
 performance-measure:
-	@set -- --baseline-root "$(PERFORMANCE_BASELINE_ROOT)"; \
+	@set --; \
 	if [ -n "$(PERFORMANCE_OUTPUT_ROOT)" ]; then \
 		set -- "$$@" --output-root "$(PERFORMANCE_OUTPUT_ROOT)"; \
 	fi; \

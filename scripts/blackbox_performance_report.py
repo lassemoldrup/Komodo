@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble selected performance-stage artifacts without interpreting verdicts."""
+"""Assemble the baseline and full-E2E black-box performance artifacts."""
 
 from __future__ import annotations
 
@@ -16,19 +16,15 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-STAGES = (
+MODES = (
     "benchbase_uninstrumented",
-    "read_capture_encoding",
-    "read_capture_encoding_redis",
-    "cdc_capture",
-    "assembly_join",
-    "assembly_join_check",
+    "full_e2e",
 )
 
 IDENTITY_FIELDS = (
-    "stage",
+    "mode",
     "repetition",
-    "stage_order_position",
+    "mode_order_position",
     "trial_id",
     "run_id",
     "artifact_dir",
@@ -38,41 +34,32 @@ IDENTITY_FIELDS = (
     "checker_observation",
 )
 
-OVERHEAD_METRICS = (
-    ("throughput_requests_per_second", "throughput_loss_percent"),
-    ("successful_transactions_per_second_workload", "throughput_loss_percent"),
-    ("new_order_per_minute", "throughput_loss_percent"),
-    ("latency_mean_microseconds", "latency_increase_percent"),
-    ("latency_p50_microseconds", "latency_increase_percent"),
-    ("latency_p95_microseconds", "latency_increase_percent"),
-    ("latency_p99_microseconds", "latency_increase_percent"),
+CLIENT_IMPACT_METRICS = (
+    (
+        "logical_transactions_per_second",
+        "logical_throughput_loss_percent",
+    ),
 )
 
 HEADLINE_CSV_FIELDS = (
-    "stage",
-    "throughput_requests_per_second_median",
+    "mode",
+    "logical_transactions_per_second_median",
+    "successful_transactions_per_second_median",
     "latency_mean_microseconds_median",
     "latency_p95_microseconds_median",
-    "throughput_loss_vs_baseline_percent",
+    "logical_throughput_loss_vs_baseline_percent",
 )
 
-BENCHBASE_HEADLINE_STAGES = (
-    "benchbase_uninstrumented",
-    "read_capture_encoding",
-    "read_capture_encoding_redis",
-    "cdc_capture",
-)
+BENCHBASE_HEADLINE_MODES = MODES
 
-HEADLINE_STAGE_LABELS = {
-    "benchbase_uninstrumented": "Uninstrumented baseline",
-    "read_capture_encoding": "Capture/encoding",
-    "read_capture_encoding_redis": "Capture + Redis",
-    "cdc_capture": "CDC only",
+HEADLINE_MODE_LABELS = {
+    "benchbase_uninstrumented": "Uninstrumented BenchBase",
+    "full_e2e": "Full black-box E2E",
 }
 
 TRANSACTION_RESULT_FIELDS = (
     "benchmark",
-    "stage",
+    "mode",
     "repetition",
     "trial_id",
     "row_scope",
@@ -106,6 +93,31 @@ TRANSACTION_RESULT_FIELDS = (
     "new_order_per_minute",
 )
 
+COMPONENT_RESULT_FIELDS = (
+    "benchmark",
+    "mode",
+    "repetition",
+    "trial_id",
+    "component_boundary",
+    "component_owner",
+    "interval_definition",
+    "rate_interpretation",
+    "interval_seconds",
+    "workload_transactions",
+    "event_kind",
+    "workload_events",
+    "transactions_per_second",
+    "events_per_second",
+    "source_lag_mean_ms",
+    "source_lag_p95_ms",
+    "source_lag_p99_ms",
+    "source_lag_max_ms",
+    "delivery_lag_mean_ms",
+    "delivery_lag_p95_ms",
+    "delivery_lag_p99_ms",
+    "delivery_lag_max_ms",
+)
+
 OUTCOME_COUNTER_FIELDS = (
     "logical_transactions_started",
     "successful_transactions",
@@ -123,6 +135,7 @@ OUTCOME_COUNTER_FIELDS = (
 CANONICAL_UTC_SECOND_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
 )
+STREAM_ID_PATTERN = re.compile(r"(0|[1-9][0-9]*)-(0|[1-9][0-9]*)\Z")
 
 
 class ReportError(ValueError):
@@ -163,25 +176,6 @@ def flatten(prefix: str, value: Any, output: dict[str, Any]) -> None:
         output[prefix] = value
 
 
-def reject_verdict_content(value: Any, path: str = "monitor") -> None:
-    if isinstance(value, Mapping):
-        for key, child in value.items():
-            normalized = normalize_name(str(key))
-            require(
-                normalized not in {"outcome", "verdict"},
-                f"join-only metrics contain forbidden verdict key at {path}.{key}",
-            )
-            reject_verdict_content(child, f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            reject_verdict_content(child, f"{path}[{index}]")
-    elif isinstance(value, str):
-        require(
-            value not in {"PASS", "VIOLATION", "INVALID"},
-            f"join-only metrics contain forbidden verdict value at {path}",
-        )
-
-
 def finite_numbers(values: Iterable[Any]) -> list[float]:
     result: list[float] = []
     for value in values:
@@ -208,16 +202,6 @@ def integer(value: Any, label: str, *, minimum: int = 0) -> int:
         f"{label} is not an integer >= {minimum}",
     )
     return value
-
-
-def parse_utc_epoch_ms(value: Any, label: str) -> int:
-    require(isinstance(value, str), f"{label} is not text")
-    try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ReportError(f"{label} is invalid") from error
-    require(parsed.tzinfo is not None, f"{label} has no timezone")
-    return int(parsed.timestamp() * 1000)
 
 
 def canonical_utc_second(value: Any, label: str) -> str:
@@ -287,7 +271,7 @@ def parse_status_xrange(document: Any) -> dict[str, Any]:
     if document is None:
         return {}
     require(isinstance(document, list), "status XRANGE artifact is not an array")
-    statuses: list[dict[str, Any]] = []
+    statuses: list[tuple[str, dict[str, Any]]] = []
     for entry in document:
         require(isinstance(entry, list) and len(entry) == 2, "malformed status XRANGE entry")
         raw_fields = entry[1]
@@ -303,14 +287,17 @@ def parse_status_xrange(document: Any) -> dict[str, Any]:
         require(isinstance(payload, str), "status XRANGE entry has no payload")
         record = json.loads(payload)
         require(isinstance(record, dict), "status payload is not an object")
-        statuses.append(record)
+        stream_id = entry[0]
+        require(isinstance(stream_id, str), "status stream ID is not text")
+        stream_id_milliseconds(stream_id)
+        statuses.append((stream_id, record))
     if not statuses:
         return {}
     terminal = next(
-        (record for record in reversed(statuses) if record.get("lifecycle_state") == "FINAL"),
+        (item for item in reversed(statuses) if item[1].get("lifecycle_state") == "FINAL"),
         None,
     )
-    latest = terminal or statuses[-1]
+    latest_id, latest = terminal or statuses[-1]
     reconciliation = latest.get("reconciliation")
     if isinstance(reconciliation, dict):
         reconciliation_result = reconciliation.get(
@@ -326,7 +313,26 @@ def parse_status_xrange(document: Any) -> dict[str, Any]:
         "status_latest_checker_observation": latest.get("checker_observation", ""),
         "status_reconciliation_result": reconciliation_result,
         "status_terminal_seen": terminal is not None,
+        "status_terminal_stream_id": latest_id if terminal is not None else "",
+        "status_terminal_epoch_ms": (
+            stream_id_milliseconds(latest_id) if terminal is not None else ""
+        ),
     }
+
+
+def final_status_boundary(document: Any, run_id: str) -> dict[str, Any]:
+    require(isinstance(document, list), "status XRANGE artifact is not an array")
+    matches: list[str] = []
+    for entry in document:
+        stream_id, fields = xrange_fields(entry, "status")
+        payload = fields.get("payload")
+        require(isinstance(payload, str), "status XRANGE entry has no payload")
+        record = json.loads(payload)
+        require(isinstance(record, dict), "status payload is not an object")
+        if record.get("run_id") == run_id and record.get("lifecycle_state") == "FINAL":
+            matches.append(stream_id)
+    require(len(matches) == 1, "status stream does not contain exactly one run-scoped FINAL")
+    return {"stream_id": matches[0], "epoch_ms": stream_id_milliseconds(matches[0])}
 
 
 def xrange_logical_bytes(document: Any, label: str) -> int:
@@ -481,12 +487,8 @@ def monitor_aliases(flattened: Mapping[str, Any]) -> dict[str, Any]:
     wait_max_ns = flattened.get(
         "monitor_joiner_missing_client_head_wait_max_nanoseconds", ""
     )
-    checked = flattened.get("monitor_checker_consumed_transactions", "")
-    checker_ns = flattened.get("monitor_checker_consume_total_nanoseconds", "")
-    rate: Any = ""
-    numeric = finite_numbers((checked, checker_ns))
-    if len(numeric) == 2 and numeric[1] > 0:
-        rate = numeric[0] * 1_000_000_000.0 / numeric[1]
+    checked = flattened.get("monitor_checker_workload_transactions", "")
+    checker_ns = flattened.get("monitor_checker_workload_consume_total_nanoseconds", "")
 
     def nanoseconds_to_milliseconds(value: Any) -> Any:
         values = finite_numbers((value,))
@@ -497,11 +499,6 @@ def monitor_aliases(flattened: Mapping[str, Any]) -> dict[str, Any]:
         "head_of_line_wait_max_ms": nanoseconds_to_milliseconds(wait_max_ns),
         "join_buffer_high_water_bytes": flattened.get(
             "monitor_joiner_join_buffer_high_water_bytes", ""
-        ),
-        "checker_rate_transactions_per_second": rate,
-        "checker_consume_total_nanoseconds": checker_ns,
-        "checker_consume_max_nanoseconds": flattened.get(
-            "monitor_checker_consume_max_nanoseconds", ""
         ),
         "checker_retained_state_bytes": flattened.get(
             "monitor_checker_engine_retained_state_bytes", ""
@@ -530,6 +527,47 @@ def monitor_aliases(flattened: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "monitor_normalized_write_events": flattened.get(
             "monitor_assembler_normalized_write_events", ""
+        ),
+        "cpp_monitor_assembler_workload_transactions": flattened.get(
+            "monitor_assembler_completed_workload_transactions", ""
+        ),
+        "cpp_monitor_assembler_workload_write_events": flattened.get(
+            "monitor_assembler_workload_normalized_write_events", ""
+        ),
+        "cpp_monitor_assembler_workload_raw_row_events": flattened.get(
+            "monitor_assembler_workload_raw_row_events", ""
+        ),
+        "cpp_monitor_assembler_active_nanoseconds": flattened.get(
+            "monitor_assembler_workload_processing_total_nanoseconds", ""
+        ),
+        "cpp_monitor_assembler_active_max_nanoseconds": flattened.get(
+            "monitor_assembler_workload_processing_max_nanoseconds", ""
+        ),
+        "cpp_monitor_joiner_workload_transactions": flattened.get(
+            "monitor_joiner_joined_workload_transactions", ""
+        ),
+        "cpp_monitor_joiner_workload_read_events": flattened.get(
+            "monitor_joiner_joined_read_events", ""
+        ),
+        "cpp_monitor_joiner_workload_write_events": flattened.get(
+            "monitor_joiner_joined_write_events", ""
+        ),
+        "cpp_monitor_joiner_active_nanoseconds": flattened.get(
+            "monitor_joiner_workload_processing_total_nanoseconds", ""
+        ),
+        "cpp_monitor_joiner_active_max_nanoseconds": flattened.get(
+            "monitor_joiner_workload_processing_max_nanoseconds", ""
+        ),
+        "cpp_monitor_checker_workload_transactions": checked,
+        "cpp_monitor_checker_workload_read_events": flattened.get(
+            "monitor_checker_workload_read_events", ""
+        ),
+        "cpp_monitor_checker_workload_write_events": flattened.get(
+            "monitor_checker_workload_write_events", ""
+        ),
+        "cpp_monitor_checker_active_nanoseconds": checker_ns,
+        "cpp_monitor_checker_active_max_nanoseconds": flattened.get(
+            "monitor_checker_workload_consume_max_nanoseconds", ""
         ),
         "head_of_line_wait_count": flattened.get(
             "monitor_joiner_missing_client_head_wait_count", ""
@@ -658,7 +696,7 @@ MONITOR_CAPACITY_METRICS = (
 def monitor_capacity_acceptance(
     metadata: Mapping[str, Any], flattened: Mapping[str, Any]
 ) -> dict[str, Any]:
-    checker_enabled = metadata.get("stage") == "assembly_join_check"
+    checker_enabled = metadata.get("mode") == "full_e2e"
     threshold = numeric(
         metadata.get("high_water_threshold_percent"),
         "high-water threshold percent",
@@ -786,7 +824,6 @@ def find_phase(value: Any, run_id: str, phases: dict[str, int], stream_ms: int) 
 def fence_observation_latencies(
     cdc_document: Any,
     status_document: Any,
-    monitor_document: Any,
     run_id: str,
 ) -> dict[str, Any]:
     require(isinstance(cdc_document, list), "CDC XRANGE artifact is not an array")
@@ -813,17 +850,6 @@ def fence_observation_latencies(
         phase = lifecycle_to_phase.get(record.get("lifecycle_state"))
         if phase is not None:
             acknowledgements.setdefault(phase, stream_id_milliseconds(stream_id))
-
-    if "END_FENCE" not in acknowledgements:
-        require(isinstance(monitor_document, dict), "join-only monitor metrics are missing")
-        finished = monitor_document.get("finished_at_utc")
-        require(isinstance(finished, str), "join-only monitor finish timestamp is missing")
-        try:
-            parsed = dt.datetime.fromisoformat(finished.replace("Z", "+00:00"))
-        except ValueError as error:
-            raise ReportError("join-only monitor finish timestamp is invalid") from error
-        require(parsed.tzinfo is not None, "join-only monitor finish timestamp has no timezone")
-        acknowledgements["END_FENCE"] = int(parsed.timestamp() * 1000)
 
     output: dict[str, Any] = {}
     labels = {
@@ -892,6 +918,60 @@ def fence_stream_time(
     if transaction_end:
         raise ReportError(f"CDC artifact has no transaction END after {phase}")
     return phases[phase]
+
+
+def component_fence_window(document: Any, run_id: str) -> dict[str, Any]:
+    """Find both component-boundary transaction END records in one scan."""
+
+    require(isinstance(document, list), "CDC XRANGE artifact is not an array")
+    requested = ("LOAD_FINISHED", "END_FENCE")
+    transaction_ids: dict[str, str] = {}
+    boundaries: dict[str, str] = {}
+    for entry in document:
+        stream_id, fields = xrange_fields(entry, "CDC")
+        for value in fields.values():
+            try:
+                envelope = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(envelope, dict):
+                continue
+            entry_phases: dict[str, int] = {}
+            find_phase(envelope, run_id, entry_phases, stream_id_milliseconds(stream_id))
+            for phase in requested:
+                if phase not in entry_phases:
+                    continue
+                transaction = envelope.get("transaction")
+                require(
+                    isinstance(transaction, dict)
+                    and isinstance(transaction.get("id"), str)
+                    and transaction["id"] != "",
+                    f"CDC {phase} row has no transaction ID",
+                )
+                transaction_ids.setdefault(phase, transaction["id"])
+            if envelope.get("status") != "END" or not isinstance(envelope.get("id"), str):
+                continue
+            for phase, transaction_id in transaction_ids.items():
+                if envelope["id"] == transaction_id:
+                    boundaries.setdefault(phase, stream_id)
+
+    result: dict[str, Any] = {}
+    for phase in requested:
+        require(phase in transaction_ids, f"CDC artifact has no {phase} fence row")
+        require(
+            phase in boundaries,
+            f"CDC artifact has no transaction END after {phase}",
+        )
+        result[phase] = {
+            "transaction_end_stream_id": boundaries[phase],
+            "epoch_ms": stream_id_milliseconds(boundaries[phase]),
+        }
+    require(
+        tuple(map(int, result["LOAD_FINISHED"]["transaction_end_stream_id"].split("-")))
+        < tuple(map(int, result["END_FENCE"]["transaction_end_stream_id"].split("-"))),
+        "component fence transaction END order is invalid",
+    )
+    return result
 
 
 def optional_rate(count: Any, seconds: float) -> float | str:
@@ -1011,14 +1091,22 @@ def add_interval_and_event_metrics(
     measured_start_ms = int(numeric(benchbase.get("measured_start_epoch_ms"), "measured start"))
     measured_end_ms = int(numeric(benchbase.get("measured_end_epoch_ms"), "measured end"))
     require(measured_end_ms >= measured_start_ms, "BenchBase measured window is reversed")
-    row["workload_window_seconds"] = workload_seconds
+    row["client_measurement_window_seconds"] = workload_seconds
 
     if outcome is not None:
         totals = outcome.get("totals")
         require(isinstance(totals, Mapping), "outcome totals are missing")
+        logical = numeric(
+            totals.get("logical_transactions_started"), "logical transactions"
+        )
         successful = numeric(totals.get("successful_transactions"), "successful transactions")
+        row["logical_transactions_started"] = logical
+        row["logical_transactions_started_per_second_client_measurement_window"] = (
+            logical / workload_seconds
+        )
+        row["logical_transactions_per_second"] = logical / workload_seconds
         row["successful_transactions"] = successful
-        row["successful_transactions_per_second_workload"] = successful / workload_seconds
+        row["successful_transactions_per_second"] = successful / workload_seconds
         for counter in (
             "logical_transactions_started",
             "physical_attempts_started",
@@ -1031,92 +1119,333 @@ def add_interval_and_event_metrics(
             "retry_different_events",
         ):
             row[counter] = totals.get(counter, "")
-            row[f"{counter}_per_second_workload"] = optional_rate(
+            row[f"{counter}_per_second_client_measurement_window"] = optional_rate(
                 totals.get(counter), workload_seconds
             )
-        row["attempts_per_second_workload"] = row[
-            "physical_attempts_started_per_second_workload"
+        row["attempts_per_second_client_measurement_window"] = row[
+            "physical_attempts_started_per_second_client_measurement_window"
         ]
         failed = numeric(totals.get("error_transactions"), "error transactions") + numeric(
             totals.get("unknown_status_transactions"), "unknown statuses"
         )
         row["failed_transactions"] = failed
-        row["failed_transactions_per_second_workload"] = failed / workload_seconds
+        row["failed_transactions_per_second_client_measurement_window"] = (
+            failed / workload_seconds
+        )
         row["new_order_per_minute"] = outcome.get("new_order_per_minute", "")
         row["new_order_rate_label"] = outcome.get("new_order_rate_label", "")
     else:
-        successful = numeric(benchbase.get("measured_count"), "BenchBase measured count")
+        logical = numeric(benchbase.get("measured_count"), "BenchBase measured count")
+        successful = logical
+        row["logical_transactions_started"] = logical
+        row["logical_transactions_started_per_second_client_measurement_window"] = (
+            logical / workload_seconds
+        )
+        row["logical_transactions_per_second"] = logical / workload_seconds
         row["successful_transactions"] = successful
-        row["successful_transactions_per_second_workload"] = successful / workload_seconds
-        row["attempts_per_second_workload"] = successful / workload_seconds
+        row["successful_transactions_per_second"] = successful / workload_seconds
+        row["attempts_per_second_client_measurement_window"] = (
+            successful / workload_seconds
+        )
         row["new_order_per_minute"] = ""
         row["new_order_rate_label"] = ""
 
-    interval_end_ms = measured_end_ms
-    interval_kind = "workload_window"
-    if isinstance(analysis_window, Mapping):
-        interval_end_ms = int(numeric(analysis_window.get("end_epoch_ms"), "analysis window end"))
-        require(interval_end_ms >= measured_end_ms, "analysis window ends before the workload")
-        interval_kind = str(analysis_window.get("definition", "analysis_window"))
-    if monitor is not None:
-        monitor_end_ms = parse_utc_epoch_ms(monitor.get("finished_at_utc"), "monitor finish timestamp")
-        if "drain_timeout_seconds" in metadata:
-            require(monitor_end_ms >= measured_end_ms, "monitor finished before the measured workload")
-        if monitor_end_ms >= measured_end_ms:
-            interval_end_ms = monitor_end_ms
-            interval_kind = "measured_workload_start_through_monitor_verdict"
-            tail_ms = interval_end_ms - measured_end_ms
-            row["workload_end_to_verdict_tail_ms"] = tail_ms
-        if "drain_timeout_seconds" in metadata:
-            drain_limit_ms = int(numeric(metadata.get("drain_timeout_seconds"), "drain timeout", minimum=1.0)) * 1000
-            joiner = monitor.get("joiner")
-            require(isinstance(joiner, Mapping), "monitor joiner metrics are missing")
-            end_fence_drain_ms = numeric(
-                joiner.get("end_fence_drain_nanoseconds"),
-                "monitor end-fence drain nanoseconds",
-            ) / 1_000_000.0
-            row["monitor_end_fence_drain_ms"] = end_fence_drain_ms
-            row["drain_timeout_ms"] = drain_limit_ms
-            row["drain_tail_accepted"] = (
-                tail_ms <= drain_limit_ms and end_fence_drain_ms <= drain_limit_ms
-            )
-            require(row["drain_tail_accepted"], "workload-to-verdict drain timeout was exceeded")
-    complete_seconds = (interval_end_ms - measured_start_ms) / 1000.0
-    require(complete_seconds > 0, "complete measurement interval is not positive")
-    row["complete_interval_definition"] = interval_kind
-    row["complete_interval_seconds"] = complete_seconds
-    row["successful_transactions_per_second_complete_interval"] = successful / complete_seconds
-
-    normalized_all = finite_numbers((row.get("monitor_normalized_write_events"),))
-    normalized_bootstrap = finite_numbers(
-        (row.get("monitor_released_bootstrap_write_events"),)
+    require(isinstance(analysis_window, Mapping), "analysis window document is missing")
+    client_window = analysis_window.get("client_measurement_window")
+    require(isinstance(client_window, Mapping), "client measurement window is missing")
+    require(
+        client_window.get("definition") == "benchbase_measured_request_window",
+        "client measurement window definition differs",
     )
-    normalized_workload: float | str = ""
-    if normalized_all and normalized_bootstrap:
+    client_start_ms = int(
+        numeric(client_window.get("start_epoch_ms"), "client measurement start")
+    )
+    client_end_ms = int(
+        numeric(client_window.get("end_epoch_ms"), "client measurement end")
+    )
+    require(
+        (client_start_ms, client_end_ms) == (measured_start_ms, measured_end_ms),
+        "analysis and BenchBase client measurement windows differ",
+    )
+    row["client_measurement_window_definition"] = client_window["definition"]
+    row["client_measurement_window_start_epoch_ms"] = client_start_ms
+    row["client_measurement_window_end_epoch_ms"] = client_end_ms
+
+    component_window = analysis_window.get("component_workload_window")
+    if metadata.get("mode") != "full_e2e":
         require(
-            normalized_all[0] >= normalized_bootstrap[0],
-            "normalized write count is below the bootstrap write count",
+            component_window is None,
+            "uninstrumented baseline has a component workload window",
         )
-        normalized_workload = normalized_all[0] - normalized_bootstrap[0]
+        require(
+            analysis_window.get("final_verdict") is None,
+            "uninstrumented baseline has a final verdict boundary",
+        )
+    else:
+        require(
+            isinstance(component_window, Mapping),
+            "full-E2E component workload window is missing",
+        )
+        require(
+            component_window.get("definition")
+            == "after_load_finished_transaction_end_id_through_end_fence_transaction_end_id_inclusive",
+            "component workload window definition differs",
+        )
+        require(
+            component_window.get("start_boundary") == "LOAD_FINISHED"
+            and component_window.get("end_boundary") == "END_FENCE",
+            "component workload boundary labels differ",
+        )
+        require(
+            component_window.get("start_exclusive") is True
+            and component_window.get("end_inclusive") is True,
+            "component workload boundary inclusivity differs",
+        )
+        after_stream_id = component_window.get("after_stream_id")
+        through_stream_id = component_window.get("through_stream_id")
+        require(
+            isinstance(after_stream_id, str)
+            and isinstance(through_stream_id, str)
+            and STREAM_ID_PATTERN.fullmatch(after_stream_id) is not None
+            and STREAM_ID_PATTERN.fullmatch(through_stream_id) is not None,
+            "component workload Redis stream IDs are invalid",
+        )
+        component_start_ms = int(
+            numeric(component_window.get("start_epoch_ms"), "component workload start")
+        )
+        component_end_ms = int(
+            numeric(component_window.get("end_epoch_ms"), "component workload end")
+        )
+        require(component_end_ms > component_start_ms, "component workload window is not positive")
+        require(
+            stream_id_milliseconds(after_stream_id) == component_start_ms
+            and stream_id_milliseconds(through_stream_id) == component_end_ms,
+            "component workload Redis IDs and millisecond bounds differ",
+        )
+        component_seconds = (component_end_ms - component_start_ms) / 1000.0
+        row["component_workload_window_definition"] = component_window["definition"]
+        row["component_workload_window_start_epoch_ms"] = component_start_ms
+        row["component_workload_window_end_epoch_ms"] = component_end_ms
+        row["component_workload_window_after_stream_id"] = after_stream_id
+        row["component_workload_window_through_stream_id"] = through_stream_id
+        row["component_workload_window_start_exclusive"] = True
+        row["component_workload_window_end_inclusive"] = True
+        row["component_workload_window_seconds"] = component_seconds
 
-    event_counts = {
-        "client_read_events": _candidate(
-            row, ("client_read_event_count", "capture_read_event_count")
-        ),
-        "raw_cdc_row_events": row.get("redis_cdc_row_count", ""),
-        "normalized_write_events": normalized_workload,
-    }
-    joined_reads = finite_numbers((row.get("monitor_joined_read_events"),))
-    joined_writes = finite_numbers((row.get("monitor_joined_write_events"),))
-    event_counts["joined_checker_events"] = (
-        joined_reads[0] + joined_writes[0]
-        if joined_reads and joined_writes
-        else ""
-    )
-    for label, count in event_counts.items():
-        row[label] = count
-        row[f"{label}_per_second_workload"] = optional_rate(count, workload_seconds)
-        row[f"{label}_per_second_complete_interval"] = optional_rate(count, complete_seconds)
+        final_verdict = analysis_window.get("final_verdict")
+        require(isinstance(final_verdict, Mapping), "final verdict boundary is missing")
+        final_stream_id = final_verdict.get("stream_id")
+        require(
+            isinstance(final_stream_id, str)
+            and STREAM_ID_PATTERN.fullmatch(final_stream_id) is not None,
+            "final verdict Redis stream ID is invalid",
+        )
+        final_verdict_ms = int(
+            numeric(final_verdict.get("epoch_ms"), "final verdict timestamp")
+        )
+        require(
+            stream_id_milliseconds(final_stream_id) == final_verdict_ms,
+            "final verdict Redis ID and timestamp differ",
+        )
+        require(
+            row.get("status_terminal_stream_id") == final_stream_id
+            and int(numeric(row.get("status_terminal_epoch_ms"), "terminal status timestamp"))
+            == final_verdict_ms,
+            "analysis boundary and FINAL status record differ",
+        )
+        require(
+            final_verdict_ms >= component_end_ms,
+            "FINAL status precedes the component workload end",
+        )
+        row["final_verdict_stream_id"] = final_stream_id
+        row["final_verdict_epoch_ms"] = final_verdict_ms
+
+        require(row.get("redis_selection_window_bounded") is True, "CDC selection is not bounded")
+        require(
+            row.get("redis_selection_window_after_stream_id") == after_stream_id
+            and row.get("redis_selection_window_through_stream_id") == through_stream_id
+            and row.get("redis_selection_window_start_exclusive") is True
+            and row.get("redis_selection_window_end_inclusive") is True,
+            "CDC selection and component workload windows differ",
+        )
+        require(isinstance(monitor, Mapping), "full-E2E monitor metrics are missing")
+        component_tail_ms = final_verdict_ms - component_end_ms
+        row["client_measurement_end_to_verdict_tail_ms"] = (
+            final_verdict_ms - measured_end_ms
+        )
+        row["component_workload_end_to_verdict_tail_ms"] = component_tail_ms
+        drain_limit_ms = int(
+            numeric(metadata.get("drain_timeout_seconds"), "drain timeout", minimum=1.0)
+        ) * 1000
+        joiner = monitor.get("joiner")
+        require(isinstance(joiner, Mapping), "monitor joiner metrics are missing")
+        end_fence_drain_ms = numeric(
+            joiner.get("end_fence_drain_nanoseconds"),
+            "monitor end-fence drain nanoseconds",
+        ) / 1_000_000.0
+        row["monitor_end_fence_drain_ms"] = end_fence_drain_ms
+        row["drain_timeout_ms"] = drain_limit_ms
+        row["drain_tail_accepted"] = (
+            component_tail_ms <= drain_limit_ms
+            and end_fence_drain_ms <= drain_limit_ms
+        )
+        require(row["drain_tail_accepted"], "component workload drain timeout was exceeded")
+
+        cdc_rows = numeric(
+            row.get("redis_cdc_workload_row_count"), "CDC workload row events"
+        )
+        cdc_control_rows = numeric(
+            row.get("redis_cdc_control_row_count"), "CDC control row events"
+        )
+        cdc_all_rows = numeric(row.get("redis_cdc_row_count"), "all CDC row events")
+        require(
+            cdc_rows + cdc_control_rows == cdc_all_rows,
+            "CDC workload/control row accounting does not reconcile",
+        )
+        require(cdc_control_rows == 1, "component window has an unexpected control-row count")
+        row["cdc_ingestion_interval_definition"] = component_window["definition"]
+        row["cdc_ingestion_interval_seconds"] = component_seconds
+        row["cdc_ingestion_workload_rows"] = cdc_rows
+        row["cdc_ingestion_control_rows"] = cdc_control_rows
+        row["cdc_ingestion_workload_rows_per_second"] = cdc_rows / component_seconds
+        for lag_kind in ("source", "delivery"):
+            sample_count = row.get(
+                f"redis_cdc_workload_{lag_kind}_lag_sample_count", ""
+            )
+            row[f"cdc_ingestion_workload_{lag_kind}_lag_sample_count"] = sample_count
+            require(
+                numeric(sample_count, f"CDC workload {lag_kind} lag samples") == cdc_rows,
+                f"CDC workload {lag_kind} lag sample count differs from row count",
+            )
+            for statistic in ("current", "max", "mean", "p50", "p95", "p99"):
+                row[f"cdc_ingestion_workload_{lag_kind}_lag_ms_{statistic}"] = row.get(
+                    f"redis_cdc_workload_{lag_kind}_lag_ms_{statistic}", ""
+                )
+
+        def active_rate(count: float, nanoseconds_field: str, label: str) -> float:
+            nanoseconds = numeric(
+                row.get(nanoseconds_field), f"{label} active nanoseconds", minimum=1.0
+            )
+            return count * 1_000_000_000.0 / nanoseconds
+
+        client_transactions = numeric(
+            row.get("client_client_txn_count"), "client workload-process transactions"
+        )
+        client_published_transactions = numeric(
+            row.get("client_session_done_counters_published_transactions"),
+            "client published transaction accounting",
+        )
+        require(
+            client_published_transactions == client_transactions,
+            "client stream and SessionDone transaction counters do not reconcile",
+        )
+        expected_cdc_transactions = client_transactions + 1
+        require(
+            numeric(row.get("redis_begin_count"), "CDC BEGIN records")
+            == expected_cdc_transactions
+            and numeric(row.get("redis_end_count"), "CDC END records")
+            == expected_cdc_transactions
+            and numeric(
+                row.get("redis_completed_transaction_count"),
+                "CDC completed transactions",
+            )
+            == expected_cdc_transactions,
+            "component CDC transaction boundaries do not reconcile",
+        )
+        client_reads = numeric(row.get("client_read_event_count"), "client read events")
+        assembler_transactions = numeric(
+            row.get("cpp_monitor_assembler_workload_transactions"),
+            "assembler workload transactions",
+        )
+        assembler_raw_rows = numeric(
+            row.get("cpp_monitor_assembler_workload_raw_row_events"),
+            "assembler workload raw row events",
+        )
+        assembler_events = numeric(
+            row.get("cpp_monitor_assembler_workload_write_events"),
+            "assembler workload normalized events",
+        )
+        joiner_transactions = numeric(
+            row.get("cpp_monitor_joiner_workload_transactions"),
+            "joiner workload transactions",
+        )
+        joiner_reads = numeric(
+            row.get("cpp_monitor_joiner_workload_read_events"),
+            "joiner workload read events",
+        )
+        joiner_writes = numeric(
+            row.get("cpp_monitor_joiner_workload_write_events"),
+            "joiner workload write events",
+        )
+        checker_transactions = numeric(
+            row.get("cpp_monitor_checker_workload_transactions"),
+            "checker workload transactions",
+        )
+        checker_reads = numeric(
+            row.get("cpp_monitor_checker_workload_read_events"),
+            "checker workload read events",
+        )
+        checker_writes = numeric(
+            row.get("cpp_monitor_checker_workload_write_events"),
+            "checker workload write events",
+        )
+        require(
+            client_transactions
+            == assembler_transactions
+            == joiner_transactions
+            == checker_transactions,
+            "component workload transaction counters do not reconcile",
+        )
+        require(
+            cdc_rows == assembler_raw_rows,
+            "CDC and assembler workload raw-row counters do not reconcile",
+        )
+        require(
+            assembler_events == joiner_writes == checker_writes,
+            "normalized workload write-event counters do not reconcile",
+        )
+        require(
+            client_reads == joiner_reads == checker_reads,
+            "component workload read-event counters do not reconcile",
+        )
+        row["component_workload_client_transactions"] = client_transactions
+        row["component_workload_client_read_events"] = client_reads
+        row["component_workload_cdc_raw_row_events"] = cdc_rows
+        row["component_workload_application_write_events"] = assembler_events
+        component_counts = {
+            "assembler": (assembler_transactions, assembler_raw_rows),
+            "joiner": (joiner_transactions, joiner_reads + joiner_writes),
+            "checker": (checker_transactions, checker_reads + checker_writes),
+        }
+        service_scopes = {
+            "assembler": "accept_call_service",
+            "joiner": "ready_prefix_release_service",
+            "checker": "engine_consume_service",
+        }
+        for component, (transaction_count, event_count) in component_counts.items():
+            active_ns_field = f"cpp_monitor_{component}_active_nanoseconds"
+            scope = service_scopes[component]
+            row[f"cpp_monitor_{component}_{scope}_transactions_per_second"] = (
+                active_rate(transaction_count, active_ns_field, component)
+            )
+            row[f"cpp_monitor_{component}_{scope}_events_per_second"] = active_rate(
+                event_count, active_ns_field, component
+            )
+
+        pipeline_seconds = (final_verdict_ms - component_start_ms) / 1000.0
+        require(pipeline_seconds > 0, "evidence pipeline interval is not positive")
+        row["evidence_pipeline_interval_definition"] = (
+            "load_finished_transaction_end_through_final_checker_verdict"
+        )
+        row["evidence_pipeline_interval_seconds"] = pipeline_seconds
+        row["evidence_pipeline_workload_transactions"] = checker_transactions
+        row["evidence_pipeline_workload_events"] = checker_reads + checker_writes
+        row["evidence_pipeline_transactions_per_second"] = (
+            checker_transactions / pipeline_seconds
+        )
+        row["evidence_pipeline_events_per_second"] = (
+            (checker_reads + checker_writes) / pipeline_seconds
+        )
 
     redis_entry_count = row.get("redis_entry_count", "")
     client_entry_count = row.get("client_entry_count", "")
@@ -1184,8 +1513,8 @@ def add_interval_and_event_metrics(
 def trial_row(trial_dir: Path) -> dict[str, Any]:
     metadata = load_json(trial_dir / "metadata.json", required=True)
     require(isinstance(metadata, dict), f"metadata is not an object: {trial_dir}")
-    stage = metadata.get("stage")
-    require(stage in STAGES, f"unknown performance stage in {trial_dir}: {stage!r}")
+    mode = metadata.get("mode")
+    require(mode in MODES, f"unknown performance mode in {trial_dir}: {mode!r}")
     benchmark = metadata.get("benchmark", "ycsb")
     require(benchmark in {"ycsb", "tpcc"}, f"unknown benchmark in {trial_dir}: {benchmark!r}")
     canonical_utc_second(metadata.get("loader_timestamp_utc"), "loader timestamp")
@@ -1193,12 +1522,12 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
     row: dict[str, Any] = {field: "" for field in IDENTITY_FIELDS}
     for key, value in metadata.items():
         normalized_key = normalize_name(str(key))
-        if normalized_key == "configured_stages":
+        if normalized_key == "configured_modes":
             require(
                 isinstance(value, list),
-                f"configured performance stages are not an array: {trial_dir}",
+                f"configured performance modes are not an array: {trial_dir}",
             )
-            row["configured_stages_json"] = json.dumps(
+            row["configured_modes_json"] = json.dumps(
                 value, ensure_ascii=False, separators=(",", ":")
             )
         else:
@@ -1231,6 +1560,20 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
             require(
                 integer(clean_totals.get(counter), f"outcome total {counter}") == 0,
                 f"clean performance trial has nonzero {counter}",
+            )
+
+    if mode == "full_e2e":
+        for required_artifact in (
+            "redis_metrics.json",
+            "client_metrics.json",
+            "cdc_stream.json",
+            "client_stream.json",
+            "status_stream.json",
+            "analysis_window.json",
+        ):
+            require(
+                (trial_dir / required_artifact).is_file(),
+                f"full-E2E artifact is missing: {required_artifact}",
             )
 
     for filename, prefix in (
@@ -1276,13 +1619,12 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
     )
     expected_counts = loader_validation.get("expected_table_row_counts")
     require(isinstance(expected_counts, list) and expected_counts, "loader expected counts are absent")
-    declaration_required = (
-        benchmark == "tpcc"
-        or stage not in {"benchbase_uninstrumented", "cdc_capture"}
-    )
+    # Loader state proof is outside the measured workload path and is required
+    # identically in both formal modes.
+    declaration_required = True
     require(
         loader_validation.get("declaration_available") is declaration_required,
-        "loader declaration availability differs from stage contract",
+        "loader declaration availability differs from mode contract",
     )
     require(
         loader_validation.get("observed_table_row_counts") == expected_counts
@@ -1293,10 +1635,11 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
     require(
         loader_validation.get("declared_table_row_counts")
         == (expected_counts if declaration_required else None),
-        "loader declared counts differ from stage contract",
+        "loader declared counts differ from mode contract",
     )
 
     redis_logical_total = 0
+    stream_documents: dict[str, Any] = {}
     for filename, label in (
         ("cdc_stream.json", "cdc"),
         ("client_stream.json", "client"),
@@ -1304,6 +1647,7 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         ("measurement_stream.json", "measurement"),
     ):
         document = load_json(trial_dir / filename)
+        stream_documents[label] = document
         if document is None:
             row[f"redis_logical_{label}_stream_bytes"] = ""
             continue
@@ -1313,14 +1657,23 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
     row["redis_logical_total_stream_bytes"] = redis_logical_total if redis_logical_total else ""
 
     monitor = load_json(trial_dir / "monitor_metrics.json")
+    if mode == "full_e2e":
+        require(isinstance(monitor, dict), "full-E2E C++ monitor metrics are missing")
+        require(
+            monitor.get("processing_mode") == "audited",
+            "full-E2E C++ monitor is not in audited mode",
+        )
+    else:
+        require(monitor is None, "uninstrumented baseline contains C++ monitor metrics")
     monitor_flat: dict[str, Any] = {}
     if monitor is not None:
-        if stage == "assembly_join":
-            reject_verdict_content(monitor)
         flatten("monitor", monitor, monitor_flat)
         row.update(monitor_flat)
         row.update(monitor_aliases(monitor_flat))
 
+    status_document = stream_documents.get("status")
+    status = parse_status_xrange(status_document)
+    row.update(status)
     analysis_window = load_json(trial_dir / "analysis_window.json")
     add_interval_and_event_metrics(
         row,
@@ -1331,13 +1684,8 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         monitor if isinstance(monitor, dict) else None,
     )
 
-    redis_stages = {
-        "read_capture_encoding_redis",
-        "cdc_capture",
-        "assembly_join",
-        "assembly_join_check",
-    }
-    if stage in redis_stages:
+    redis_modes = {"full_e2e"}
+    if mode in redis_modes:
         redis_configuration = load_json(
             trial_dir / "redis_configuration.json", required=True
         )
@@ -1350,7 +1698,7 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
             and redis_configuration.get("maxmemory_policy") == "noeviction",
             "Redis capacity provenance differs from the requested noeviction configuration",
         )
-    if stage in {"assembly_join", "assembly_join_check"}:
+    if mode == "full_e2e":
         require(
             monitor_flat.get("monitor_limits_joiner_max_pending_client_bytes")
             == metadata.get("monitor_max_pending_client_bytes"),
@@ -1381,7 +1729,7 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         )
         require(0 < threshold <= 100, "high-water threshold percent is outside (0,100]")
         utilization_values: list[float] = []
-        if stage in redis_stages:
+        if mode in redis_modes:
             redis_info = parse_redis_info(trial_dir / "redis_info_after.txt")
             require(
                 redis_info["maxmemory"] == int(metadata["redis_maxmemory_bytes"]),
@@ -1398,7 +1746,7 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
                 }
             )
             utilization_values.append(redis_peak_percent)
-        if stage in {"assembly_join", "assembly_join_check"}:
+        if mode == "full_e2e":
             capacity = monitor_capacity_acceptance(metadata, monitor_flat)
             row.update(capacity)
             row.update(monitor_terminal_queue_acceptance(monitor_flat))
@@ -1414,11 +1762,9 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
             "declared resource high-water threshold was reached or exceeded",
         )
 
-    status = parse_status_xrange(load_json(trial_dir / "status_stream.json"))
-    row.update(status)
     row.update(summarize_resources(trial_dir / "resource_samples.csv"))
 
-    if stage == "assembly_join_check":
+    if mode == "full_e2e":
         row["audited_outcome"] = status.get("status_latest_outcome", "")
         row["checker_observation"] = status.get("status_latest_checker_observation", "")
         row["reconciliation_result"] = monitor_flat.get(
@@ -1427,29 +1773,27 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         row["measurement_completion"] = (
             "complete" if status.get("status_terminal_seen") else "incomplete"
         )
-    elif stage == "assembly_join":
-        # Join-only monitor metrics carry measurement completion and evidence
-        # reconciliation, but the status protocol intentionally has no FINAL verdict.
-        row["measurement_completion"] = monitor_flat.get(
-            "monitor_completion_status", monitor_flat.get("monitor_completed", "")
-        )
-        row["reconciliation_result"] = monitor_flat.get(
-            "monitor_evidence_reconciled",
-            monitor_flat.get("monitor_reconciliation_evidence_reconciled", ""),
-        )
-        row["audited_outcome"] = ""
-        row["checker_observation"] = ""
     else:
         row["measurement_completion"] = "complete"
         row["reconciliation_result"] = ""
         row["audited_outcome"] = ""
         row["checker_observation"] = ""
-    if stage in {"assembly_join", "assembly_join_check"}:
+    if mode == "full_e2e":
+        cdc_document = stream_documents.get("cdc")
+        boundary_document = component_fence_window(
+            cdc_document, str(metadata.get("run_id", ""))
+        )
+        require(
+            row.get("component_workload_window_after_stream_id")
+            == boundary_document["LOAD_FINISHED"]["transaction_end_stream_id"]
+            and row.get("component_workload_window_through_stream_id")
+            == boundary_document["END_FENCE"]["transaction_end_stream_id"],
+            "analysis component IDs differ from CDC fence transaction END IDs",
+        )
         row.update(
             fence_observation_latencies(
-                load_json(trial_dir / "cdc_stream.json", required=True),
-                load_json(trial_dir / "status_stream.json", required=True),
-                monitor,
+                cdc_document,
+                status_document,
                 str(metadata.get("run_id", "")),
             )
         )
@@ -1464,55 +1808,55 @@ def find_trial_dirs(root: Path) -> list[Path]:
     return result
 
 
-def configured_stage_roster(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+def configured_mode_roster(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     rosters: list[tuple[str, ...]] = []
     for row in rows:
-        raw_roster = row.get("configured_stages_json", "")
+        raw_roster = row.get("configured_modes_json", "")
         if raw_roster in (None, ""):
-            # Artifacts created before selectable stages always ran all six.
-            roster = STAGES
+            # A missing roster denotes the current complete formal experiment.
+            roster = MODES
         else:
             require(
                 isinstance(raw_roster, str),
-                "configured performance stage roster is not JSON text",
+                "configured performance mode roster is not JSON text",
             )
             try:
                 parsed = json.loads(raw_roster)
             except json.JSONDecodeError as error:
-                raise ReportError("configured performance stage roster is malformed") from error
+                raise ReportError("configured performance mode roster is malformed") from error
             require(
                 isinstance(parsed, list) and parsed,
-                "configured performance stage roster is empty or not an array",
+                "configured performance mode roster is empty or not an array",
             )
             require(
-                all(isinstance(stage, str) and stage in STAGES for stage in parsed),
-                "configured performance stage roster contains an unknown stage",
+                all(isinstance(mode, str) and mode in MODES for mode in parsed),
+                "configured performance mode roster contains an unknown mode",
             )
             roster = tuple(parsed)
             require(
                 len(roster) == len(set(roster)),
-                "configured performance stage roster contains duplicates",
+                "configured performance mode roster contains duplicates",
             )
-            canonical = tuple(stage for stage in STAGES if stage in roster)
+            canonical = tuple(mode for mode in MODES if mode in roster)
             require(
                 roster == canonical,
-                "configured performance stage roster is not in canonical order",
+                "configured performance mode roster is not in canonical order",
             )
         rosters.append(roster)
     require(
         len(set(rosters)) == 1,
-        "configured performance stage roster differs across trials",
+        "configured performance mode roster differs across trials",
     )
     return rosters[0]
 
 
 def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
     rows = [trial_row(path) for path in find_trial_dirs(root)]
-    stage_roster = configured_stage_roster(rows)
-    stages = {str(row["stage"]) for row in rows}
+    mode_roster = configured_mode_roster(rows)
+    modes = {str(row["mode"]) for row in rows}
     require(
-        stages == set(stage_roster),
-        "raw trial stages differ from the configured roster",
+        modes == set(mode_roster),
+        "raw trial modes differ from the configured roster",
     )
     row_counts = {row["bootstrap_row_count"] for row in rows}
     digests = {row["bootstrap_canonical_state_digest"] for row in rows}
@@ -1530,15 +1874,15 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
         repetitions == expected_repetitions,
         "raw trial repetitions differ from the configured roster",
     )
-    for stage in stage_roster:
-        stage_rows = [row for row in rows if row["stage"] == stage]
+    for mode in mode_roster:
+        mode_rows = [row for row in rows if row["mode"] == mode]
         require(
-            len(stage_rows) == len(expected_repetitions),
-            f"stage {stage} does not have exactly one trial per repetition",
+            len(mode_rows) == len(expected_repetitions),
+            f"mode {mode} does not have exactly one trial per repetition",
         )
         require(
-            {int(row["repetition"]) for row in stage_rows} == expected_repetitions,
-            f"stage {stage} repetition roster differs",
+            {int(row["repetition"]) for row in mode_rows} == expected_repetitions,
+            f"mode {mode} repetition roster differs",
         )
     trial_ids = [str(row["trial_id"]) for row in rows]
     run_ids = [str(row["run_id"]) for row in rows]
@@ -1603,25 +1947,25 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
             f"trial invariant differs across runs: {field}",
         )
     random_seed = int(rows[0]["random_seed"])
-    expected_positions = set(range(1, len(stage_roster) + 1))
+    expected_positions = set(range(1, len(mode_roster) + 1))
     for repetition in sorted(expected_repetitions):
         repetition_rows = [
             row for row in rows if int(row["repetition"]) == repetition
         ]
-        positions = {int(row["stage_order_position"]) for row in repetition_rows}
+        positions = {int(row["mode_order_position"]) for row in repetition_rows}
         require(
-            len(repetition_rows) == len(stage_roster) and positions == expected_positions,
-            f"repetition {repetition} stage-order positions are incomplete or duplicated",
+            len(repetition_rows) == len(mode_roster) and positions == expected_positions,
+            f"repetition {repetition} mode-order positions are incomplete or duplicated",
         )
-        offset = (random_seed + repetition - 1) % len(stage_roster)
+        offset = (random_seed + repetition - 1) % len(mode_roster)
         for row in repetition_rows:
-            position = int(row["stage_order_position"])
-            expected_stage = stage_roster[
-                (offset + position - 1) % len(stage_roster)
+            position = int(row["mode_order_position"])
+            expected_mode = mode_roster[
+                (offset + position - 1) % len(mode_roster)
             ]
             require(
-                row["stage"] == expected_stage,
-                f"repetition {repetition} stage-order rotation differs at position {position}",
+                row["mode"] == expected_mode,
+                f"repetition {repetition} mode-order rotation differs at position {position}",
             )
     smoke = bool(rows[0].get("smoke"))
     if not smoke:
@@ -1643,20 +1987,8 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
             row.get("benchbase_final_state") == "EXIT",
             f"BenchBase did not reach EXIT: {row['trial_id']}",
         )
-        stage = str(row["stage"])
-        if stage in {"read_capture_encoding", "read_capture_encoding_redis"}:
-            require(
-                int(row.get("capture_worker_summary_count", 0)) == int(row.get("terminals", 0)),
-                f"capture summaries are incomplete: {row['trial_id']}",
-            )
-        if stage == "assembly_join":
-            require(row.get("monitor_completed") is True, "join-only monitor did not complete")
-            require(
-                row.get("monitor_evidence_reconciled") is True,
-                "join-only evidence did not reconcile",
-            )
-            require(row.get("audited_outcome") == "", "join-only row contains a verdict")
-        if stage == "assembly_join_check":
+        mode = str(row["mode"])
+        if mode == "full_e2e":
             require(row.get("status_terminal_seen") is True, "audited monitor has no final status")
             require(
                 row.get("monitor_evidence_reconciled") is True,
@@ -1718,7 +2050,7 @@ def write_transaction_results(rows: Sequence[Mapping[str, Any]], output: Path) -
             successful = counters.get("successful_transactions", logical)
             item: dict[str, Any] = {
                 "benchmark": row.get("benchmark", "ycsb"),
-                "stage": row["stage"],
+                "mode": row["mode"],
                 "repetition": row["repetition"],
                 "trial_id": row["trial_id"],
                 "row_scope": "overall" if overall else "transaction_type",
@@ -1782,8 +2114,165 @@ def write_transaction_results(rows: Sequence[Mapping[str, Any]], output: Path) -
         writer.writerows(result)
 
 
-def median_for(rows: Sequence[Mapping[str, Any]], stage: str, metric: str) -> float | None:
-    values = finite_numbers(row.get(metric) for row in rows if row.get("stage") == stage)
+def write_component_results(
+    rows: Sequence[Mapping[str, Any]], output: Path
+) -> None:
+    """Write explicit CDC, C++ monitor, and whole-pipeline boundaries."""
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("mode") != "full_e2e":
+            continue
+        identity = {
+            "benchmark": row.get("benchmark", "ycsb"),
+            "mode": row["mode"],
+            "repetition": row["repetition"],
+            "trial_id": row["trial_id"],
+        }
+        empty_lag = {
+            field: ""
+            for field in COMPONENT_RESULT_FIELDS
+            if field.startswith(("source_lag_", "delivery_lag_"))
+        }
+        result.append(
+            {
+                **identity,
+                "component_boundary": "cdc_ingestion",
+                "component_owner": "debezium_to_redis",
+                "interval_definition": row.get("cdc_ingestion_interval_definition", ""),
+                "rate_interpretation": "observed_component_window_average",
+                "interval_seconds": row.get("cdc_ingestion_interval_seconds", ""),
+                "workload_transactions": "",
+                "event_kind": "raw_cdc_rows_including_markers_excluding_control",
+                "workload_events": row.get("cdc_ingestion_workload_rows", ""),
+                "transactions_per_second": "",
+                "events_per_second": row.get(
+                    "cdc_ingestion_workload_rows_per_second", ""
+                ),
+                "source_lag_mean_ms": row.get(
+                    "cdc_ingestion_workload_source_lag_ms_mean", ""
+                ),
+                "source_lag_p95_ms": row.get(
+                    "cdc_ingestion_workload_source_lag_ms_p95", ""
+                ),
+                "source_lag_p99_ms": row.get(
+                    "cdc_ingestion_workload_source_lag_ms_p99", ""
+                ),
+                "source_lag_max_ms": row.get(
+                    "cdc_ingestion_workload_source_lag_ms_max", ""
+                ),
+                "delivery_lag_mean_ms": row.get(
+                    "cdc_ingestion_workload_delivery_lag_ms_mean", ""
+                ),
+                "delivery_lag_p95_ms": row.get(
+                    "cdc_ingestion_workload_delivery_lag_ms_p95", ""
+                ),
+                "delivery_lag_p99_ms": row.get(
+                    "cdc_ingestion_workload_delivery_lag_ms_p99", ""
+                ),
+                "delivery_lag_max_ms": row.get(
+                    "cdc_ingestion_workload_delivery_lag_ms_max", ""
+                ),
+            }
+        )
+        component_definitions = {
+            "assembler": (
+                "workload_assembler_accept_call_active_time",
+                "assembler_accept_call_service_diagnostic_not_sustainable_throughput",
+                "raw_cdc_rows_accepted",
+                "cpp_monitor_assembler_accept_call_service",
+            ),
+            "joiner": (
+                "workload_joiner_ready_prefix_release_active_time_excluding_admission_wait_and_checker",
+                "joiner_ready_prefix_release_service_diagnostic_not_sustainable_throughput",
+                "joined_reads_plus_normalized_application_writes",
+                "cpp_monitor_joiner_ready_prefix_release_service",
+            ),
+            "checker": (
+                "workload_checker_engine_consume_active_time_excluding_adapter_mapping",
+                "checker_engine_consume_service_diagnostic_not_sustainable_throughput",
+                "checker_input_reads_plus_normalized_application_writes",
+                "cpp_monitor_checker_engine_consume_service",
+            ),
+        }
+        for component, (
+            interval_definition,
+            rate_interpretation,
+            event_kind,
+            rate_prefix,
+        ) in component_definitions.items():
+            active_nanoseconds = numeric(
+                row.get(f"cpp_monitor_{component}_active_nanoseconds"),
+                f"{component} active nanoseconds",
+                minimum=1.0,
+            )
+            if component == "assembler":
+                events = row.get("cpp_monitor_assembler_workload_raw_row_events", "")
+            else:
+                events = numeric(
+                    row.get(f"cpp_monitor_{component}_workload_read_events"),
+                    f"{component} read events",
+                ) + numeric(
+                    row.get(f"cpp_monitor_{component}_workload_write_events"),
+                    f"{component} write events",
+                )
+            result.append(
+                {
+                    **identity,
+                    **empty_lag,
+                    "component_boundary": f"cpp_monitor_{component}",
+                    "component_owner": "cpp_monitor",
+                    "interval_definition": interval_definition,
+                    "rate_interpretation": rate_interpretation,
+                    "interval_seconds": active_nanoseconds / 1_000_000_000.0,
+                    "workload_transactions": row.get(
+                        f"cpp_monitor_{component}_workload_transactions", ""
+                    ),
+                    "event_kind": event_kind,
+                    "workload_events": events,
+                    "transactions_per_second": row.get(
+                        f"{rate_prefix}_transactions_per_second", ""
+                    ),
+                    "events_per_second": row.get(
+                        f"{rate_prefix}_events_per_second", ""
+                    ),
+                }
+            )
+        result.append(
+            {
+                **identity,
+                **empty_lag,
+                "component_boundary": "whole_evidence_pipeline",
+                "component_owner": "black_box_e2e",
+                "interval_definition": row.get(
+                    "evidence_pipeline_interval_definition", ""
+                ),
+                "rate_interpretation": "externally_observed_end_to_end_average",
+                "interval_seconds": row.get("evidence_pipeline_interval_seconds", ""),
+                "workload_transactions": row.get(
+                    "evidence_pipeline_workload_transactions", ""
+                ),
+                "event_kind": "checked_reads_plus_normalized_application_writes",
+                "workload_events": row.get("evidence_pipeline_workload_events", ""),
+                "transactions_per_second": row.get(
+                    "evidence_pipeline_transactions_per_second", ""
+                ),
+                "events_per_second": row.get(
+                    "evidence_pipeline_events_per_second", ""
+                ),
+            }
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream, fieldnames=COMPONENT_RESULT_FIELDS, lineterminator="\n"
+        )
+        writer.writeheader()
+        writer.writerows(result)
+
+
+def median_for(rows: Sequence[Mapping[str, Any]], mode: str, metric: str) -> float | None:
+    values = finite_numbers(row.get(metric) for row in rows if row.get("mode") == mode)
     return statistics.median(values) if values else None
 
 
@@ -1809,8 +2298,9 @@ def _decimal_median(values: Sequence[Decimal]) -> Decimal:
 
 def read_headline_input(path: Path) -> list[dict[str, Any]]:
     required_fields = {
-        "stage",
-        "throughput_requests_per_second",
+        "mode",
+        "logical_transactions_per_second",
+        "successful_transactions_per_second",
         "latency_mean_microseconds",
         "latency_p95_microseconds",
     }
@@ -1833,70 +2323,77 @@ def read_headline_input(path: Path) -> list[dict[str, Any]]:
 
 def headline_rows(raw_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     metric_fields = (
-        "throughput_requests_per_second",
+        "logical_transactions_per_second",
+        "successful_transactions_per_second",
         "latency_mean_microseconds",
         "latency_p95_microseconds",
     )
-    values_by_stage: dict[str, dict[str, list[Decimal]]] = {}
+    values_by_mode: dict[str, dict[str, list[Decimal]]] = {}
     trial_counts: dict[str, int] = {}
     for row_number, row in enumerate(raw_rows, start=2):
-        stage = row.get("stage")
+        mode = row.get("mode")
         require(
-            isinstance(stage, str) and stage in STAGES,
-            f"raw trial CSV row {row_number} has an unknown stage: {stage!r}",
+            isinstance(mode, str) and mode in MODES,
+            f"raw trial CSV row {row_number} has an unknown mode: {mode!r}",
         )
-        stage_values = values_by_stage.setdefault(
-            stage, {metric: [] for metric in metric_fields}
+        mode_values = values_by_mode.setdefault(
+            mode, {metric: [] for metric in metric_fields}
         )
-        trial_counts[stage] = trial_counts.get(stage, 0) + 1
+        trial_counts[mode] = trial_counts.get(mode, 0) + 1
         for metric in metric_fields:
-            stage_values[metric].append(
+            mode_values[metric].append(
                 _headline_decimal(row.get(metric), f"raw trial CSV row {row_number} {metric}")
             )
 
     require(
         len(set(trial_counts.values())) == 1,
-        "headline stages do not have equal repetition counts",
+        "headline modes do not have equal repetition counts",
     )
     medians = {
-        stage: {
-            metric: _decimal_median(stage_values[metric])
+        mode: {
+            metric: _decimal_median(mode_values[metric])
             for metric in metric_fields
         }
-        for stage, stage_values in values_by_stage.items()
+        for mode, mode_values in values_by_mode.items()
     }
     baseline = medians.get("benchbase_uninstrumented")
-    baseline_throughput = (
-        baseline["throughput_requests_per_second"] if baseline is not None else None
+    baseline_logical_throughput = (
+        baseline["logical_transactions_per_second"]
+        if baseline is not None
+        else None
     )
-    benchmarks = {
-        str(row.get("benchmark"))
-        for row in raw_rows
-        if row.get("benchmark") not in (None, "")
-    }
-    tpcc = benchmarks == {"tpcc"}
 
     result: list[dict[str, Any]] = []
-    for stage in BENCHBASE_HEADLINE_STAGES:
-        if stage not in medians:
+    for mode in BENCHBASE_HEADLINE_MODES:
+        if mode not in medians:
             continue
-        stage_medians = medians[stage]
+        mode_medians = medians[mode]
         loss: Decimal | str = ""
-        if stage != "benchbase_uninstrumented" and baseline_throughput not in (None, 0):
-            throughput = stage_medians["throughput_requests_per_second"]
-            loss = (baseline_throughput - throughput) / baseline_throughput * Decimal(100)
+        if (
+            mode == "full_e2e"
+            and baseline_logical_throughput not in (None, 0)
+        ):
+            throughput = mode_medians[
+                "logical_transactions_per_second"
+            ]
+            loss = (
+                (baseline_logical_throughput - throughput)
+                / baseline_logical_throughput
+                * Decimal(100)
+            )
         result.append(
             {
-                "stage": stage,
-                "Stage": (
-                    "Evidence-disabled compatibility baseline"
-                    if tpcc and stage == "benchbase_uninstrumented"
-                    else HEADLINE_STAGE_LABELS[stage]
-                ),
-                "Throughput": stage_medians["throughput_requests_per_second"],
-                "Mean latency": stage_medians["latency_mean_microseconds"],
-                "p95": stage_medians["latency_p95_microseconds"],
-                "Loss vs baseline": loss,
+                "mode": mode,
+                "Mode": HEADLINE_MODE_LABELS[mode],
+                "Logical TPS": mode_medians[
+                    "logical_transactions_per_second"
+                ],
+                "Successful TPS": mode_medians[
+                    "successful_transactions_per_second"
+                ],
+                "Mean latency": mode_medians["latency_mean_microseconds"],
+                "p95": mode_medians["latency_p95_microseconds"],
+                "Logical TPS loss vs baseline": loss,
             }
         )
     return result
@@ -1919,16 +2416,19 @@ def write_headline_csv(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
         for row in rows:
             writer.writerow(
                 {
-                    "stage": row["stage"],
-                    "throughput_requests_per_second_median": _decimal_text(
-                        row["Throughput"]
+                    "mode": row["mode"],
+                    "logical_transactions_per_second_median": _decimal_text(
+                        row["Logical TPS"]
+                    ),
+                    "successful_transactions_per_second_median": _decimal_text(
+                        row["Successful TPS"]
                     ),
                     "latency_mean_microseconds_median": _decimal_text(
                         row["Mean latency"]
                     ),
                     "latency_p95_microseconds_median": _decimal_text(row["p95"]),
-                    "throughput_loss_vs_baseline_percent": _decimal_text(
-                        row["Loss vs baseline"]
+                    "logical_throughput_loss_vs_baseline_percent": _decimal_text(
+                        row["Logical TPS loss vs baseline"]
                     ),
                 }
             )
@@ -1943,18 +2443,19 @@ def _human_decimal(value: Decimal, places: int, *, trim_fraction: bool = False) 
 
 def write_headline_markdown(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
     lines = [
-        "| Stage | BenchBase throughput | Mean latency | p95 | Loss vs baseline |",
-        "|---|---:|---:|---:|---:|",
+        "| Mode | Logical TPS | Successful TPS | Mean latency | p95 | Logical TPS loss vs baseline |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
-        loss = row["Loss vs baseline"]
+        loss = row["Logical TPS loss vs baseline"]
         loss_text = "—" if loss == "" else f"{_human_decimal(loss, 2)}%"
         lines.append(
             "| "
             + " | ".join(
                 (
-                    str(row["Stage"]),
-                    f"{_human_decimal(row['Throughput'], 1)} req/s",
+                    str(row["Mode"]),
+                    f"{_human_decimal(row['Logical TPS'], 1)} tx/s",
+                    f"{_human_decimal(row['Successful TPS'], 1)} tx/s",
                     f"{_human_decimal(row['Mean latency'], 1)} µs",
                     f"{_human_decimal(row['p95'], 1, trim_fraction=True)} µs",
                     loss_text,
@@ -1974,16 +2475,16 @@ def write_headline(input_csv: Path, csv_output: Path, markdown_output: Path) -> 
 
 def comparison_rows(
     rows: Sequence[Mapping[str, Any]],
-    comparison_stage: str,
-    stage: str,
+    comparison_mode: str,
+    mode: str,
     attribution: str,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    for metric, kind in OVERHEAD_METRICS:
-        comparison = median_for(rows, comparison_stage, metric)
-        measured = median_for(rows, stage, metric)
-        if kind == "throughput_loss_percent":
-            formula = "100 * (comparison_median - stage_median) / comparison_median"
+    for metric, kind in CLIENT_IMPACT_METRICS:
+        comparison = median_for(rows, comparison_mode, metric)
+        measured = median_for(rows, mode, metric)
+        if kind == "logical_throughput_loss_percent":
+            formula = "100 * (comparison_median - mode_median) / comparison_median"
             overhead = (
                 ""
                 if comparison is None or measured is None
@@ -1991,23 +2492,16 @@ def comparison_rows(
                 if comparison == 0
                 else (comparison - measured) / comparison * 100.0
             )
-        else:
-            formula = "100 * (stage_median - comparison_median) / comparison_median"
-            overhead = (
-                ""
-                if comparison is None or measured is None
-                else "N/A"
-                if comparison == 0
-                else (measured - comparison) / comparison * 100.0
-            )
+        else:  # Defensive: the formal contract currently has one comparison.
+            raise ReportError(f"unknown client-impact metric kind: {kind}")
         result.append(
             {
-                "comparison_stage": comparison_stage,
-                "stage": stage,
+                "comparison_mode": comparison_mode,
+                "mode": mode,
                 "attribution": attribution,
                 "metric": metric,
                 "comparison_median": "" if comparison is None else comparison,
-                "stage_median": "" if measured is None else measured,
+                "mode_median": "" if measured is None else measured,
                 "overhead_percent": overhead,
                 "formula": formula,
             }
@@ -2018,47 +2512,23 @@ def comparison_rows(
 def write_overhead(rows: Sequence[Mapping[str, Any]], output: Path) -> None:
     output_rows: list[dict[str, Any]] = []
     baseline = "benchbase_uninstrumented"
-    available_stages = {str(row.get("stage", "")) for row in rows}
-    if baseline in available_stages:
-        for stage in STAGES:
-            if stage in available_stages:
-                output_rows.extend(
-                    comparison_rows(rows, baseline, stage, "cumulative_vs_baseline")
-                )
-    comparisons = (
-        (
-            "benchbase_uninstrumented",
-            "read_capture_encoding",
-            "read_capture_encoding_increment",
-        ),
-        (
-            "benchbase_uninstrumented",
-            "cdc_capture",
-            "cdc_capture_increment",
-        ),
-        (
-            "read_capture_encoding",
-            "read_capture_encoding_redis",
-            "redis_publication_increment",
-        ),
-        (
-            "assembly_join",
-            "assembly_join_check",
-            "checking_boundary_increment",
-        ),
-    )
-    for comparison_stage, stage, attribution in comparisons:
-        if {comparison_stage, stage}.issubset(available_stages):
-            output_rows.extend(
-                comparison_rows(rows, comparison_stage, stage, attribution)
+    available_modes = {str(row.get("mode", "")) for row in rows}
+    if {baseline, "full_e2e"}.issubset(available_modes):
+        output_rows.extend(
+            comparison_rows(
+                rows,
+                baseline,
+                "full_e2e",
+                "full_e2e_client_total_effect",
             )
+        )
     fields = (
-        "comparison_stage",
-        "stage",
+        "comparison_mode",
+        "mode",
         "attribution",
         "metric",
         "comparison_median",
-        "stage_median",
+        "mode_median",
         "overhead_percent",
         "formula",
     )
@@ -2126,6 +2596,8 @@ def command_aggregate(args: argparse.Namespace) -> None:
     write_artifact_index(root, Path(args.artifact_index_output))
     if args.transaction_output:
         write_transaction_results(rows, Path(args.transaction_output))
+    if args.component_output:
+        write_component_results(rows, Path(args.component_output))
 
 
 def command_headline(args: argparse.Namespace) -> None:
@@ -2149,6 +2621,16 @@ def command_fence_time(args: argparse.Namespace) -> None:
     )
 
 
+def command_fence_window(args: argparse.Namespace) -> None:
+    document = load_json(Path(args.input), required=True)
+    print(json.dumps(component_fence_window(document, args.run_id), sort_keys=True))
+
+
+def command_final_status(args: argparse.Namespace) -> None:
+    document = load_json(Path(args.input), required=True)
+    print(json.dumps(final_status_boundary(document, args.run_id), sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2163,7 +2645,8 @@ def build_parser() -> argparse.ArgumentParser:
     capture.set_defaults(handler=command_capture)
 
     aggregate = subparsers.add_parser(
-        "aggregate", help="write the wide raw trial, overhead, and artifact-index CSV files"
+        "aggregate",
+        help="write raw trials, the baseline/full-E2E client impact, and artifact index",
     )
     aggregate.add_argument("--root", required=True)
     aggregate.add_argument("--raw-output", required=True)
@@ -2171,7 +2654,11 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--artifact-index-output", required=True)
     aggregate.add_argument(
         "--transaction-output",
-        help="write one overall/per-type transaction row per stage repetition",
+        help="write one overall/per-type transaction row per mode repetition",
+    )
+    aggregate.add_argument(
+        "--component-output",
+        help="write CDC, C++ monitor, and whole-pipeline rows per full-E2E repetition",
     )
     aggregate.set_defaults(handler=command_aggregate)
 
@@ -2202,6 +2689,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="return the following Debezium transaction END stream time",
     )
     fence_time.set_defaults(handler=command_fence_time)
+
+    fence_window = subparsers.add_parser(
+        "fence-window",
+        help="print LOAD_FINISHED and END_FENCE transaction-END Redis IDs in one scan",
+    )
+    fence_window.add_argument("--input", required=True)
+    fence_window.add_argument("--run-id", required=True)
+    fence_window.set_defaults(handler=command_fence_window)
+
+    final_status = subparsers.add_parser(
+        "final-status-boundary",
+        help="print the exact run-scoped FINAL status Redis ID and timestamp",
+    )
+    final_status.add_argument("--input", required=True)
+    final_status.add_argument("--run-id", required=True)
+    final_status.set_defaults(handler=command_final_status)
     return parser
 
 

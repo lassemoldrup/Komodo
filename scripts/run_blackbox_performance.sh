@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible staged black-box performance measurement coordinator.
+# Reproducible two-mode black-box performance measurement coordinator.
 
 set -Eeuo pipefail
 
@@ -11,16 +11,11 @@ ANALYZER="$ROOT/scripts/blackbox_performance.py"
 REPORTER="$ROOT/scripts/blackbox_performance_report.py"
 MEASURED_COMMAND="$ROOT/scripts/run_measured_command.sh"
 E2E="$ROOT/scripts/e2e.sh"
-EXPECTED_BASELINE_HEAD=2224eeca0d81565e762e584a9214569a28205e3d
 ARTIFACT_PREFIX=/media/newhd/yifan/db-monitoring-builds
 
 CANONICAL_STAGES=(
   benchbase_uninstrumented
-  read_capture_encoding
-  read_capture_encoding_redis
-  cdc_capture
-  assembly_join
-  assembly_join_check
+  full_e2e
 )
 STAGES=()
 REQUESTED_STAGES=()
@@ -28,7 +23,6 @@ STAGE_ROSTER=
 NEED_CURRENT_BENCHBASE=0
 NEED_MONITOR=0
 
-BASELINE_ROOT=${BLACKBOX_PERFORMANCE_BASELINE_ROOT:-}
 OUTPUT_ROOT=${BLACKBOX_PERFORMANCE_OUTPUT_ROOT:-}
 BENCHMARK=${BLACKBOX_PERFORMANCE_BENCHMARK:-ycsb}
 REPETITIONS=${BLACKBOX_PERFORMANCE_REPETITIONS:-3}
@@ -74,7 +68,7 @@ STATUS_TIMEOUT_SECONDS=${BLACKBOX_PERFORMANCE_STATUS_TIMEOUT_SECONDS:-120}
 JAVA_FLAGS_TEXT=${BLACKBOX_PERFORMANCE_JAVA_FLAGS:--Xms1g -Xmx1g -XX:+AlwaysPreTouch -XX:+UseG1GC}
 JAVA_FLAGS=()
 SMOKE=0
-PRINT_STAGE_ORDER=0
+PRINT_MODE_ORDER=0
 VERIFY_INPUTS_ONLY=0
 
 BASELINE_HEAD=
@@ -100,16 +94,14 @@ OUTPUT_LIMIT_SENTINEL=
 
 usage() {
   cat >&2 <<'EOF'
-usage: run_blackbox_performance.sh [--benchmark ycsb|tpcc] [--baseline-root PATH] [--output-root PATH] [OPTIONS]
+usage: run_blackbox_performance.sh [--benchmark ycsb|tpcc] [--output-root PATH] [OPTIONS]
 
 Options:
-  --smoke                    Run selected real stages once with the smoke configuration.
+  --smoke                    Run selected formal modes once with the smoke configuration.
   --benchmark NAME           ycsb (default) or tpcc.
-  --stage NAME               Run this stage; repeat to select multiple stages (default: all).
+  --mode NAME                Run this mode; repeat to select multiple modes (default: both).
                              Selection uses canonical order; duplicate names are rejected.
-                             Names: benchbase_uninstrumented, read_capture_encoding,
-                             read_capture_encoding_redis, cdc_capture, assembly_join,
-                             assembly_join_check.
+                             Names: benchbase_uninstrumented, full_e2e.
   --repetitions N            Measured repetitions (default: 3).
   --terminals N              BenchBase terminals (default: 4).
   --scale-factor N           YCSB scale factor (default: 10).
@@ -169,7 +161,7 @@ Options:
   --monitor-checker-state-bytes N
                              Checker canonical-state capacity (default: 536870912).
   --output-max-bytes N       Artifact budget (default: 107374182400).
-  --print-stage-order        Print the deterministic rotated order and exit.
+  --print-mode-order         Print the deterministic rotated mode order and exit.
   --verify-inputs-only       Validate environment/worktrees/output safety and exit (smoke only).
 EOF
 }
@@ -258,9 +250,9 @@ configure_stages() {
           break
         fi
       done
-      (( found == 1 )) || die "unknown stage: $requested"
+      (( found == 1 )) || die "unknown mode: $requested"
       for canonical in "${selected[@]}"; do
-        [[ $requested != "$canonical" ]] || die "duplicate stage: $requested"
+        [[ $requested != "$canonical" ]] || die "duplicate mode: $requested"
       done
       selected+=("$requested")
     done
@@ -277,10 +269,10 @@ configure_stages() {
   STAGE_ROSTER=${STAGES[*]}
   for canonical in "${STAGES[@]}"; do
     case "$canonical" in
-      read_capture_encoding|read_capture_encoding_redis)
+      benchbase_uninstrumented)
         NEED_CURRENT_BENCHBASE=1
         ;;
-      assembly_join|assembly_join_check)
+      full_e2e)
         NEED_CURRENT_BENCHBASE=1
         NEED_MONITOR=1
         ;;
@@ -319,16 +311,12 @@ parse_arguments() {
         BENCHMARK=${2:?missing --benchmark value}
         shift 2
         ;;
-      --baseline-root)
-        BASELINE_ROOT=${2:?missing --baseline-root value}
-        shift 2
-        ;;
       --output-root)
         OUTPUT_ROOT=${2:?missing --output-root value}
         shift 2
         ;;
-      --stage)
-        REQUESTED_STAGES+=("${2:?missing --stage value}")
+      --mode)
+        REQUESTED_STAGES+=("${2:?missing --mode value}")
         shift 2
         ;;
       --repetitions)
@@ -485,8 +473,8 @@ parse_arguments() {
         SMOKE=1
         shift
         ;;
-      --print-stage-order)
-        PRINT_STAGE_ORDER=1
+      --print-mode-order)
+        PRINT_MODE_ORDER=1
         shift
         ;;
       --verify-inputs-only)
@@ -605,8 +593,8 @@ parse_arguments() {
 }
 
 
-print_stage_order() {
-  printf 'repetition,stage_order_position,stage\n'
+print_mode_order() {
+  printf 'repetition,mode_order_position,mode\n'
   local repetition position offset index
   for (( repetition = 1; repetition <= REPETITIONS; repetition++ )); do
     offset=$(( ((RANDOM_SEED % ${#STAGES[@]}) + ${#STAGES[@]} + repetition - 1) % ${#STAGES[@]} ))
@@ -654,28 +642,11 @@ verify_inputs() {
   CURRENT_BENCHBASE_HEAD=$(git -C "$CURRENT_BENCHBASE_ROOT" rev-parse HEAD)
   SI_MONITORING_HEAD=$(git -C "$ROOT" rev-parse HEAD)
   CO_CHECKER_HEAD=$(git -C "$CO_CHECKER_ROOT" rev-parse HEAD)
-  if [[ $BENCHMARK == ycsb ]]; then
-    [[ -n $BASELINE_ROOT ]] || die "--baseline-root is required for ycsb"
-    BASELINE_ROOT=$(realpath -e "$BASELINE_ROOT") || die "baseline root does not exist"
-    verify_repository baseline "$BASELINE_ROOT"
-    [[ $BASELINE_ROOT != "$(realpath -e "$CURRENT_BENCHBASE_ROOT")" ]] ||
-      die "baseline must be a separate worktree, not the current BenchBase worktree"
-    BASELINE_HEAD=$(git -C "$BASELINE_ROOT" rev-parse HEAD)
-    [[ $BASELINE_HEAD == "$EXPECTED_BASELINE_HEAD" ]] ||
-      die "baseline head must be exactly $EXPECTED_BASELINE_HEAD, found $BASELINE_HEAD"
-    if git -C "$BASELINE_ROOT" symbolic-ref -q HEAD >/dev/null; then
-      die "baseline worktree must be detached at $EXPECTED_BASELINE_HEAD"
-    fi
-    if repo_dirty "$BASELINE_ROOT"; then
-      BASELINE_DIRTY=1
-      die "baseline worktree must be clean"
-    fi
-  else
-    BASELINE_ROOT=$(realpath -e "$CURRENT_BENCHBASE_ROOT")
-    BASELINE_HEAD=$CURRENT_BENCHBASE_HEAD
-  fi
+  BASELINE_ROOT=$(realpath -e "$CURRENT_BENCHBASE_ROOT")
+  BASELINE_HEAD=$CURRENT_BENCHBASE_HEAD
 
   repo_dirty "$CURRENT_BENCHBASE_ROOT" && CURRENT_BENCHBASE_DIRTY=1
+  BASELINE_DIRTY=$CURRENT_BENCHBASE_DIRTY
   repo_dirty "$ROOT" && SI_MONITORING_DIRTY=1
   repo_dirty "$CO_CHECKER_ROOT" && CO_CHECKER_DIRTY=1
   if (( SMOKE == 0 )); then
@@ -700,19 +671,12 @@ verify_inputs() {
 
 
 verify_repositories_unchanged() {
-  if [[ $BENCHMARK == ycsb ]]; then
-    [[ $(git -C "$BASELINE_ROOT" rev-parse HEAD) == "$BASELINE_HEAD" ]] ||
-      die "historical BenchBase head changed during measurement"
-  fi
   [[ $(git -C "$CURRENT_BENCHBASE_ROOT" rev-parse HEAD) == "$CURRENT_BENCHBASE_HEAD" ]] ||
     die "current BenchBase head changed during measurement"
   [[ $(git -C "$ROOT" rev-parse HEAD) == "$SI_MONITORING_HEAD" ]] ||
     die "si-monitoring head changed during measurement"
   [[ $(git -C "$CO_CHECKER_ROOT" rev-parse HEAD) == "$CO_CHECKER_HEAD" ]] ||
     die "co-checker head changed during measurement"
-  if [[ $BENCHMARK == ycsb ]]; then
-    repo_dirty "$BASELINE_ROOT" && die "historical BenchBase became dirty during measurement"
-  fi
   if (( SMOKE == 0 )); then
     ! repo_dirty "$CURRENT_BENCHBASE_ROOT" || die "current BenchBase became dirty during measurement"
     ! repo_dirty "$ROOT" || die "si-monitoring became dirty during measurement"
@@ -906,6 +870,16 @@ from pathlib import Path
 Path(sys.argv[1]).write_text(
     json.dumps(
         {
+            "formal_modes": ["benchbase_uninstrumented", "full_e2e"],
+            "primary_client_comparison_metric": "logical_transactions_per_second",
+            "component_boundaries": {
+                "debezium": "external CDC collection",
+                "cpp_monitor": "assembly/normalization, joiner, and checker",
+                "evidence_pipeline": "LOAD_FINISHED CDC END Redis time through FINAL status Redis XADD time",
+            },
+            "client_measurement_window": "BenchBase measured request window",
+            "component_workload_window": "strictly after LOAD_FINISHED CDC END Redis ID through END_FENCE CDC END Redis ID inclusive",
+            "pipeline_end_boundary": "run-scoped FINAL status Redis stream ID",
             "redis_maxmemory_bytes": int(sys.argv[2]),
             "monitor_max_pending_client_bytes": int(sys.argv[3]),
             "monitor_max_retained_identity_bytes": int(sys.argv[4]),
@@ -969,7 +943,7 @@ PY
 
 generate_configs() {
   BASELINE_CONFIG="$OUTPUT_ROOT/config/benchbase_uninstrumented.xml"
-  CURRENT_CONFIG="$OUTPUT_ROOT/config/benchbase_instrumented.xml"
+  CURRENT_CONFIG="$OUTPUT_ROOT/config/full_e2e.xml"
   mkdir -p "$OUTPUT_ROOT/config"
   python3 - \
     "$BASELINE_CONFIG" "$CURRENT_CONFIG" "$TERMINALS" "$SCALE_FACTOR" \
@@ -986,10 +960,11 @@ baseline, current = (Path(sys.argv[1]), Path(sys.argv[2]))
 ) = sys.argv[3:]
 
 def document(instrumented: bool) -> str:
-    adapter_enabled = instrumented or benchmark == "tpcc"
-    loader_declaration = "" if not adapter_enabled else """
+    # Loading is outside the measured workload. Both modes emit the same
+    # fail-closed declaration so the runner can prove equivalent loaded state.
+    loader_declaration = """
     <loaderDeclaredCountsFile>${env:BLACKBOX_LOADER_DECLARED_COUNTS_FILE}</loaderDeclaredCountsFile>"""
-    blackbox = "" if not adapter_enabled else f"""
+    blackbox = "" if not instrumented else f"""
     <blackbox>
         <mode>${{env:BLACKBOX_MEASUREMENT_MODE}}</mode>
         <runId>${{env:BLACKBOX_ACTIVE_RUN_ID}}</runId>
@@ -1059,7 +1034,6 @@ PY
 
 build_artifacts() {
   local build_root="$OUTPUT_ROOT/build"
-  local baseline_build="$build_root/benchbase-baseline"
   local current_build="$build_root/benchbase-current"
   local monitor_build="$build_root/monitor-release"
   mkdir -p "$build_root"
@@ -1072,14 +1046,6 @@ build_artifacts() {
     -Ddescriptors=src/main/assembly/dir.xml
     package
   )
-
-  if [[ $BENCHMARK == ycsb ]]; then
-    record_command "$build_commands" mvn "${common_maven[@]}" "-DbuildDirectory=$baseline_build"
-    (
-      cd "$BASELINE_ROOT"
-      mvn "${common_maven[@]}" "-DbuildDirectory=$baseline_build"
-    ) >"$OUTPUT_ROOT/build-baseline.log" 2>&1
-  fi
 
   if (( NEED_CURRENT_BENCHBASE == 1 )); then
     record_command "$build_commands" mvn "${common_maven[@]}" "-DbuildDirectory=$current_build"
@@ -1099,22 +1065,13 @@ build_artifacts() {
     cmake --build "$monitor_build" >"$OUTPUT_ROOT/build-monitor.log" 2>&1
   fi
 
-  if [[ $BENCHMARK == ycsb ]]; then
-    local baseline_jars
-    mapfile -t baseline_jars < <(find "$baseline_build" -type f -name benchbase.jar | sort)
-    (( ${#baseline_jars[@]} == 1 )) || die "expected one historical benchbase.jar"
-    BASELINE_DIST=$(dirname "${baseline_jars[0]}")
-    [[ -f $BASELINE_DIST/benchbase.jar ]] || die "historical BenchBase distribution is missing"
-  fi
   if (( NEED_CURRENT_BENCHBASE == 1 )); then
     local current_jars
     mapfile -t current_jars < <(find "$current_build" -type f -name benchbase.jar | sort)
     (( ${#current_jars[@]} == 1 )) || die "expected one current benchbase.jar"
     CURRENT_DIST=$(dirname "${current_jars[0]}")
     [[ -f $CURRENT_DIST/benchbase.jar ]] || die "current BenchBase distribution is missing"
-    if [[ $BENCHMARK == tpcc ]]; then
-      BASELINE_DIST=$CURRENT_DIST
-    fi
+    BASELINE_DIST=$CURRENT_DIST
   fi
   if (( NEED_MONITOR == 1 )); then
     MONITOR_BIN="$monitor_build/blackbox_run_monitor"
@@ -1138,92 +1095,6 @@ wait_for_container() {
     sleep 1
   done
   die "timed out waiting for $container"
-}
-
-
-wait_for_cdc() {
-  local deadline=$(( $(date +%s) + STATUS_TIMEOUT_SECONDS ))
-  while (( $(date +%s) <= deadline )); do
-    if docker logs cdc-debezium 2>&1 | grep -q 'Starting streaming'; then
-      return 0
-    fi
-    local state
-    state=$(docker inspect --format '{{.State.Status}}' cdc-debezium 2>/dev/null || true)
-    [[ $state != exited && $state != dead ]] || die "Debezium exited before streaming"
-    sleep 1
-  done
-  die "timed out waiting for Debezium streaming"
-}
-
-
-wait_for_cdc_fence() {
-  local phase=$1
-  local trial_dir=$2
-  local deadline=$(( $(date +%s) + STATUS_TIMEOUT_SECONDS ))
-  while (( $(date +%s) <= deadline )); do
-    blackbox_redis --json XREVRANGE cdc + - COUNT 1000 >"$trial_dir/cdc_wait.json"
-    if python3 - "$trial_dir/cdc_wait.json" "$phase" "$BLACKBOX_ACTIVE_RUN_ID" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-document = list(reversed(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))))
-expected_phase, expected_run = sys.argv[2:]
-
-def contains_fence(value):
-    if isinstance(value, dict):
-        if value.get("phase") == expected_phase and value.get("run_id") == expected_run:
-            return True
-        return any(contains_fence(child) for child in value.values())
-    if isinstance(value, list):
-        return any(contains_fence(child) for child in value)
-    if isinstance(value, str) and value.startswith(("{", "[")):
-        try:
-            return contains_fence(json.loads(value))
-        except json.JSONDecodeError:
-            return False
-    return False
-
-def values(entry):
-    fields = entry[1]
-    if isinstance(fields, dict):
-        raw_values = fields.values()
-    else:
-        raw_values = fields[1::2]
-    for raw in raw_values:
-        try:
-            value = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict):
-            yield value
-
-transaction_id = None
-fence_index = None
-for index, entry in enumerate(document):
-    for envelope in values(entry):
-        if contains_fence(envelope):
-            transaction = envelope.get("transaction")
-            if isinstance(transaction, dict) and isinstance(transaction.get("id"), str):
-                transaction_id = transaction["id"]
-                fence_index = index
-                break
-    if fence_index is not None:
-        break
-
-if transaction_id is not None and fence_index is not None:
-    for entry in document[fence_index + 1:]:
-        for envelope in values(entry):
-            if envelope.get("status") == "END" and envelope.get("id") == transaction_id:
-                raise SystemExit(0)
-raise SystemExit(1)
-PY
-    then
-      return 0
-    fi
-    sleep 0.25
-  done
-  die "timed out waiting for CDC fence $phase"
 }
 
 
@@ -1266,24 +1137,14 @@ verify_empty_schema() {
 
 start_direct_stack() {
   local stage=$1
+  [[ $stage == benchbase_uninstrumented ]] || die "not a direct mode: $stage"
   record_command "$ACTIVE_TRIAL_DIR/commands.txt" compose down --volumes --remove-orphans
   reset_stack
   STACK_MAY_BE_RUNNING=1
-  if [[ $stage == read_capture_encoding_redis || $stage == cdc_capture ]]; then
-    record_command "$ACTIVE_TRIAL_DIR/commands.txt" compose up --detach --force-recreate redis mariadb
-    compose up --detach --force-recreate redis mariadb
-    wait_for_container cdc-redis
-  else
-    record_command "$ACTIVE_TRIAL_DIR/commands.txt" compose up --detach --force-recreate mariadb
-    compose up --detach --force-recreate mariadb
-  fi
+  record_command "$ACTIVE_TRIAL_DIR/commands.txt" compose up --detach --force-recreate mariadb
+  compose up --detach --force-recreate mariadb
   wait_for_container cdc-mariadb
   verify_empty_schema
-  if [[ $stage == cdc_capture ]]; then
-    record_command "$ACTIVE_TRIAL_DIR/commands.txt" compose up --detach --no-deps --force-recreate debezium
-    compose up --detach --no-deps --force-recreate debezium
-    wait_for_cdc
-  fi
 }
 
 
@@ -1339,9 +1200,9 @@ from pathlib import Path
 path = Path(sys.argv[1])
 values = sys.argv[2:]
 document = {
-    "stage": values[0],
+    "mode": values[0],
     "repetition": int(values[1]),
-    "stage_order_position": int(values[2]),
+    "mode_order_position": int(values[2]),
     "trial_id": values[3],
     "run_id": values[4],
     "terminals": int(values[5]),
@@ -1360,6 +1221,17 @@ document = {
     "database_port": 3306,
     "resource_sample_window": "workload_process_window",
     "monitor_resource_window": "full_monitor_lifecycle",
+    "client_measurement_window": "benchbase_measured_request_window",
+    "component_workload_window": (
+        "after_load_finished_transaction_end_id_through_end_fence_transaction_end_id_inclusive"
+        if values[0] == "full_e2e"
+        else None
+    ),
+    "pipeline_end_boundary": (
+        "run_scoped_final_status_redis_stream_id"
+        if values[0] == "full_e2e"
+        else None
+    ),
     "java_flags": values[13],
     "si_monitoring_head": values[14],
     "benchbase_current_head": values[15],
@@ -1377,7 +1249,7 @@ document = {
     "monitor_max_bootstrap_state_rows": int(values[27]),
     "monitor_max_bootstrap_state_bytes": int(values[28]),
     "output_max_bytes": int(values[29]),
-    "configured_stages": values[30].split(","),
+    "configured_modes": values[30].split(","),
     "benchmark": values[31],
     "transaction_mix": [float(value) for value in values[32].split(",")],
     "warehouses": int(values[6]) if values[31] == "tpcc" else None,
@@ -1404,11 +1276,27 @@ document = {
     "bootstrap_scan_max_input_bytes": int(values[54]),
     "bootstrap_scan_max_canonical_bytes": int(values[55]),
     "loader_timestamp_utc": values[56],
-    "baseline_profile": (
-        "current_evidence_disabled_compatibility"
-        if values[31] == "tpcc"
-        else "historical_uninstrumented"
-    ),
+    "baseline_profile": "ordinary_benchbase",
+    "component_boundaries": {
+        "benchbase_client": (
+            "ordinary BenchBase Worker/procedure path; generated configuration omits blackbox"
+            if values[0] == "benchbase_uninstrumented"
+            else "audited capture, canonical encoding, marker commit, and Redis publication"
+        ),
+        "cdc_collection": (
+            "disabled"
+            if values[0] == "benchbase_uninstrumented"
+            else "MariaDB row binlog consumed and published by Debezium Server"
+        ),
+        "cpp_monitor": (
+            "disabled"
+            if values[0] == "benchbase_uninstrumented"
+            else "C++ assembly/normalization of raw Debezium records, joiner, and checker"
+        ),
+    },
+    "primary_client_comparison_metric": "logical_transactions_per_second",
+    "monitor_throughput_owner": "cpp_monitor",
+    "debezium_is_monitor": False,
 }
 path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -1484,7 +1372,6 @@ run_loader() {
   local trial_dir=$1
   local distribution=$2
   local config=$3
-  local measurement_mode=$4
   local commands="$trial_dir/commands.txt"
   local command=(
     java "${JAVA_FLAGS[@]}" -jar "$distribution/benchbase.jar"
@@ -1494,13 +1381,12 @@ run_loader() {
   )
   mkdir -p "$trial_dir/loader_results"
   record_command "$commands" env \
-    "BLACKBOX_MEASUREMENT_MODE=$measurement_mode" \
     "BLACKBOX_LOADER_DECLARED_COUNTS_FILE=${BLACKBOX_LOADER_DECLARED_COUNTS_FILE:-}" \
     timeout --foreground --signal=TERM --kill-after=10 \
     "$LOADER_TIMEOUT_SECONDS" "${command[@]}"
   (
     cd "$distribution"
-    BLACKBOX_MEASUREMENT_MODE=$measurement_mode \
+    BLACKBOX_LOADER_DECLARED_COUNTS_FILE=${BLACKBOX_LOADER_DECLARED_COUNTS_FILE:-} \
       timeout --foreground --signal=TERM --kill-after=10 \
       "$LOADER_TIMEOUT_SECONDS" "${command[@]}"
   ) >"$trial_dir/loader.log" 2>&1
@@ -1509,14 +1395,7 @@ run_loader() {
 
 validate_independent_loader_state() {
   local trial_dir=$1
-  local declaration_available=$2
-  if (( declaration_available == 1 )); then
-    blackbox_validate_loader_state >"$trial_dir/loader_validation.json"
-  else
-    blackbox_validate_historical_loader_state \
-      "$LOADER_BATCH_SIZE" "benchbase.usertable=$(( SCALE_FACTOR * 1000 ))" \
-      >"$trial_dir/loader_validation.json"
-  fi ||
+  blackbox_validate_loader_state >"$trial_dir/loader_validation.json" ||
     die "loader declarations and independent SQL validation disagree"
   validate_loader_report "$trial_dir/loader_validation.json"
 }
@@ -1580,33 +1459,11 @@ workload_container_arguments() {
 run_direct_workload() {
   local stage=$1
   local trial_dir=$2
-  local run_id=$3
-  local distribution config mode include_redis include_cdc
+  local distribution config
+  [[ $stage == benchbase_uninstrumented ]] || die "not a direct mode: $stage"
   distribution=$BASELINE_DIST
   config=$BASELINE_CONFIG
-  mode=disabled
-  include_redis=0
-  include_cdc=0
-  case "$stage" in
-    benchbase_uninstrumented) ;;
-    read_capture_encoding)
-      distribution=$CURRENT_DIST
-      config=$CURRENT_CONFIG
-      mode=capture_encoding
-      ;;
-    read_capture_encoding_redis)
-      distribution=$CURRENT_DIST
-      config=$CURRENT_CONFIG
-      mode=capture_encoding_redis
-      include_redis=1
-      ;;
-    cdc_capture)
-      include_redis=1
-      include_cdc=1
-      ;;
-    *) die "not a direct stage: $stage" ;;
-  esac
-  workload_container_arguments "$include_redis" "$include_cdc"
+  workload_container_arguments 0 0
   local sample_duration=$TRIAL_TIMEOUT_SECONDS
   local command=(
     "$MEASURED_COMMAND"
@@ -1621,19 +1478,13 @@ run_direct_workload() {
     --directory "$trial_dir/benchbase_results"
   )
   mkdir -p "$trial_dir/benchbase_results"
-  record_command "$trial_dir/commands.txt" env \
-    "BLACKBOX_MEASUREMENT_MODE=$mode" "BLACKBOX_ACTIVE_RUN_ID=$run_id" \
-    BLACKBOX_REDIS_HOST=host.docker.internal BLACKBOX_REDIS_PORT=6379 \
+  record_command "$trial_dir/commands.txt" \
     timeout --foreground --signal=TERM --kill-after=10 "$TRIAL_TIMEOUT_SECONDS" \
     "${command[@]}"
   (
     cd "$distribution"
-    BLACKBOX_MEASUREMENT_MODE=$mode \
-    BLACKBOX_ACTIVE_RUN_ID=$run_id \
-    BLACKBOX_REDIS_HOST=host.docker.internal \
-    BLACKBOX_REDIS_PORT=6379 \
-      timeout --foreground --signal=TERM --kill-after=10 "$TRIAL_TIMEOUT_SECONDS" \
-        "${command[@]}"
+    timeout --foreground --signal=TERM --kill-after=10 "$TRIAL_TIMEOUT_SECONDS" \
+      "${command[@]}"
   ) >"$trial_dir/workload.log" 2>&1
 }
 
@@ -1648,7 +1499,7 @@ assert_no_transaction_markers() {
   marker_rows=$(blackbox_database_query 'SELECT COUNT(*) FROM session_txn')
   marker_rows=${marker_rows//[[:space:]]/}
   [[ $marker_rows == 0 ]] ||
-    die "partial measurement stage wrote $marker_rows forbidden transaction marker row(s)"
+    die "uninstrumented mode wrote $marker_rows forbidden transaction marker row(s)"
 }
 
 
@@ -1659,11 +1510,11 @@ shell_command() {
 }
 
 
-run_full_stage() {
+run_full_e2e() {
   local stage=$1
   local trial_dir=$2
   local processing_mode=audited
-  [[ $stage == assembly_join ]] && processing_mode=join-only
+  [[ $stage == full_e2e ]] || die "not a full E2E mode: $stage"
   workload_container_arguments 1 1
   local sample_duration=$TRIAL_TIMEOUT_SECONDS
   local loader_args=(
@@ -1778,11 +1629,7 @@ run_full_stage() {
       >"$trial_dir/workload.log" 2>&1
   status=$?
   set -e
-  if [[ $stage == assembly_join ]]; then
-    (( status == 0 )) || die "join-only stage exited $status"
-  else
-    (( status == 0 || status == 3 )) || die "audited stage exited $status"
-  fi
+  (( status == 0 || status == 3 )) || die "full E2E mode exited $status"
   [[ -s $trial_dir/run_id.txt ]] || die "e2e did not record its run ID"
   [[ -s $trial_dir/bootstrap_manifest.json ]] || die "e2e did not record its bootstrap manifest"
   [[ -s $trial_dir/loader_validation.json ]] || die "e2e did not record loader validation"
@@ -1810,18 +1657,7 @@ capture_redis_streams() {
   local trial_dir=$2
   local run_id=$3
   case "$stage" in
-    read_capture_encoding_redis)
-      record_command "$trial_dir/commands.txt" redis-cli -h host.docker.internal -p 6379 --json XRANGE \
-        "blackbox:measurement:client:$run_id" - +
-      capture_bounded_stdout "$trial_dir/measurement_stream.json" \
-        blackbox_redis --json XRANGE "blackbox:measurement:client:$run_id" - +
-      ;;
-    cdc_capture)
-      record_command "$trial_dir/commands.txt" redis-cli -h host.docker.internal -p 6379 --json XRANGE cdc - +
-      capture_bounded_stdout "$trial_dir/cdc_stream.json" \
-        blackbox_redis --json XRANGE cdc - +
-      ;;
-    assembly_join|assembly_join_check)
+    full_e2e)
       record_command "$trial_dir/commands.txt" redis-cli -h host.docker.internal -p 6379 --json XRANGE cdc - +
       record_command "$trial_dir/commands.txt" redis-cli -h host.docker.internal -p 6379 --json XRANGE \
         "blackbox:client:$run_id" - +
@@ -1834,6 +1670,8 @@ capture_redis_streams() {
       capture_bounded_stdout "$trial_dir/status_stream.json" \
         blackbox_redis --json XRANGE "blackbox:status:$run_id" - +
       ;;
+    benchbase_uninstrumented) return 0 ;;
+    *) die "unknown formal mode while capturing Redis streams: $stage" ;;
   esac
   blackbox_redis --raw INFO all >"$trial_dir/redis_info_after.txt" 2>/dev/null || true
 }
@@ -1951,34 +1789,89 @@ analyze_trial() {
       --output-json "$trial_dir/outcome_metrics.json" \
       --output-csv "$trial_dir/outcome_metrics.csv"
   fi
-  local measured_start measured_end redis_end window_definition
+  local measured_start measured_end component_start component_end
+  local component_after_stream_id component_through_stream_id
+  local final_status_stream_id final_status_epoch_ms
   measured_start=$(jq -er '.measured_start_epoch_ms' "$trial_dir/benchbase_metrics.json")
   measured_end=$(jq -er '.measured_end_epoch_ms' "$trial_dir/benchbase_metrics.json")
-  redis_end=$measured_end
-  window_definition=benchbase_measured_request_window
+  component_start=
+  component_end=
+  component_after_stream_id=
+  component_through_stream_id=
+  final_status_stream_id=
+  final_status_epoch_ms=
 
   local redis_input=
   case "$stage" in
-    read_capture_encoding_redis) redis_input="$trial_dir/measurement_stream.json" ;;
-    cdc_capture|assembly_join|assembly_join_check)
+    full_e2e)
       redis_input="$trial_dir/cdc_stream.json"
-      redis_end=$(python3 "$REPORTER" fence-stream-time \
-        --input "$redis_input" --run-id "$run_id" --phase END_FENCE --transaction-end)
-      window_definition=benchbase_measured_start_through_end_fence_transaction_end_cdc_arrival
+      record_command "$trial_dir/commands.txt" python3 "$REPORTER" fence-window \
+        --input "$redis_input" --run-id "$run_id"
+      python3 "$REPORTER" fence-window \
+        --input "$redis_input" --run-id "$run_id" \
+        >"$trial_dir/component_fence_window.json"
+      component_after_stream_id=$(jq -er \
+        '.LOAD_FINISHED.transaction_end_stream_id' \
+        "$trial_dir/component_fence_window.json")
+      component_start=$(jq -er '.LOAD_FINISHED.epoch_ms' \
+        "$trial_dir/component_fence_window.json")
+      component_through_stream_id=$(jq -er \
+        '.END_FENCE.transaction_end_stream_id' \
+        "$trial_dir/component_fence_window.json")
+      component_end=$(jq -er '.END_FENCE.epoch_ms' \
+        "$trial_dir/component_fence_window.json")
+      record_command "$trial_dir/commands.txt" python3 "$REPORTER" final-status-boundary \
+        --input "$trial_dir/status_stream.json" --run-id "$run_id"
+      python3 "$REPORTER" final-status-boundary \
+        --input "$trial_dir/status_stream.json" --run-id "$run_id" \
+        >"$trial_dir/final_status_boundary.json"
+      final_status_stream_id=$(jq -er '.stream_id' \
+        "$trial_dir/final_status_boundary.json")
+      final_status_epoch_ms=$(jq -er '.epoch_ms' \
+        "$trial_dir/final_status_boundary.json")
+      (( component_start <= component_end )) ||
+        die "component workload CDC window is reversed"
+      (( component_end <= final_status_epoch_ms )) ||
+        die "final status precedes the component workload end"
       ;;
   esac
-  python3 - "$trial_dir/analysis_window.json" "$measured_start" "$redis_end" \
-    "$window_definition" <<'PY'
+  python3 - "$trial_dir/analysis_window.json" "$measured_start" "$measured_end" \
+    "$component_after_stream_id" "$component_through_stream_id" \
+    "$component_start" "$component_end" "$final_status_stream_id" \
+    "$final_status_epoch_ms" <<'PY'
 import json
 import sys
 from pathlib import Path
 
+component_window = None
+if sys.argv[4] and sys.argv[5] and sys.argv[6] and sys.argv[7]:
+    component_window = {
+        "after_stream_id": sys.argv[4],
+        "through_stream_id": sys.argv[5],
+        "start_epoch_ms": int(sys.argv[6]),
+        "end_epoch_ms": int(sys.argv[7]),
+        "start_exclusive": True,
+        "end_inclusive": True,
+        "definition": "after_load_finished_transaction_end_id_through_end_fence_transaction_end_id_inclusive",
+        "start_boundary": "LOAD_FINISHED",
+        "end_boundary": "END_FENCE",
+    }
+final_verdict = None
+if sys.argv[8] and sys.argv[9]:
+    final_verdict = {
+        "stream_id": sys.argv[8],
+        "epoch_ms": int(sys.argv[9]),
+    }
 Path(sys.argv[1]).write_text(
     json.dumps(
         {
-            "start_epoch_ms": int(sys.argv[2]),
-            "end_epoch_ms": int(sys.argv[3]),
-            "definition": sys.argv[4],
+            "client_measurement_window": {
+                "start_epoch_ms": int(sys.argv[2]),
+                "end_epoch_ms": int(sys.argv[3]),
+                "definition": "benchbase_measured_request_window",
+            },
+            "component_workload_window": component_window,
+            "final_verdict": final_verdict,
         },
         indent=2,
         sort_keys=True,
@@ -1989,14 +1882,14 @@ PY
   if [[ -n $redis_input ]]; then
     record_command "$trial_dir/commands.txt" python3 "$ANALYZER" analyze-redis \
       --input-json "$redis_input" \
-      --measured-start-epoch-ms "$measured_start" \
-      --measured-end-epoch-ms "$redis_end" \
+      --window-after-stream-id "$component_after_stream_id" \
+      --window-through-stream-id "$component_through_stream_id" \
       --output-json "$trial_dir/redis_metrics.json" \
       --output-csv "$trial_dir/redis_metrics.csv"
     python3 "$ANALYZER" analyze-redis \
       --input-json "$redis_input" \
-      --measured-start-epoch-ms "$measured_start" \
-      --measured-end-epoch-ms "$redis_end" \
+      --window-after-stream-id "$component_after_stream_id" \
+      --window-through-stream-id "$component_through_stream_id" \
       --output-json "$trial_dir/redis_metrics.json" \
       --output-csv "$trial_dir/redis_metrics.csv"
   fi
@@ -2009,38 +1902,6 @@ PY
       --input-json "$trial_dir/client_stream.json" \
       --output-json "$trial_dir/client_metrics.json" \
       --output-csv "$trial_dir/client_metrics.csv"
-  elif [[ $stage == read_capture_encoding_redis ]]; then
-    record_command "$trial_dir/commands.txt" python3 "$ANALYZER" analyze-client \
-      --input-json "$trial_dir/measurement_stream.json" \
-      --output-json "$trial_dir/client_metrics.json" \
-      --output-csv "$trial_dir/client_metrics.csv"
-    python3 "$ANALYZER" analyze-client \
-      --input-json "$trial_dir/measurement_stream.json" \
-      --output-json "$trial_dir/client_metrics.json" \
-      --output-csv "$trial_dir/client_metrics.csv"
-  fi
-  if [[ $stage == read_capture_encoding || $stage == read_capture_encoding_redis ]]; then
-    grep -q 'BLACKBOX_MEASUREMENT ' "$trial_dir/workload.log" ||
-      die "$stage did not emit required capture summaries"
-    local capture_args=(
-      capture-summaries
-      --log "$trial_dir/workload.log"
-      --output "$trial_dir/capture_metrics.json"
-      --run-id "$run_id"
-    )
-    local worker
-    for (( worker = 1; worker <= TERMINALS; worker++ )); do
-      capture_args+=(--expected-session "$BENCHMARK/worker/$worker")
-    done
-    record_command "$trial_dir/commands.txt" python3 "$REPORTER" "${capture_args[@]}"
-    python3 "$REPORTER" "${capture_args[@]}"
-    if [[ $stage == read_capture_encoding_redis ]]; then
-      local capture_records stream_records
-      capture_records=$(jq -er '.record_count' "$trial_dir/capture_metrics.json")
-      stream_records=$(jq -er '.entry_count' "$trial_dir/client_metrics.json")
-      [[ $capture_records == "$stream_records" ]] ||
-        die "measurement Redis stream count differs from acknowledged capture records"
-    fi
   fi
   capture_redis_usage "$trial_dir" "$run_id"
 }
@@ -2072,115 +1933,27 @@ run_trial() {
   write_trial_metadata "$trial_dir" "$stage" "$repetition" "$position" "$run_id" "$trial_id"
   cp "$BASELINE_CONFIG" "$CURRENT_CONFIG" "$trial_dir/"
 
-  log "starting repetition=$repetition position=$position stage=$stage trial_id=$trial_id"
+  log "starting repetition=$repetition position=$position mode=$stage trial_id=$trial_id"
   assert_output_size_within_limit
-  if [[ $stage == assembly_join || $stage == assembly_join_check ]]; then
+  if [[ $stage == full_e2e ]]; then
     STACK_MAY_BE_RUNNING=1
     capture_host_before "$trial_dir"
-    run_full_stage "$stage" "$trial_dir"
+    run_full_e2e "$stage" "$trial_dir"
     run_id=$(tr -d '[:space:]' <"$trial_dir/run_id.txt")
     capture_redis_configuration "$trial_dir"
   else
+    [[ $stage == benchbase_uninstrumented ]] || die "unknown formal mode: $stage"
     start_direct_stack "$stage"
     capture_host_before "$trial_dir"
     capture_versions "$trial_dir"
-    if [[ $stage == read_capture_encoding_redis ]]; then
-      capture_redis_configuration "$trial_dir"
-    fi
     export BLACKBOX_ACTIVE_RUN_ID=$run_id
-    local loader_distribution=$BASELINE_DIST
-    local loader_config=$BASELINE_CONFIG
-    local loader_declaration_available=0
-    local loader_mode=disabled
-    if [[ $BENCHMARK == tpcc ]]; then
-      loader_distribution=$CURRENT_DIST
-      loader_declaration_available=1
-      export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
-    fi
-    if [[ $stage == read_capture_encoding || $stage == read_capture_encoding_redis ]]; then
-      loader_distribution=$CURRENT_DIST
-      loader_config=$CURRENT_CONFIG
-      loader_declaration_available=1
-      loader_mode=capture_encoding
-      export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
-    elif [[ $BENCHMARK == ycsb ]]; then
-      unset BLACKBOX_LOADER_DECLARED_COUNTS_FILE
-    fi
-    run_loader "$trial_dir" "$loader_distribution" "$loader_config" "$loader_mode"
-    validate_independent_loader_state "$trial_dir" "$loader_declaration_available"
+    export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
+    run_loader "$trial_dir" "$BASELINE_DIST" "$BASELINE_CONFIG"
+    validate_independent_loader_state "$trial_dir"
     capture_bootstrap "$trial_dir"
-    run_direct_workload "$stage" "$trial_dir" "$run_id"
+    run_direct_workload "$stage" "$trial_dir"
     assert_no_transaction_markers "$trial_dir"
   fi
-
-  refresh_network_after "$trial_dir"
-  capture_redis_streams "$stage" "$trial_dir" "$run_id"
-  assert_output_size_within_limit
-  analyze_trial "$stage" "$trial_dir" "$run_id"
-  capture_stack_artifacts "$trial_dir"
-  capture_versions "$trial_dir"
-  date -u --iso-8601=seconds >"$trial_dir/host_after.txt"
-  cat /proc/loadavg >>"$trial_dir/host_after.txt"
-  uptime >>"$trial_dir/host_after.txt"
-  record_command "$trial_dir/commands.txt" compose down --volumes --remove-orphans
-  checksum_trial "$trial_dir"
-  assert_output_size_within_limit
-  cleanup_stack
-  ACTIVE_TRIAL_DIR=
-  ACTIVE_TRIAL_CAPTURED=0
-  log "completed $trial_id"
-  if (( COOLDOWN_SECONDS > 0 )); then
-    sleep "$COOLDOWN_SECONDS"
-  fi
-}
-
-
-run_cdc_trial() {
-  local repetition=$1
-  local position=$2
-  local stage=cdc_capture
-  local trial_id
-  printf -v trial_id 'repetition-%02d-position-%02d-%s' "$repetition" "$position" "$stage"
-  local trial_dir
-  trial_dir="$OUTPUT_ROOT/trials/repetition-$(printf '%02d' "$repetition")/$(printf '%02d' "$position")-$stage"
-  if [[ -d $trial_dir && -n $(find "$trial_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
-    die "refusing to reuse nonempty trial directory: $trial_dir"
-  fi
-  mkdir -p "$trial_dir"
-  ACTIVE_TRIAL_DIR=$trial_dir
-  ACTIVE_TRIAL_CAPTURED=0
-  local run_id
-  run_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-  write_trial_metadata "$trial_dir" "$stage" "$repetition" "$position" "$run_id" "$trial_id"
-  cp "$BASELINE_CONFIG" "$CURRENT_CONFIG" "$trial_dir/"
-  log "starting repetition=$repetition position=$position stage=$stage trial_id=$trial_id"
-
-  start_direct_stack "$stage"
-  capture_redis_configuration "$trial_dir"
-  capture_host_before "$trial_dir"
-  capture_versions "$trial_dir"
-  export BLACKBOX_ACTIVE_RUN_ID=$run_id
-  local declaration_available=0
-  if [[ $BENCHMARK == tpcc ]]; then
-    declaration_available=1
-    export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
-  else
-    unset BLACKBOX_LOADER_DECLARED_COUNTS_FILE
-  fi
-  record_command "$trial_dir/commands.txt" blackbox_commit_fence RUN_START
-  blackbox_commit_fence RUN_START
-  wait_for_cdc_fence RUN_START "$trial_dir"
-  run_loader "$trial_dir" "$BASELINE_DIST" "$BASELINE_CONFIG" disabled
-  validate_independent_loader_state "$trial_dir" "$declaration_available"
-  capture_bootstrap "$trial_dir"
-  record_command "$trial_dir/commands.txt" blackbox_commit_fence LOAD_FINISHED
-  blackbox_commit_fence LOAD_FINISHED
-  wait_for_cdc_fence LOAD_FINISHED "$trial_dir"
-  run_direct_workload "$stage" "$trial_dir" "$run_id"
-  assert_no_transaction_markers "$trial_dir"
-  record_command "$trial_dir/commands.txt" blackbox_commit_fence END_FENCE
-  blackbox_commit_fence END_FENCE
-  wait_for_cdc_fence END_FENCE "$trial_dir"
 
   refresh_network_after "$trial_dir"
   capture_redis_streams "$stage" "$trial_dir" "$run_id"
@@ -2211,17 +1984,20 @@ finalize_reports() {
   local headline_csv="$OUTPUT_ROOT/headline_results.csv"
   local headline_markdown="$OUTPUT_ROOT/headline_results.md"
   local transactions="$OUTPUT_ROOT/transaction_results.csv"
+  local components="$OUTPUT_ROOT/component_results.csv"
   local artifact_index="$OUTPUT_ROOT/artifact_index.csv"
   local commands="$OUTPUT_ROOT/report-commands.txt"
   record_command "$commands" python3 "$REPORTER" aggregate \
     --root "$OUTPUT_ROOT" --raw-output "$raw" --overhead-output "$overhead" \
-    --artifact-index-output "$artifact_index" --transaction-output "$transactions"
+    --artifact-index-output "$artifact_index" --transaction-output "$transactions" \
+    --component-output "$components"
   python3 "$REPORTER" aggregate \
     --root "$OUTPUT_ROOT" \
     --raw-output "$raw" \
     --overhead-output "$overhead" \
     --artifact-index-output "$artifact_index" \
-    --transaction-output "$transactions"
+    --transaction-output "$transactions" \
+    --component-output "$components"
   record_command "$commands" python3 "$REPORTER" headline \
     --input-csv "$raw" --csv-output "$headline_csv" \
     --markdown-output "$headline_markdown"
@@ -2235,13 +2011,6 @@ finalize_reports() {
     --output-csv "$summary"
     --output-json "$OUTPUT_ROOT/summary_statistics.json"
   )
-  local stage
-  for stage in "${STAGES[@]}"; do
-    if [[ $stage == benchbase_uninstrumented ]]; then
-      summarize_arguments+=(--baseline-stage benchbase_uninstrumented)
-      break
-    fi
-  done
   record_command "$commands" python3 "$ANALYZER" "${summarize_arguments[@]}"
   python3 "$ANALYZER" "${summarize_arguments[@]}"
   record_command "$commands" python3 "$REPORTER" checksums \
@@ -2254,8 +2023,8 @@ finalize_reports() {
 
 main() {
   parse_arguments "$@"
-  if (( PRINT_STAGE_ORDER == 1 )); then
-    print_stage_order
+  if (( PRINT_MODE_ORDER == 1 )); then
+    print_mode_order
     return 0
   fi
   BLACKBOX_ADAPTER_SCHEMA_FILE="$ROOT/mariadb/initdb/adapters/${BENCHMARK}.sql"
@@ -2269,7 +2038,7 @@ main() {
   verify_canonical_container
   verify_inputs
   if (( VERIFY_INPUTS_ONLY == 1 )); then
-    printf 'verified benchmark=%s adapter_schema_file=%s baseline=%s output=%s stages=%s repetitions=%s terminals=%s scale_value=%s warmup_seconds=%s duration_seconds=%s mix=%s rate=%s drain_timeout_seconds=%s status_timeout_seconds=%s high_water_threshold_percent=%s loader_batch_size=%s loader_timestamp_utc=%s redis_maxmemory_bytes=%s bootstrap_scan_max_rows=%s bootstrap_scan_max_input_bytes=%s bootstrap_scan_max_canonical_bytes=%s monitor_assembler_active_transactions=%s monitor_assembler_events_per_transaction=%s monitor_assembler_active_bytes=%s monitor_assembler_completed_transactions=%s monitor_assembler_retained_identity_bytes=%s monitor_pending_client_records=%s monitor_pending_client_bytes=%s monitor_pending_cdc_slots=%s monitor_pending_cdc_bytes=%s monitor_retained_identity_records=%s monitor_retained_identity_bytes=%s monitor_events_per_transaction=%s monitor_bootstrap_state_rows=%s monitor_bootstrap_state_bytes=%s monitor_checker_state_bytes=%s output_max_bytes=%s\n' \
+    printf 'verified benchmark=%s adapter_schema_file=%s benchbase_head=%s output=%s modes=%s repetitions=%s terminals=%s scale_value=%s warmup_seconds=%s duration_seconds=%s mix=%s rate=%s drain_timeout_seconds=%s status_timeout_seconds=%s high_water_threshold_percent=%s loader_batch_size=%s loader_timestamp_utc=%s redis_maxmemory_bytes=%s bootstrap_scan_max_rows=%s bootstrap_scan_max_input_bytes=%s bootstrap_scan_max_canonical_bytes=%s monitor_assembler_active_transactions=%s monitor_assembler_events_per_transaction=%s monitor_assembler_active_bytes=%s monitor_assembler_completed_transactions=%s monitor_assembler_retained_identity_bytes=%s monitor_pending_client_records=%s monitor_pending_client_bytes=%s monitor_pending_cdc_slots=%s monitor_pending_cdc_bytes=%s monitor_retained_identity_records=%s monitor_retained_identity_bytes=%s monitor_events_per_transaction=%s monitor_bootstrap_state_rows=%s monitor_bootstrap_state_bytes=%s monitor_checker_state_bytes=%s output_max_bytes=%s\n' \
       "$BENCHMARK" "$BLACKBOX_ADAPTER_SCHEMA_FILE" \
       "$BASELINE_HEAD" "$OUTPUT_ROOT" "$STAGE_ROSTER" \
       "$REPETITIONS" "$TERMINALS" "$SCALE_FACTOR" "$WARMUP_SECONDS" \
@@ -2298,7 +2067,7 @@ main() {
   start_output_guard
   write_system_provenance "$OUTPUT_ROOT/provenance"
   generate_configs
-  print_stage_order >"$OUTPUT_ROOT/stage_order.csv"
+  print_mode_order >"$OUTPUT_ROOT/mode_order.csv"
   build_artifacts
   assert_output_size_within_limit
   # shellcheck source=scripts/blackbox_lifecycle.sh
@@ -2314,11 +2083,7 @@ main() {
     for (( position = 1; position <= ${#STAGES[@]}; position++ )); do
       index=$(( (offset + position - 1) % ${#STAGES[@]} ))
       stage=${STAGES[$index]}
-      if [[ $stage == cdc_capture ]]; then
-        run_cdc_trial "$repetition" "$position"
-      else
-        run_trial "$repetition" "$position" "$stage"
-      fi
+      run_trial "$repetition" "$position" "$stage"
     done
   done
   verify_repositories_unchanged

@@ -351,22 +351,22 @@ implicit-DML, and locking-read exclusions are not used as negative tests.
 
 ## Performance measurement
 
-Create the required detached, clean pre-instrumentation worktree once, from the
-canonical development container:
+The formal performance experiment has exactly two modes. Both use the current
+BenchBase checkout, the same RR database/server contract, evidence-compatible
+schema, deterministic loaded bytes, scale, mix, seed, terminal count, rate,
+warmup, and measured duration:
 
-```bash
-docker exec db-monitoring-dev bash -lc '
-  git -C /home/yifan/code/db-monitoring/benchbase worktree add --detach \
-    /media/newhd/yifan/db-monitoring-builds/blackbox-performance/worktrees/benchbase-2224eec \
-    2224eeca0d81565e762e584a9214569a28205e3d
-'
-```
+- `benchbase_uninstrumented` omits `<blackbox>` completely. It uses ordinary
+  benchmark SQL, `Worker`, and retry behavior, with no client capture/encoding,
+  marker, Redis publication, Debezium consumer, or C++ monitor.
+- `full_e2e` enables audited client capture and canonical encoding, marker and
+  Redis publication, MariaDB CDC collection by external Debezium Server, and
+  the C++ monitor's assembly/normalization of raw Debezium records, joiner, and
+  checker.
 
-TPC-C uses the current BenchBase checkout for every stage and does not require
-the historical YCSB worktree. Its first stage is the evidence-disabled RR
-compatibility profile, so the schema and full-row SQL variants are identical
-to the five instrumented profiles. The initial target is one warehouse, four
-terminals, 120 seconds, three repetitions, and mix `45,43,4,4,4`:
+Debezium belongs to the full black-box system but is not part of the C++
+Monitor. The initial TPC-C target is one warehouse, four terminals, 120 seconds,
+three repetitions, and mix `45,43,4,4,4`:
 
 ```bash
 ./scripts/run_blackbox_performance.sh \
@@ -391,7 +391,7 @@ zero, the end-to-verdict tail to stay within `--drain-timeout-seconds`, and
 resource high-water marks to remain below
 `--high-water-threshold-percent`; it does not impose a backlog-trend rule.
 
-By default, the smoke target executes every real stage once with scale one and
+By default, the smoke target executes both formal modes once with scale one and
 two requested measurement seconds. YCSB smoke uses two terminals and one second
 of warmup; TPC-C smoke uses four terminals and no warmup so the standard mix is
 exercised without adding another workload interval after its larger bootstrap.
@@ -408,28 +408,22 @@ docker exec db-monitoring-dev bash -lc '
 '
 ```
 
-Pass `--stage NAME` directly to `scripts/run_blackbox_performance.sh` once per
-stage to run only a subset. Selection is set-like: names must be unique, the
-selected roster is normalized to canonical order, and each repetition rotates
-only that roster. Omitting `--stage` retains the six-stage behavior. For
-example, this runs only the two monitor configurations:
+Pass `--mode NAME` directly to `scripts/run_blackbox_performance.sh` to run
+only one mode. Selection is set-like: names must be unique, the selected roster
+is normalized to canonical order, and each repetition rotates only that roster.
+Omitting `--mode` runs both modes. For example, this runs only full E2E:
 
 ```bash
 ./scripts/run_blackbox_performance.sh \
-  --baseline-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/worktrees/benchbase-2224eec \
-  --output-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/monitor-only \
-  --stage assembly_join \
-  --stage assembly_join_check
+  --benchmark tpcc \
+  --output-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/full-e2e-only \
+  --mode full_e2e
 ```
 
-Selected-stage runs record their roster in each trial's metadata and in
-`stage_order.csv`. Their aggregate statistics remain available without the
-uninstrumented baseline; baseline-relative summary cells are blank, and
-`overhead.csv` includes only comparisons for which both stages were selected.
-`headline_results.md` contains only selected BenchBase-throughput stages and
-leaves baseline loss unavailable when the baseline was not selected. The two
-monitor stages are intentionally excluded; whole-process monitor throughput
-must be measured separately and belongs in a monitor-specific table.
+Selected-mode runs record their roster in each trial's metadata and in
+`mode_order.csv`. Client overhead is available only when both modes are
+present. Full-E2E artifacts always keep client, external CDC, C++ Monitor, and
+complete evidence-path metrics distinct.
 
 The generated BenchBase configurations use loader batch size 128 by default.
 Pass `--loader-batch-size N` to select another positive value. The selection is
@@ -444,17 +438,17 @@ to `2000-01-01T00:00:00Z` and can be selected with
 `BLACKBOX_PERFORMANCE_LOADER_TIMESTAMP_UTC` environment variable. The runner
 rejects offsets, fractional seconds, whitespace, and invalid calendar values.
 For TPC-C this fixes `c_since`, `h_date`, `o_entry_d`, and non-null
-`ol_delivery_d` loader values across stages and repetitions; workload-generated
+`ol_delivery_d` loader values across modes and repetitions; workload-generated
 timestamps remain real-time. The exact value is preserved in both generated
 profiles, system provenance, and every trial's metadata, and the report rejects
 cross-trial differences.
 
-Current BenchBase loaders atomically publish `loader_declaration` JSON only
-after successful completion. Audited/current stages require and preserve that
-file. Historical baseline-only stages cannot emit the new artifact, so their
-reports explicitly record `declaration_available=false` and perform a separate
-configured-expected-count versus independent-SQL check without synthesizing a
-loader declaration.
+Both formal modes use the current BenchBase loader and atomically publish a
+`loader_declaration` JSON only after successful completion. Loading is outside
+the measured workload. The runner independently validates the declaration
+against SQL state and requires the canonical bootstrap state to agree across
+modes; this validation does not enable client tracing in the uninstrumented
+workload.
 
 Captured `redis-cli --json XRANGE` evidence can be restored with its original
 stream IDs through a bounded RESP producer:
@@ -483,9 +477,11 @@ client/CDC corpus into a fresh Redis before starting the monitor:
   --stage assembly_join_check
 ```
 
-`--stage` is repeatable; omit it to run both modes, or select only one. The
-runner verifies the source trial checksum and clean audited PASS, restores the
-same stream IDs and bytes for every trial, and rotates only the selected modes.
+This separate replay microbenchmark retains its own repeatable `--stage`
+selector for `assembly_join` and `assembly_join_check`; omit it to run both.
+The runner verifies the source trial checksum and clean audited PASS, restores
+the same stream IDs and bytes for every trial, and rotates only the selected
+microbenchmark stages.
 The default source-duration contract is 120 seconds. That describes how long
 the captured workload ran: the preloaded monitor must drain the corpus as fast
 as possible and is not delayed to fill 120 seconds.
@@ -499,32 +495,34 @@ corpus preload. The reports are `raw_monitor_trials.csv`,
 same numerator corpus, while checker core consume time remains diagnostic and
 is not reported as whole-process throughput.
 
-`PERFORMANCE_BASELINE_ROOT` overrides the worktree path. An output root must be
-below `/media/newhd/yifan/db-monitoring-builds` and must not already contain files. Normal measured
-runs require clean current BenchBase, monitor, and checker worktrees; `--smoke`
-is the explicit exception used to test uncommitted harness changes. The runner
-also requires that its own process is inside `db-monitoring-dev`.
+An output root must be below `/media/newhd/yifan/db-monitoring-builds` and must
+not already contain files. Normal measured runs require clean current BenchBase,
+monitor, and checker worktrees; `--smoke` is the explicit exception used to test
+uncommitted harness changes. The runner also requires that its own process is
+inside `db-monitoring-dev`.
 
 The performance runner explicitly starts Redis with an 8 GiB no-eviction limit
 and exposes every assembler, pending-client, pending-CDC, retained-identity,
 per-transaction, bootstrap, and checker-state capacity as a command-line
-option; `--help` lists their defaults. Each Redis-using trial verifies Redis's
-effective `maxmemory` and policy. Full stages verify every monitor-reported
-limit against trial metadata, require terminal backlogs to be zero, and require
+option; `--help` lists their defaults. The full-E2E trial verifies Redis's
+effective `maxmemory` and policy and every monitor-reported
+limit against trial metadata, requires terminal backlogs to be zero, and
+requires
 all observed high-water marks to remain strictly below the selected threshold
 (70 percent by default).
 
 Performance output is restricted to `/media/newhd/yifan/db-monitoring-builds`
 and defaults to a 107374182400-byte (100 GiB) run budget. The coordinator checks
-the aggregate at stage boundaries, supervises it during the run, and streams
+the aggregate at mode boundaries, supervises it during the run, and streams
 large Redis captures through a bounded writer. `--output-max-bytes` can lower
 the budget but should not be raised for the canonical run.
 
 Throughput, request latency, the authoritative actual elapsed time, and the
-measured epoch window come from BenchBase's raw CSV and summary JSON. For TPC-C,
-the atomic measurement-window outcome artifact supplies exact overall and
-per-type successes, attempts, retries, terminal aborts, and errors; successful
-NewOrder/min is derived from that same interval. Redis
+measured epoch window come from BenchBase's raw CSV and summary JSON. Logical
+transactions/s is the primary client comparison because ordinary and audited
+retry behavior differs. The atomic measurement-window outcome artifact supplies
+exact overall and per-type successes, attempts, retries, terminal aborts, and
+errors; successful TPC-C NewOrder/min is derived from that same interval. Redis
 logical bytes count UTF-8 stream field and value bytes; per-stream allocation is
 `MEMORY USAGE`, and network bytes are workload-window `INFO stats` counter
 deltas from workload-process start through pipeline drain. CDC delivery lag is Redis stream time minus Debezium envelope time;
@@ -533,29 +531,47 @@ join-buffer high-water bytes, checker consume time/rate, checker retained state,
 event counts, reconciliation, and full-lifecycle monitor CPU/RSS come from the
 monitor metrics endpoint. BenchBase process-tree and MariaDB/Redis/Debezium
 CPU/RSS use the raw `workload_process_window` resource sample CSV (JVM startup,
-warmup, measured requests, and teardown). CDC analysis begins at BenchBase's
-first measured request and ends at the Debezium transaction `END` containing
-`END_FENCE`, so late delivery is retained. Join-only records measurement completion and
-evidence reconciliation but deliberately leaves audited outcome fields empty.
+warmup, measured requests, and teardown). CDC component selection begins
+strictly after the exact Redis stream ID of the `LOAD_FINISHED` transaction
+`END` and ends inclusively at the exact `END_FENCE` transaction `END` ID. This
+prevents bootstrap entries sharing the same millisecond from leaking into the
+workload scope. Both IDs and their epoch milliseconds are recorded. The
+component window includes warmup and measured transactions; its totals
+reconcile to the complete client stream, not just BenchBase's smaller
+measurement window. CDC ingestion metrics are attributed to external Debezium
+Server; normalized, joined, and checked rates are attributed to the C++
+Monitor. Raw CDC workload rows reconcile only to assembler raw rows; normalized
+application writes separately reconcile across assembler, joiner, and checker.
+They are not equal because normalization removes markers and may collapse
+repeated writes or expand key changes. Complete evidence-path throughput starts at the `LOAD_FINISHED`
+transaction-end Redis time and ends at the Redis XADD time of the run-scoped
+`FINAL` monitor-status record. Drain tail uses that final-status time minus the
+`END_FENCE` transaction-end time. The final status's exact stream ID and
+milliseconds are retained, keeping every interval endpoint on the Redis server
+clock rather than mixing in the monitor process clock.
+`component_fence_window.json` preserves the two extracted fence transaction-end
+IDs/timestamps, and `final_status_boundary.json` preserves the run-scoped
+`FINAL` status ID/timestamp. `analysis_window.json` records the independent
+BenchBase client measurement window, the exact-ID component window, and the
+final-status boundary together.
 
 Each output root contains generated input configurations, build logs and exact
-commands, host/JVM/container/image provenance, `stage_order.csv`, and one
+commands, host/JVM/container/image provenance, `mode_order.csv`, and one
 checksummed directory per raw trial. The aggregate deliverables are
 `headline_results.md`, its machine-readable `headline_results.csv`,
-`raw_trials.csv`, `transaction_results.csv`, `summary_statistics.csv` (median,
-min, max, and MAD without
-outlier removal), `overhead.csv`, `artifact_index.csv`, and the root
-`SHA256SUMS`. `transaction_results.csv` contains one overall/per-type row per
-stage and repetition, including outcome rates, latency, and successful
-NewOrder/min where applicable. The compatibility headline table reports BenchBase-stage medians: throughput in
-requests per second, mean and p95 latency in microseconds, and throughput loss
-relative to the baseline profile in percent. Assembly/join and
-full-checking are excluded because their primary throughput belongs in a
-separate monitor table once that benchmark is generated. The CSV retains
-unrounded numeric values
-and canonical stage identifiers; the Markdown applies concise display rounding
-and human stage labels. Existing output roots can be backfilled without
-rereading captured streams:
+`raw_trials.csv`, `transaction_results.csv`, `component_results.csv`,
+`summary_statistics.csv` (median,
+min, max, and MAD without outlier removal), `overhead.csv`,
+`artifact_index.csv`, and the root `SHA256SUMS`. `transaction_results.csv`
+contains one overall/per-type row per mode and repetition. The headline compares
+uninstrumented and full-E2E BenchBase logical throughput, then reports full-E2E
+client outcome metrics, external CDC ingestion, C++ Monitor throughput,
+complete evidence-path throughput, drain, and resources without crossing
+component boundaries. `overhead.csv` contains only the full-E2E logical-TPS
+effect relative to uninstrumented BenchBase; it does not attribute that effect
+to individual components. The CSV retains unrounded values and canonical mode
+identifiers; Markdown applies concise display rounding and labels. Existing
+output roots can be backfilled without rereading captured streams:
 
 ```bash
 python3 scripts/blackbox_performance_report.py headline \

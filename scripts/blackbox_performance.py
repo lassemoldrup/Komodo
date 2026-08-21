@@ -27,7 +27,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, TextIO
 NA = "N/A"
 RESOURCE_FIELDS = ("timestamp", "component", "cpu_percent", "rss_bytes", "source")
 TRIAL_SUMMARY_FIELDS = (
-    "stage",
+    "mode",
     "metric",
     "available_trials",
     "total_trials",
@@ -491,19 +491,32 @@ def _stream_id_ms(stream_id: str) -> int:
 
 def _selected_entries(
     entries: Sequence[tuple[str, list[tuple[str, str]]]],
-    measured_start_epoch_ms: int | None,
-    measured_end_epoch_ms: int | None,
+    window_after_stream_id: str | None,
+    window_through_stream_id: str | None,
 ) -> list[tuple[str, list[tuple[str, str]]]]:
     _require(
-        (measured_start_epoch_ms is None) == (measured_end_epoch_ms is None),
-        "measured window requires both start and end",
+        (window_after_stream_id is None) == (window_through_stream_id is None),
+        "selection window requires both Redis stream IDs",
     )
-    if measured_start_epoch_ms is None:
+    if window_after_stream_id is None:
         return list(entries)
-    start = _nonnegative_int(measured_start_epoch_ms, "measured window start")
-    end = _nonnegative_int(measured_end_epoch_ms, "measured window end")
-    _require(start <= end, "measured window start is after end")
-    return [entry for entry in entries if start <= _stream_id_ms(entry[0]) <= end]
+    start_match = STREAM_ID_PATTERN.fullmatch(window_after_stream_id)
+    end_match = STREAM_ID_PATTERN.fullmatch(window_through_stream_id)
+    _require(start_match is not None, "selection start Redis stream ID is invalid")
+    _require(end_match is not None, "selection end Redis stream ID is invalid")
+    start = (int(start_match.group(1)), int(start_match.group(2)))
+    end = (int(end_match.group(1)), int(end_match.group(2)))
+    _require(start < end, "selection start Redis stream ID is not before end")
+    input_ids = {stream_id for stream_id, _ in entries}
+    _require(window_after_stream_id in input_ids, "selection start Redis stream ID is absent")
+    _require(window_through_stream_id in input_ids, "selection end Redis stream ID is absent")
+
+    def numeric_id(stream_id: str) -> tuple[int, int]:
+        match = STREAM_ID_PATTERN.fullmatch(stream_id)
+        assert match is not None
+        return int(match.group(1)), int(match.group(2))
+
+    return [entry for entry in entries if start < numeric_id(entry[0]) <= end]
 
 
 def _json_object(value: str, label: str) -> dict[str, Any]:
@@ -526,15 +539,20 @@ def _logical_utf8_bytes(entries: Iterable[tuple[str, list[tuple[str, str]]]]) ->
 def analyze_redis_xrange(
     document: Any,
     *,
-    measured_start_epoch_ms: int | None = None,
-    measured_end_epoch_ms: int | None = None,
+    window_after_stream_id: str | None = None,
+    window_through_stream_id: str | None = None,
 ) -> dict[str, Any]:
     """Measure Redis bytes, CDC row lag, and transaction boundaries."""
 
     all_entries = parse_xrange_entries(document)
-    entries = _selected_entries(all_entries, measured_start_epoch_ms, measured_end_epoch_ms)
+    entries = _selected_entries(
+        all_entries, window_after_stream_id, window_through_stream_id
+    )
     delivery_lag_samples: list[int] = []
     source_lag_samples: list[int] = []
+    workload_delivery_lag_samples: list[int] = []
+    workload_source_lag_samples: list[int] = []
+    control_row_count = 0
     operation_counts: Counter[str] = Counter()
     table_counts: Counter[str] = Counter()
     begin_ids: Counter[str] = Counter()
@@ -553,13 +571,21 @@ def analyze_redis_xrange(
                     envelope.get("ts_ms"), f"Redis entry {stream_id} envelope ts_ms"
                 )
                 stream_ms = _stream_id_ms(stream_id)
-                delivery_lag_samples.append(stream_ms - envelope_ts_ms)
-                source_lag_samples.append(stream_ms - source_ts_ms)
+                delivery_lag = stream_ms - envelope_ts_ms
+                source_lag = stream_ms - source_ts_ms
+                delivery_lag_samples.append(delivery_lag)
+                source_lag_samples.append(source_lag)
                 operation = envelope.get("op")
                 if isinstance(operation, str):
                     operation_counts[operation] += 1
                 database = source.get("db")
                 table = source.get("table")
+                is_control_row = table == "checker_run_fence"
+                if is_control_row:
+                    control_row_count += 1
+                else:
+                    workload_delivery_lag_samples.append(delivery_lag)
+                    workload_source_lag_samples.append(source_lag)
                 if isinstance(database, str) and isinstance(table, str):
                     table_counts[f"{database}.{table}"] += 1
                 elif isinstance(table, str):
@@ -582,11 +608,23 @@ def analyze_redis_xrange(
         for transaction_id, count in begin_ids.items()
     )
     return {
+        "selection_window": {
+            "bounded": window_after_stream_id is not None,
+            "after_stream_id": window_after_stream_id,
+            "through_stream_id": window_through_stream_id,
+            "start_exclusive": True if window_after_stream_id is not None else None,
+            "end_inclusive": True if window_through_stream_id is not None else None,
+        },
         "input_entry_count": len(all_entries),
         "input_logical_utf8_bytes": _logical_utf8_bytes(all_entries),
         "entry_count": len(entries),
         "logical_utf8_bytes": _logical_utf8_bytes(entries),
         "cdc_row_count": len(delivery_lag_samples),
+        # Lifecycle fence rows share the Debezium stream but are not workload.
+        # Keep the all-row counters for protocol diagnostics and provide the
+        # workload-only counters used by formal performance reporting.
+        "cdc_control_row_count": control_row_count,
+        "cdc_workload_row_count": len(delivery_lag_samples) - control_row_count,
         "cdc_row_counts_by_operation": dict(sorted(operation_counts.items())),
         "cdc_row_counts_by_table": dict(sorted(table_counts.items())),
         "begin_count": sum(begin_ids.values()),
@@ -596,6 +634,10 @@ def analyze_redis_xrange(
         "cdc_delivery_lag_ms": _distribution(delivery_lag_samples),
         "cdc_source_lag_sample_count": len(source_lag_samples),
         "cdc_source_lag_ms": _distribution(source_lag_samples),
+        "cdc_workload_delivery_lag_sample_count": len(workload_delivery_lag_samples),
+        "cdc_workload_delivery_lag_ms": _distribution(workload_delivery_lag_samples),
+        "cdc_workload_source_lag_sample_count": len(workload_source_lag_samples),
+        "cdc_workload_source_lag_ms": _distribution(workload_source_lag_samples),
     }
 
 
@@ -682,6 +724,7 @@ def analyze_client_xrange(document: Any) -> dict[str, Any]:
         "entry_count": len(entries),
         "logical_utf8_bytes": _logical_utf8_bytes(entries),
         "kind_counts": dict(sorted(kind_counts.items())),
+        "client_txn_count": kind_counts["client_txn"],
         "session_counts": dict(sorted(session_counts.items())),
         "client_transaction_counts_by_session": dict(
             sorted(client_transaction_counts_by_session.items())
@@ -726,17 +769,17 @@ def _is_higher_better(metric: str, explicit: set[str]) -> bool:
 
 def _trial_cells(
     rows: Sequence[Mapping[str, Any]],
-    stage_column: str,
+    mode_column: str,
     metrics: Sequence[str] | None,
 ) -> tuple[list[str], list[str], dict[tuple[str, str], list[float | str]]]:
     _require(rows, "trial CSV contains no rows")
-    stages: list[str] = []
+    modes: list[str] = []
     for row_number, row in enumerate(rows, start=2):
-        stage = row.get(stage_column)
-        _require(isinstance(stage, str) and stage.strip() != "", f"trial row {row_number} has no stage")
-        stage = stage.strip()
-        if stage not in stages:
-            stages.append(stage)
+        mode = row.get(mode_column)
+        _require(isinstance(mode, str) and mode.strip() != "", f"trial row {row_number} has no mode")
+        mode = mode.strip()
+        if mode not in modes:
+            modes.append(mode)
 
     first_columns = list(rows[0].keys())
     long_form = "metric" in first_columns and "value" in first_columns and metrics is None
@@ -746,23 +789,23 @@ def _trial_cells(
     if long_form:
         occurrences: Counter[tuple[str, str]] = Counter()
         for row_number, row in enumerate(rows, start=2):
-            stage = str(row[stage_column]).strip()
+            mode = str(row[mode_column]).strip()
             metric = row.get("metric")
             _require(isinstance(metric, str) and metric.strip() != "", f"trial row {row_number} has no metric")
             metric = metric.strip()
             if metric not in metric_order:
                 metric_order.append(metric)
-            cells.setdefault((stage, metric), []).append(
+            cells.setdefault((mode, metric), []).append(
                 _parse_trial_value(row.get("value"), f"trial row {row_number} value")
             )
-            occurrences[(stage, metric)] += 1
-        for stage in stages:
+            occurrences[(mode, metric)] += 1
+        for mode in modes:
             for metric in metric_order:
-                cells.setdefault((stage, metric), [])
-        return stages, metric_order, cells
+                cells.setdefault((mode, metric), [])
+        return modes, metric_order, cells
 
     reserved = {
-        stage_column.lower(),
+        mode_column.lower(),
         "trial",
         "trial_id",
         "repetition",
@@ -787,39 +830,39 @@ def _trial_cells(
     for metric in metric_order:
         _require(metric in first_columns, f"trial CSV is missing metric column {metric}")
     for row_number, row in enumerate(rows, start=2):
-        stage = str(row[stage_column]).strip()
+        mode = str(row[mode_column]).strip()
         for metric in metric_order:
-            cells.setdefault((stage, metric), []).append(
+            cells.setdefault((mode, metric), []).append(
                 _parse_trial_value(row.get(metric), f"trial row {row_number} column {metric}")
             )
-    return stages, metric_order, cells
+    return modes, metric_order, cells
 
 
 def summarize_trials(
     rows: Sequence[Mapping[str, Any]],
     *,
-    baseline_stage: str | None = None,
-    stage_column: str = "stage",
+    baseline_mode: str | None = None,
+    mode_column: str = "mode",
     metrics: Sequence[str] | None = None,
     higher_is_better_metrics: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
     """Summarize repeated trials with median headline, range, MAD, and overhead."""
 
-    stages, metric_order, cells = _trial_cells(rows, stage_column, metrics)
-    if baseline_stage is not None:
-        _require(baseline_stage in stages, f"baseline stage {baseline_stage!r} is absent")
+    modes, metric_order, cells = _trial_cells(rows, mode_column, metrics)
+    if baseline_mode is not None:
+        _require(baseline_mode in modes, f"baseline mode {baseline_mode!r} is absent")
     explicit_higher = set(higher_is_better_metrics)
     summaries: dict[tuple[str, str], dict[str, Any]] = {}
 
-    for stage in stages:
+    for mode in modes:
         for metric in metric_order:
-            source_values = cells[(stage, metric)]
+            source_values = cells[(mode, metric)]
             numbers = [value for value in source_values if isinstance(value, float)]
             marker = _missing_marker(source_values)
             if numbers:
                 median = statistics.median(numbers)
                 summary = {
-                    "stage": stage,
+                    "mode": mode,
                     "metric": metric,
                     "available_trials": len(numbers),
                     "total_trials": len(source_values),
@@ -830,7 +873,7 @@ def summarize_trials(
                 }
             else:
                 summary = {
-                    "stage": stage,
+                    "mode": mode,
                     "metric": metric,
                     "available_trials": 0,
                     "total_trials": len(source_values),
@@ -839,27 +882,27 @@ def summarize_trials(
                     "max": marker,
                     "mad": marker,
                 }
-            summaries[(stage, metric)] = summary
+            summaries[(mode, metric)] = summary
 
     result: list[dict[str, Any]] = []
-    for stage in stages:
+    for mode in modes:
         for metric in metric_order:
-            summary = summaries[(stage, metric)]
+            summary = summaries[(mode, metric)]
             median = summary["median"]
-            if baseline_stage is None:
+            if baseline_mode is None:
                 overhead: float | str = ""
                 direction = ""
                 formula = ""
             else:
-                baseline_median = summaries[(baseline_stage, metric)]["median"]
+                baseline_median = summaries[(baseline_mode, metric)]["median"]
                 higher_better = _is_higher_better(metric, explicit_higher)
                 if higher_better:
                     direction = "decrease_from_baseline"
-                    formula = "100 * (baseline_median - stage_median) / baseline_median"
+                    formula = "100 * (baseline_median - mode_median) / baseline_median"
                     numerator_sign = -1.0
                 else:
                     direction = "increase_from_baseline"
-                    formula = "100 * (stage_median - baseline_median) / baseline_median"
+                    formula = "100 * (mode_median - baseline_median) / baseline_median"
                     numerator_sign = 1.0
 
                 if isinstance(median, (int, float)) and isinstance(
@@ -1318,8 +1361,8 @@ def _redis_command(args: argparse.Namespace) -> None:
         args,
         analyze_redis_xrange(
             _load_json(args.input_json),
-            measured_start_epoch_ms=args.measured_start_epoch_ms,
-            measured_end_epoch_ms=args.measured_end_epoch_ms,
+            window_after_stream_id=args.window_after_stream_id,
+            window_through_stream_id=args.window_through_stream_id,
         ),
     )
 
@@ -1333,8 +1376,8 @@ def _summarize_command(args: argparse.Namespace) -> None:
         rows = read_trial_csv(stream)
     summary = summarize_trials(
         rows,
-        baseline_stage=args.baseline_stage,
-        stage_column=args.stage_column,
+        baseline_mode=args.baseline_mode,
+        mode_column=args.mode_column,
         metrics=args.metric or None,
         higher_is_better_metrics=args.higher_is_better,
     )
@@ -1351,16 +1394,16 @@ def _summarize_command(args: argparse.Namespace) -> None:
     if output_json is not None:
         overhead_formulas = (
             {
-                "higher_is_better": "100 * (baseline_median - stage_median) / baseline_median",
-                "lower_is_better": "100 * (stage_median - baseline_median) / baseline_median",
+                "higher_is_better": "100 * (baseline_median - mode_median) / baseline_median",
+                "lower_is_better": "100 * (mode_median - baseline_median) / baseline_median",
             }
-            if args.baseline_stage is not None
+            if args.baseline_mode is not None
             else {}
         )
         _write_json(
             output_json,
             {
-                "baseline_stage": args.baseline_stage,
+                "baseline_mode": args.baseline_mode,
                 "overhead_formulas": overhead_formulas,
                 "summary": summary,
             },
@@ -1439,8 +1482,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     redis = subparsers.add_parser("analyze-redis", help="analyze a Redis CDC XRANGE JSON dump")
     redis.add_argument("--input-json", required=True)
-    redis.add_argument("--measured-start-epoch-ms", type=int)
-    redis.add_argument("--measured-end-epoch-ms", type=int)
+    redis.add_argument("--window-after-stream-id")
+    redis.add_argument("--window-through-stream-id")
     _add_metric_outputs(redis)
     redis.set_defaults(handler=_redis_command)
 
@@ -1452,10 +1495,10 @@ def build_parser() -> argparse.ArgumentParser:
     summarize = subparsers.add_parser("summarize-trials", help="summarize repeated raw trial CSV rows")
     summarize.add_argument("--input-csv", required=True)
     summarize.add_argument(
-        "--baseline-stage",
-        help="optional stage used for overhead columns; omit for baseline-free summaries",
+        "--baseline-mode",
+        help="optional mode used for overhead columns; omit for baseline-free summaries",
     )
-    summarize.add_argument("--stage-column", default="stage")
+    summarize.add_argument("--mode-column", default="mode")
     summarize.add_argument("--metric", action="append", default=[])
     summarize.add_argument("--higher-is-better", action="append", default=[])
     summarize.add_argument("--output-csv")
