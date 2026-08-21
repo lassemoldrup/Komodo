@@ -50,6 +50,7 @@ struct DebeziumAssemblerMetrics {
   std::uint64_t completed_bootstrap_transactions = 0;
   std::uint64_t completed_workload_transactions = 0;
   std::uint64_t raw_row_events = 0;
+  std::uint64_t workload_raw_row_events = 0;
   std::uint64_t normalized_write_events = 0;
   std::uint64_t workload_normalized_write_events = 0;
   // Successful accept() calls only. Workload processing aggregates the

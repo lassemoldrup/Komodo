@@ -342,6 +342,7 @@ public:
         .completed_bootstrap_transactions = completed_bootstrap_transactions_,
         .completed_workload_transactions = completed_workload_transactions_,
         .raw_row_events = raw_row_events_,
+        .workload_raw_row_events = workload_raw_row_events_,
         .normalized_write_events = normalized_write_events_,
         .workload_normalized_write_events = workload_normalized_write_events_,
         .accept_total_nanoseconds = accept_total_nanoseconds_,
@@ -1437,6 +1438,9 @@ private:
       break;
     case CdcTransactionKind::WorkloadMarked:
       ++completed_workload_transactions_;
+      workload_raw_row_events_ =
+          saturatingAdd(workload_raw_row_events_,
+                        static_cast<std::uint64_t>(raw_row_count));
       workload_normalized_write_events_ =
           saturatingAdd(workload_normalized_write_events_,
                         static_cast<std::uint64_t>(normalized_write_count));
@@ -1895,6 +1899,7 @@ private:
   std::uint64_t completed_bootstrap_transactions_ = 0;
   std::uint64_t completed_workload_transactions_ = 0;
   std::uint64_t raw_row_events_ = 0;
+  std::uint64_t workload_raw_row_events_ = 0;
   std::uint64_t normalized_write_events_ = 0;
   std::uint64_t workload_normalized_write_events_ = 0;
   std::uint64_t accept_total_nanoseconds_ = 0;

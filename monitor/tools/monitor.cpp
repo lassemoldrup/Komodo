@@ -472,6 +472,7 @@ assemblerMetricsJson(const blackbox::DebeziumAssemblerMetrics &metrics) {
       {"completed_workload_transactions",
        metrics.completed_workload_transactions},
       {"raw_row_events", metrics.raw_row_events},
+      {"workload_raw_row_events", metrics.workload_raw_row_events},
       {"normalized_write_events", metrics.normalized_write_events},
       {"workload_normalized_write_events",
        metrics.workload_normalized_write_events},

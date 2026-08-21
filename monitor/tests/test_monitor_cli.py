@@ -511,6 +511,7 @@ def check_join_only_early_failure_artifact(executable):
             "retained_identity_high_water_records",
             "retained_identity_high_water_bytes",
             "workload_normalized_write_events",
+            "workload_raw_row_events",
             "accept_total_nanoseconds",
             "accept_max_nanoseconds",
             "workload_processing_total_nanoseconds",

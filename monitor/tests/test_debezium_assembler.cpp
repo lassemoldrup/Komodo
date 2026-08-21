@@ -672,6 +672,7 @@ void checkMeasurementMetrics() {
   BLACKBOX_CHECK(metrics.completed_bootstrap_transactions == 1U);
   BLACKBOX_CHECK(metrics.completed_workload_transactions == 7U);
   BLACKBOX_CHECK(metrics.raw_row_events == 23U);
+  BLACKBOX_CHECK(metrics.workload_raw_row_events == 18U);
   BLACKBOX_CHECK(metrics.normalized_write_events == 9U);
   BLACKBOX_CHECK(metrics.workload_normalized_write_events == 7U);
   BLACKBOX_CHECK(metrics.accept_total_nanoseconds == 550U);
