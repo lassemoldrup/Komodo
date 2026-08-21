@@ -1088,6 +1088,139 @@ void testCapturedPaymentRetryReconciliation() {
   BLACKBOX_CHECK(metrics.cdc_first_matches == 0U);
 }
 
+void testCapturedDeliveryRetryReconciliation() {
+  const auto fixture = loadTpccTransactionFixture();
+  const auto client_fixture = loadTpccClientFixture();
+  auto transactions = assembleTpccFixture(fixture);
+  BLACKBOX_REQUIRE(transactions.size() == 12U);
+  const auto found = std::find_if(
+      client_fixture.at("semantic_transactions").begin(),
+      client_fixture.at("semantic_transactions").end(), [](const Json &entry) {
+        return entry.at("client_txn").at("txn_type") == "Delivery";
+      });
+  BLACKBOX_REQUIRE(found != client_fixture.at("semantic_transactions").end());
+  BLACKBOX_CHECK(found->at("cdc_transaction") == "delivery_shape");
+  auto client = found->at("client_txn");
+  BLACKBOX_CHECK(client.at("read_count") == 2U);
+  BLACKBOX_CHECK(client.at("reads")[0].at("source") == "snapshot");
+  BLACKBOX_CHECK(client.at("reads")[1].at("source") == "snapshot");
+
+  client["session_seq"] = 1;
+  client["correlation_id"]["txn_id"] = 2;
+  BLACKBOX_REQUIRE(transactions[5].correlation_id.has_value());
+  transactions[5].cdc_seq = 3U;
+  transactions[5].correlation_id->txn_id = 2U;
+  BLACKBOX_REQUIRE(transactions[5].writes.size() == 4U);
+
+  RunController controller(blackbox::ProtocolRecordParser{}.parseRunManifest(
+      client_fixture.at("run_manifest").dump()));
+  discardStatuses(controller);
+  controller.acceptCdcTransaction(std::move(transactions[0]));
+  controller.acceptCdcTransaction(std::move(transactions[1]));
+  controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
+  controller.acceptCdcTransaction(std::move(transactions[2]));
+  BLACKBOX_CHECK(controller.joinerMetrics().bootstrap_state_validated);
+  controller.acceptCdcTransaction(std::move(transactions[5]));
+  controller.acceptClientPayload(client.dump());
+
+  const auto run = client.at("run_id").get<std::string>();
+  const auto session = client.at("session_id").get<std::string>();
+  const std::array marker_entries = {
+      SessionMarkerEntry{.session_seq = 1U, .txn_id = 2U}};
+  controller.acceptClientPayload(Json{
+      {"kind", "session_done"},
+      {"run_id", run},
+      {"session_id", session},
+      {"final_session_seq", 1},
+      {"logical_transactions_started", 1},
+      {"successful_transactions", 1},
+      {"terminal_aborted_transactions", 0},
+      {"physical_attempts_started", 2},
+      {"definitively_aborted_attempts", 1},
+      {"published_transactions", 1},
+      {"retry_attempts", 1},
+      {"ambiguous_attempts", 0},
+      {"rolling_correlation_digest",
+       blackbox::computeRollingSessionMarkerDigest(
+           run, session,
+           marker_entries)}}.dump());
+  transactions[11].cdc_seq = 4U;
+  controller.acceptCdcTransaction(std::move(transactions[11]));
+  controller.onInputIdle();
+
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  const auto &reconciliation = *controller.finalReconciliation();
+  BLACKBOX_CHECK(reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(reconciliation.accepted_client_transactions == 1U);
+  BLACKBOX_CHECK(reconciliation.joined_workload_transactions == 1U);
+  BLACKBOX_CHECK(reconciliation.unmatched_client_records == 0U);
+  BLACKBOX_CHECK(reconciliation.unmatched_workload_cdc_slots == 0U);
+  const auto metrics = controller.joinerMetrics();
+  BLACKBOX_CHECK(metrics.joined_read_events == 2U);
+  BLACKBOX_CHECK(metrics.joined_write_events == 4U);
+  BLACKBOX_CHECK(metrics.client_first_matches == 0U);
+  BLACKBOX_CHECK(metrics.cdc_first_matches == 1U);
+}
+
+void testDeliveryEmptyAndTerminalFailureAlgebra() {
+  {
+    RunController controller(tpccManifest());
+    openTpccWorkload(controller);
+    auto client = Json::parse(clientPayload(1U));
+    client["txn_type"] = "Delivery";
+    controller.acceptClientPayload(client.dump());
+    controller.acceptCdcTransaction(workload(2U, 1U));
+    controller.acceptClientPayload(donePayload(1U));
+    controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+    controller.onInputIdle();
+    BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
+    BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+    BLACKBOX_CHECK(
+        controller.finalReconciliation()->joined_workload_transactions == 1U);
+    BLACKBOX_CHECK(
+        controller.joinerMetrics().marker_only_workload_transactions == 1U);
+    BLACKBOX_CHECK(controller.joinerMetrics().joined_read_events == 0U);
+    BLACKBOX_CHECK(controller.joinerMetrics().joined_write_events == 0U);
+  }
+  {
+    RunController controller(tpccManifest());
+    openTpccWorkload(controller);
+    controller.acceptClientPayload(
+        donePayloadForProgress(1U, 1U, 0U, 1U, 1U, 0U, {}));
+    controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
+    controller.onInputIdle();
+    BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
+    BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+    BLACKBOX_CHECK(
+        controller.finalReconciliation()->accepted_client_transactions == 0U);
+    BLACKBOX_CHECK(
+        controller.finalReconciliation()->joined_workload_transactions == 0U);
+    BLACKBOX_CHECK(controller.joinerMetrics().unmatched_client_records == 0U);
+    BLACKBOX_CHECK(controller.joinerMetrics().unmatched_workload_cdc_slots ==
+                   0U);
+  }
+  {
+    RunController controller(tpccManifest());
+    openTpccWorkload(controller);
+    controller.acceptClientPayload(
+        Json{{"kind", "run_failed"},
+             {"run_id", run_id},
+             {"session_id", session_id},
+             {"phase", "ATTEMPT_BODY"},
+             {"reason_code", "INTERNAL_ERROR"},
+             {"diagnostic", "Delivery retry signal escaped its boundary"}}
+            .dump());
+    controller.acceptClientPayload(
+        donePayloadForProgress(1U, 1U, 0U, 1U, 1U, 0U, {}));
+    controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
+    controller.onInputIdle();
+    BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
+    BLACKBOX_CHECK(hasDiagnostic(controller, "INTERNAL_ERROR"));
+  }
+}
+
 void testCapturedTpccControllerReconciliation() {
   const auto fixture = loadTpccTransactionFixture();
   const auto client_fixture = loadTpccClientFixture();
@@ -1203,6 +1336,8 @@ int runRunControllerTests() {
   testAdapterManifestSemanticsAreValidatedAtAdmission();
   testTpccControllerUsesGenericJoinAndReconciliation();
   testCapturedPaymentRetryReconciliation();
+  testCapturedDeliveryRetryReconciliation();
+  testDeliveryEmptyAndTerminalFailureAlgebra();
   testCapturedTpccControllerReconciliation();
   return 0;
 }

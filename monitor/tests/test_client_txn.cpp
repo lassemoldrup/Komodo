@@ -1093,6 +1093,207 @@ void testPaymentFixtureProjectionAndContract() {
               MonitorErrorCode::CanonicalEncodingFailed);
 }
 
+void testDeliveryFixtureProjectionAndContract() {
+  const auto fixture = loadTpccClientFixture();
+  const auto tpcc_parser = tpccParser(fixture);
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  const auto &transactions = fixture.at("semantic_transactions");
+  const auto found = std::find_if(
+      transactions.begin(), transactions.end(), [](const Json &entry) {
+        return entry.at("client_txn").at("txn_type") == "Delivery";
+      });
+  BLACKBOX_REQUIRE(found != transactions.end());
+
+  const auto parsed = tpcc_parser.parse(found->at("client_txn").dump());
+  BLACKBOX_CHECK(parsed.txn_type == "Delivery");
+  BLACKBOX_CHECK(parsed.session_seq == 3U);
+  BLACKBOX_CHECK(parsed.correlation_id.txn_id == 3U);
+  BLACKBOX_CHECK(
+      parsed.read_digest ==
+      "e778bca604e560692b517fec2c414d560d1fe3ae21d22dc8705f86f0293f4575");
+  BLACKBOX_REQUIRE(parsed.reads.size() == 2U);
+  for (std::size_t index = 0; index < parsed.reads.size(); ++index) {
+    BLACKBOX_CHECK(parsed.reads[index].event_seq == index);
+    BLACKBOX_CHECK(parsed.reads[index].state == ClientValueState::Present);
+    BLACKBOX_CHECK(parsed.reads[index].source == ClientReadSource::Snapshot);
+    BLACKBOX_REQUIRE(parsed.reads[index].value.has_value());
+  }
+  BLACKBOX_CHECK(parsed.reads[0].value->empty());
+  BLACKBOX_CHECK(parsed.reads[0].key ==
+                 blackbox::CanonicalTpccCodec::encodeKey(
+                     "benchbase", "new_order",
+                     Json{{"no_w_id", 1}, {"no_d_id", 1}, {"no_o_id", 1}}));
+  BLACKBOX_CHECK(parsed.reads[1].key ==
+                 blackbox::CanonicalTpccCodec::encodeKey(
+                     "benchbase", "oorder",
+                     Json{{"o_w_id", 1}, {"o_d_id", 1}, {"o_id", 1}}));
+
+  const auto &provenance = found->at("read_provenance");
+  BLACKBOX_REQUIRE(provenance.size() == 2U);
+  BLACKBOX_CHECK(provenance[0].at("table") == "benchbase.new_order");
+  BLACKBOX_CHECK(provenance[0].at("trace_statement_id") ==
+                 "delivGetOrderIdFullSQL");
+  BLACKBOX_CHECK(provenance[1].at("table") == "benchbase.oorder");
+  BLACKBOX_CHECK(provenance[1].at("trace_statement_id") ==
+                 "delivGetCustIdFullSQL");
+  BLACKBOX_CHECK(
+      std::none_of(provenance.begin(), provenance.end(), [](const Json &entry) {
+        return entry.at("table") == "benchbase.order_line";
+      }));
+
+  const auto delivery_contract = [&](const std::string_view statement_id) {
+    const auto contracts = adapter.resultSets();
+    const auto contract = std::find_if(
+        contracts.begin(), contracts.end(), [&](const auto &entry) {
+          return entry.transaction_type == "Delivery" &&
+                 entry.statement_id == statement_id;
+        });
+    return contract == contracts.end() ? nullptr : &*contract;
+  };
+  const auto oldest = delivery_contract("delivGetOrderIdSQL");
+  BLACKBOX_REQUIRE(oldest != nullptr);
+  BLACKBOX_REQUIRE(oldest->table.has_value());
+  BLACKBOX_CHECK(*oldest->table == "benchbase.new_order");
+  BLACKBOX_CHECK(oldest->classification ==
+                 blackbox::ResultSetClassification::Snapshot);
+  BLACKBOX_CHECK(oldest->result_shape ==
+                 blackbox::ResultSetShape::ReturnedRows);
+  BLACKBOX_CHECK(oldest->empty_result == "no_event");
+  BLACKBOX_REQUIRE(oldest->trace_statement_id.has_value());
+  BLACKBOX_CHECK(*oldest->trace_statement_id == "delivGetOrderIdFullSQL");
+
+  const auto owning_order = delivery_contract("delivGetCustIdSQL");
+  BLACKBOX_REQUIRE(owning_order != nullptr);
+  BLACKBOX_REQUIRE(owning_order->table.has_value());
+  BLACKBOX_CHECK(*owning_order->table == "benchbase.oorder");
+  BLACKBOX_CHECK(owning_order->classification ==
+                 blackbox::ResultSetClassification::Snapshot);
+  BLACKBOX_CHECK(owning_order->result_shape ==
+                 blackbox::ResultSetShape::ExactKeyRow);
+  BLACKBOX_REQUIRE(owning_order->trace_statement_id.has_value());
+  BLACKBOX_CHECK(*owning_order->trace_statement_id == "delivGetCustIdFullSQL");
+
+  const auto aggregate = delivery_contract("delivSumOrderAmountSQL");
+  BLACKBOX_REQUIRE(aggregate != nullptr);
+  BLACKBOX_REQUIRE(aggregate->table.has_value());
+  BLACKBOX_CHECK(*aggregate->table == "benchbase.order_line");
+  BLACKBOX_CHECK(aggregate->classification ==
+                 blackbox::ResultSetClassification::Omit);
+  BLACKBOX_CHECK(aggregate->result_shape ==
+                 blackbox::ResultSetShape::AggregateScalar);
+  BLACKBOX_CHECK(!aggregate->trace_statement_id.has_value());
+  BLACKBOX_CHECK(aggregate->trace_projection == "omitted");
+  BLACKBOX_REQUIRE(aggregate->omission_reason.has_value());
+  BLACKBOX_CHECK(*aggregate->omission_reason == "aggregate_scalar");
+
+  const auto empty = std::find_if(
+      fixture.at("empty_result_assertions").begin(),
+      fixture.at("empty_result_assertions").end(), [](const Json &entry) {
+        return entry.at("name") == "delivery_empty_district";
+      });
+  BLACKBOX_REQUIRE(empty != fixture.at("empty_result_assertions").end());
+  BLACKBOX_CHECK(empty->at("txn_type") == "Delivery");
+  BLACKBOX_CHECK(empty->at("statement_id") == "delivGetOrderIdSQL");
+  BLACKBOX_CHECK(empty->at("returned_row_count") == 0U);
+  BLACKBOX_CHECK(empty->at("emitted_reads").empty());
+  auto all_empty = found->at("client_txn");
+  const std::vector<ClientRead> empty_reads;
+  all_empty["reads"] = Json::array();
+  all_empty["read_count"] = 0;
+  all_empty["read_digest"] = blackbox::computeClientReadDigest(empty_reads);
+  BLACKBOX_CHECK(tpcc_parser.parse(all_empty.dump()).reads.empty());
+
+  const auto transaction_fixture = loadTpccTransactionFixture();
+  Json new_order_row;
+  Json oorder_row;
+  for (const auto &transaction : transaction_fixture.at("transactions")) {
+    if (transaction.at("name") != "delivery_shape") {
+      continue;
+    }
+    for (const auto &entry : transaction.at("raw_entries")) {
+      const auto envelope = Json::parse(entry.at(1).at(1).get<std::string>());
+      if (!envelope.contains("op")) {
+        continue;
+      }
+      if (envelope.at("source").at("table") == "new_order") {
+        new_order_row = envelope.at("before");
+      } else if (envelope.at("source").at("table") == "oorder") {
+        oorder_row = envelope.at("before");
+      }
+    }
+  }
+  BLACKBOX_REQUIRE(new_order_row.is_object());
+  BLACKBOX_REQUIRE(oorder_row.is_object());
+  new_order_row["no_d_id"] = 2;
+  new_order_row["no_o_id"] = 2;
+  oorder_row["o_d_id"] = 2;
+  oorder_row["o_id"] = 2;
+  oorder_row["o_ol_cnt"] = 3;
+  const auto second_new_order = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "new_order", new_order_row);
+  const auto second_oorder = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "oorder", oorder_row);
+  std::vector<ClientRead> multi_district_reads = {
+      parsed.reads[0],
+      parsed.reads[1],
+      ClientRead{.event_seq = 2U,
+                 .key = second_new_order.key,
+                 .state = ClientValueState::Present,
+                 .value = second_new_order.value,
+                 .source = ClientReadSource::Snapshot},
+      ClientRead{.event_seq = 3U,
+                 .key = second_oorder.key,
+                 .state = ClientValueState::Present,
+                 .value = second_oorder.value,
+                 .source = ClientReadSource::Snapshot},
+  };
+  auto multi_district = found->at("client_txn");
+  multi_district["reads"] = Json::array();
+  for (const auto &read : multi_district_reads) {
+    multi_district["reads"].push_back(readJson(read));
+  }
+  multi_district["read_count"] = multi_district_reads.size();
+  multi_district["read_digest"] =
+      blackbox::computeClientReadDigest(multi_district_reads);
+  const auto parsed_multi_district = tpcc_parser.parse(multi_district.dump());
+  BLACKBOX_REQUIRE(parsed_multi_district.reads.size() == 4U);
+  for (const auto &read : parsed_multi_district.reads) {
+    BLACKBOX_CHECK(read.source == ClientReadSource::Snapshot);
+  }
+  BLACKBOX_CHECK(parsed_multi_district.reads[2].key == second_new_order.key);
+  BLACKBOX_CHECK(parsed_multi_district.reads[3].key == second_oorder.key);
+
+  auto unsupported_source = found->at("client_txn");
+  unsupported_source["reads"][0]["source"] = "locking";
+  expectError(tpcc_parser, unsupported_source.dump(),
+              MonitorErrorCode::UnsupportedReadSource);
+
+  auto malformed_source = found->at("client_txn");
+  malformed_source["reads"][1]["source"] = Json::array();
+  expectError(tpcc_parser, malformed_source.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto malformed_key = found->at("client_txn");
+  malformed_key["reads"][0]["key_bytes_base64"] = "AA==";
+  expectError(tpcc_parser, malformed_key.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+
+  auto missing_empty_value = found->at("client_txn");
+  missing_empty_value["reads"][0].erase("value_bytes_base64");
+  expectError(tpcc_parser, missing_empty_value.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto wrong_empty_value = found->at("client_txn");
+  wrong_empty_value["reads"][0]["value_bytes_base64"] = "AA==";
+  expectError(tpcc_parser, wrong_empty_value.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+
+  auto wrong_order_value = found->at("client_txn");
+  wrong_order_value["reads"][1]["value_bytes_base64"] = "AA==";
+  expectError(tpcc_parser, wrong_order_value.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+}
+
 } // namespace
 
 int runClientTxnTests() {
@@ -1109,5 +1310,6 @@ int runClientTxnTests() {
   testOrderStatusFixtureProjection();
   testNewOrderFixtureProjectionAndDiscardedAttempt();
   testPaymentFixtureProjectionAndContract();
+  testDeliveryFixtureProjectionAndContract();
   return 0;
 }

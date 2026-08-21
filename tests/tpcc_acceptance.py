@@ -369,6 +369,7 @@ def benchbase_outcomes(
     successful: int,
     terminal_aborts: int,
     retries: int,
+    server_rejections: int | None = None,
 ) -> dict[str, int]:
     try:
         text = path.read_text(encoding="utf-8", errors="strict")
@@ -420,10 +421,16 @@ def benchbase_outcomes(
         and empty["Aborted Transactions:"] == (terminal_aborts == 0),
         "BenchBase aborted count differs from SessionDone terminal aborts",
     )
-    expected_retries = {} if retries == 0 else {transaction_type: retries}
+    expected_server_rejections = retries if server_rejections is None else server_rejections
+    expected_retries = (
+        {}
+        if expected_server_rejections == 0
+        else {transaction_type: expected_server_rejections}
+    )
     require(
         parsed["Rejected Transactions (Server Retry):"] == expected_retries
-        and empty["Rejected Transactions (Server Retry):"] == (retries == 0),
+        and empty["Rejected Transactions (Server Retry):"]
+        == (expected_server_rejections == 0),
         "BenchBase server-retry count differs from SessionDone retries",
     )
     for heading in (
@@ -435,7 +442,7 @@ def benchbase_outcomes(
     return {
         "completed": successful,
         "terminal_aborts": terminal_aborts,
-        "server_retries": retries,
+        "server_retries": expected_server_rejections,
         "retry_different": 0,
         "unexpected_sql_errors": 0,
         "unknown_status": 0,

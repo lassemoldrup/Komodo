@@ -220,6 +220,66 @@ void setEntryKey(Json &entry, const Json &key) {
   entry.at(1).at(0) = key.dump();
 }
 
+[[nodiscard]] Json multiDistrictDeliveryFixture(Json fixture) {
+  auto &raw = tpccTransaction(fixture, "delivery_shape").at("raw_entries");
+  if (raw.size() != 7U) {
+    throw std::runtime_error("captured Delivery shape is incomplete");
+  }
+  const auto original = raw;
+
+  const auto row =
+      [&](Json entry, const std::uint64_t total_order,
+          const std::uint64_t collection_order,
+          const std::initializer_list<std::pair<std::string, int>> fields) {
+        auto key = entryKey(entry);
+        auto envelope = entryEnvelope(entry);
+        for (const auto &[name, value] : fields) {
+          if (key.contains(name)) {
+            key[name] = value;
+          }
+          for (const auto image : {"before", "after"}) {
+            if (envelope.at(image).is_object() &&
+                envelope.at(image).contains(name)) {
+              envelope[image][name] = value;
+            }
+          }
+        }
+        envelope["transaction"]["total_order"] = total_order;
+        envelope["transaction"]["data_collection_order"] = collection_order;
+        setEntryKey(entry, key);
+        setEntryEnvelope(entry, envelope);
+        return entry;
+      };
+
+  auto first_order = row(original[2], 2U, 1U, {});
+  auto first_order_envelope = entryEnvelope(first_order);
+  first_order_envelope["before"]["o_ol_cnt"] = 2;
+  first_order_envelope["after"]["o_ol_cnt"] = 2;
+  setEntryEnvelope(first_order, first_order_envelope);
+
+  auto marker = row(original[5], 10U, 1U, {});
+  auto end = original[6];
+  auto end_envelope = entryEnvelope(end);
+  end_envelope["event_count"] = 10;
+  end_envelope["data_collections"] = Json::array(
+      {Json{{"data_collection", "benchbase.order_line"}, {"event_count", 3}},
+       Json{{"data_collection", "benchbase.customer"}, {"event_count", 2}},
+       Json{{"data_collection", "benchbase.session_txn"}, {"event_count", 1}},
+       Json{{"data_collection", "benchbase.oorder"}, {"event_count", 2}},
+       Json{{"data_collection", "benchbase.new_order"}, {"event_count", 2}}});
+  setEntryEnvelope(end, end_envelope);
+
+  raw = Json::array({original[0], row(original[1], 1U, 1U, {}), first_order,
+                     row(original[3], 3U, 1U, {}),
+                     row(original[3], 4U, 2U, {{"ol_number", 2}}),
+                     row(original[4], 5U, 1U, {}),
+                     row(original[1], 6U, 2U, {{"no_d_id", 2}, {"no_o_id", 2}}),
+                     row(original[2], 7U, 2U, {{"o_d_id", 2}, {"o_id", 2}}),
+                     row(original[3], 8U, 3U, {{"ol_d_id", 2}, {"ol_o_id", 2}}),
+                     row(original[4], 9U, 2U, {{"c_d_id", 2}}), marker, end});
+  return fixture;
+}
+
 void renumberStreamIds(Json &root) {
   for (std::size_t index = 0; index < root.size(); ++index) {
     root[index][0] = std::to_string(1000000U + index) + "-0";
@@ -1165,6 +1225,116 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_REQUIRE(history_contract->columns[0].generated.has_value());
   BLACKBOX_CHECK(*history_contract->columns[0].generated == "auto_increment");
 
+  const auto delivery = std::find_if(
+      fixture.at("transactions").begin(), fixture.at("transactions").end(),
+      [](const Json &transaction) {
+        return transaction.at("name") == "delivery_shape";
+      });
+  BLACKBOX_REQUIRE(delivery != fixture.at("transactions").end());
+  const auto delivery_index = static_cast<std::size_t>(
+      std::distance(fixture.at("transactions").begin(), delivery));
+  BLACKBOX_REQUIRE(delivery_index < actual.size());
+  const auto delivery_raw_row_count = [&](const std::string_view table,
+                                          const std::string_view operation) {
+    return static_cast<std::size_t>(std::count_if(
+        delivery->at("raw_entries").begin(), delivery->at("raw_entries").end(),
+        [&](const Json &entry) {
+          const auto envelope = entryEnvelope(entry);
+          return envelope.contains("op") &&
+                 envelope.at("source").at("table") == table &&
+                 envelope.at("op") == operation;
+        }));
+  };
+  BLACKBOX_CHECK(delivery_raw_row_count("new_order", "d") == 1U);
+  BLACKBOX_CHECK(delivery_raw_row_count("oorder", "u") == 1U);
+  BLACKBOX_CHECK(delivery_raw_row_count("order_line", "u") == 1U);
+  BLACKBOX_CHECK(delivery_raw_row_count("customer", "u") == 1U);
+  BLACKBOX_CHECK(delivery_raw_row_count("session_txn", "u") == 1U);
+  BLACKBOX_REQUIRE(actual[delivery_index].writes.size() == 4U);
+  const auto deleted_new_order = blackbox::CanonicalTpccCodec::encodeKey(
+      "benchbase", "new_order",
+      Json{{"no_w_id", 1}, {"no_d_id", 1}, {"no_o_id", 1}});
+  const auto deleted_write =
+      std::find_if(actual[delivery_index].writes.begin(),
+                   actual[delivery_index].writes.end(), [&](const auto &write) {
+                     return write.key == deleted_new_order;
+                   });
+  BLACKBOX_REQUIRE(deleted_write != actual[delivery_index].writes.end());
+  BLACKBOX_CHECK(deleted_write->state == NormalizedValueState::Absent);
+  BLACKBOX_CHECK(!deleted_write->value.has_value());
+  BLACKBOX_CHECK(
+      std::count_if(actual[delivery_index].writes.begin(),
+                    actual[delivery_index].writes.end(), [](const auto &write) {
+                      return write.state == NormalizedValueState::Present;
+                    }) == 3);
+
+  auto multi_delivery_fixture = multiDistrictDeliveryFixture(fixture);
+  auto multi_delivery_raw = tpccRawEntries(multi_delivery_fixture);
+  renumberStreamIds(multi_delivery_raw);
+  const auto multi_delivery_transactions = replay(
+      multi_delivery_raw, tpccAssemblerConfig(multi_delivery_fixture), false);
+  const auto multi_delivery = std::find_if(
+      multi_delivery_transactions.begin(), multi_delivery_transactions.end(),
+      [](const CdcTransaction &transaction) {
+        return transaction.correlation_id.has_value() &&
+               transaction.correlation_id->txn_id == 3U;
+      });
+  BLACKBOX_REQUIRE(multi_delivery != multi_delivery_transactions.end());
+  BLACKBOX_REQUIRE(multi_delivery->writes.size() == 9U);
+  BLACKBOX_CHECK(
+      std::count_if(multi_delivery->writes.begin(),
+                    multi_delivery->writes.end(), [](const auto &write) {
+                      return write.state == NormalizedValueState::Absent;
+                    }) == 2);
+  BLACKBOX_CHECK(
+      std::count_if(multi_delivery->writes.begin(),
+                    multi_delivery->writes.end(), [](const auto &write) {
+                      return write.state == NormalizedValueState::Present;
+                    }) == 7);
+  const std::set<std::string> expected_multi_delivery_keys = {
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey(
+          "benchbase", "new_order",
+          Json{{"no_w_id", 1}, {"no_d_id", 1}, {"no_o_id", 1}})),
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey(
+          "benchbase", "new_order",
+          Json{{"no_w_id", 1}, {"no_d_id", 2}, {"no_o_id", 2}})),
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey(
+          "benchbase", "oorder",
+          Json{{"o_w_id", 1}, {"o_d_id", 1}, {"o_id", 1}})),
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey(
+          "benchbase", "oorder",
+          Json{{"o_w_id", 1}, {"o_d_id", 2}, {"o_id", 2}})),
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey("benchbase",
+                                                       "order_line",
+                                                       Json{{"ol_w_id", 1},
+                                                            {"ol_d_id", 1},
+                                                            {"ol_o_id", 1},
+                                                            {"ol_number", 1}})),
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey("benchbase",
+                                                       "order_line",
+                                                       Json{{"ol_w_id", 1},
+                                                            {"ol_d_id", 1},
+                                                            {"ol_o_id", 1},
+                                                            {"ol_number", 2}})),
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey("benchbase",
+                                                       "order_line",
+                                                       Json{{"ol_w_id", 1},
+                                                            {"ol_d_id", 2},
+                                                            {"ol_o_id", 2},
+                                                            {"ol_number", 1}})),
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey(
+          "benchbase", "customer",
+          Json{{"c_w_id", 1}, {"c_d_id", 1}, {"c_id", 1}})),
+      bytesHex(blackbox::CanonicalTpccCodec::encodeKey(
+          "benchbase", "customer",
+          Json{{"c_w_id", 1}, {"c_d_id", 2}, {"c_id", 1}})),
+  };
+  std::set<std::string> observed_multi_delivery_keys;
+  for (const auto &write : multi_delivery->writes) {
+    observed_multi_delivery_keys.insert(bytesHex(write.key));
+  }
+  BLACKBOX_CHECK(observed_multi_delivery_keys == expected_multi_delivery_keys);
+
   const auto new_order = std::find_if(
       fixture.at("transactions").begin(), fixture.at("transactions").end(),
       [](const Json &transaction) {
@@ -1287,6 +1457,49 @@ void checkCapturedTpccTransactionsAndFailures() {
     envelope["before"] = nullptr;
     setEntryEnvelope(entry, envelope);
     expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "delivery_shape", "oorder");
+    auto envelope = entryEnvelope(entry);
+    envelope["source"]["name"] = "other-source";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "delivery_shape", "new_order");
+    auto key = entryKey(entry);
+    key.erase("no_o_id");
+    setEntryKey(entry, key);
+    expectError(tpccRawEntries(invalid),
+                CdcErrorCode::PrimaryKeyImageIncomplete,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "delivery_shape", "oorder");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"]["o_carrier_id"] = "not-an-integer";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CanonicalEncodingFailed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = multiDistrictDeliveryFixture(fixture);
+    auto &entry = tpccRowEntry(invalid, "delivery_shape", "order_line", 1U);
+    auto key = entryKey(entry);
+    auto envelope = entryEnvelope(entry);
+    key["ol_number"] = 1;
+    envelope["before"]["ol_number"] = 1;
+    envelope["after"]["ol_number"] = 1;
+    setEntryKey(entry, key);
+    setEntryEnvelope(entry, envelope);
+    auto raw = tpccRawEntries(invalid);
+    renumberStreamIds(raw);
+    expectError(std::move(raw), CdcErrorCode::CdcRecordMalformed,
                 tpccAssemblerConfig(invalid), false);
   }
   {
