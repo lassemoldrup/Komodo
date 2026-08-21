@@ -277,6 +277,11 @@ Run the focused audited TPC-C transaction acceptances against a fresh stack with
   --benchbase-dist /path/to/benchbase-mariadb \
   --monitor-bin /path/to/blackbox_run_monitor \
   --output-dir /path/to/a-fourth-new-output-directory
+
+./tests/run_tpcc_stock_level_acceptance.sh \
+  --benchbase-dist /path/to/benchbase-mariadb \
+  --monitor-bin /path/to/blackbox_run_monitor \
+  --output-dir /path/to/a-fifth-new-output-directory
 ```
 
 The OrderStatus default uses one warehouse, one terminal, RR, seed 3, and weights
@@ -285,7 +290,8 @@ customer last-name cardinalities, client/status stream captures, the CDC tail
 strictly after `LOAD_FINISHED_SEEN`, monitor metrics, and an acceptance report.
 Every control has a command-line or corresponding
 `BLACKBOX_TPCC_ORDER_STATUS_*`, `BLACKBOX_TPCC_NEW_ORDER_*`, or
-`BLACKBOX_TPCC_PAYMENT_*`/`BLACKBOX_TPCC_DELIVERY_*` environment form;
+`BLACKBOX_TPCC_PAYMENT_*`, `BLACKBOX_TPCC_DELIVERY_*`, or
+`BLACKBOX_TPCC_STOCK_LEVEL_*` environment form;
 `--print-config` validates and prints the resolved non-destructive run
 configuration. NewOrder defaults to one warehouse, two terminals, RR, seed 144,
 and weights `100,0,0,0,0`; its report reconciles invalid-item aborts, retries,
@@ -308,6 +314,11 @@ updates, and terminal reconciliation without treating the omitted aggregate as
 a read. Delivery preserves BenchBase's production loop from district 1 through
 each worker's upper bound; overlapping worker ranges are intentional and drive
 the live zero-delete/1020 race coverage.
+
+StockLevel uses weights `0,0,0,0,100`. Every accepted client must contain one
+district snapshot Present read, while its workload CDC transaction remains
+marker-only; stock rows and aggregate-derived evidence are rejected by the
+focused acceptance validator.
 
 ## Performance measurement
 

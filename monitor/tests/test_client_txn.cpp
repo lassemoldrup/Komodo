@@ -1294,6 +1294,122 @@ void testDeliveryFixtureProjectionAndContract() {
               MonitorErrorCode::CanonicalEncodingFailed);
 }
 
+void testStockLevelFixtureProjectionAndContract() {
+  const auto fixture = loadTpccClientFixture();
+  const auto tpcc_parser = tpccParser(fixture);
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  const auto &transactions = fixture.at("semantic_transactions");
+  const auto found = std::find_if(
+      transactions.begin(), transactions.end(), [](const Json &entry) {
+        return entry.at("client_txn").at("txn_type") == "StockLevel";
+      });
+  BLACKBOX_REQUIRE(found != transactions.end());
+
+  const auto parsed = tpcc_parser.parse(found->at("client_txn").dump());
+  BLACKBOX_CHECK(parsed.txn_type == "StockLevel");
+  BLACKBOX_CHECK(parsed.session_seq == 8U);
+  BLACKBOX_CHECK(parsed.correlation_id.txn_id == 8U);
+  BLACKBOX_CHECK(
+      parsed.read_digest ==
+      "376b04a2c33d3bc987f6a1383f3f0e0a2bd6a24e4fed62095a4cbb37e9b291ca");
+  BLACKBOX_REQUIRE(parsed.reads.size() == 1U);
+  BLACKBOX_CHECK(parsed.reads[0].event_seq == 0U);
+  BLACKBOX_CHECK(parsed.reads[0].state == ClientValueState::Present);
+  BLACKBOX_CHECK(parsed.reads[0].source == ClientReadSource::Snapshot);
+  BLACKBOX_REQUIRE(parsed.reads[0].value.has_value());
+  BLACKBOX_CHECK(parsed.reads[0].key == blackbox::CanonicalTpccCodec::encodeKey(
+                                            "benchbase", "district",
+                                            Json{{"d_w_id", 1}, {"d_id", 1}}));
+
+  const auto &provenance = found->at("read_provenance");
+  BLACKBOX_REQUIRE(provenance.size() == 1U);
+  BLACKBOX_CHECK(provenance[0].at("event_seq") == 0U);
+  BLACKBOX_CHECK(provenance[0].at("table") == "benchbase.district");
+  BLACKBOX_CHECK(provenance[0].at("statement_id") == "stockGetDistOrderIdSQL");
+  BLACKBOX_CHECK(provenance[0].at("trace_statement_id") ==
+                 "stockGetDistOrderIdFullSQL");
+
+  const auto stock_level_contract = [&](const std::string_view statement_id) {
+    const auto contracts = adapter.resultSets();
+    const auto contract = std::find_if(
+        contracts.begin(), contracts.end(), [&](const auto &entry) {
+          return entry.transaction_type == "StockLevel" &&
+                 entry.statement_id == statement_id;
+        });
+    return contract == contracts.end() ? nullptr : &*contract;
+  };
+  const auto district = stock_level_contract("stockGetDistOrderIdSQL");
+  BLACKBOX_REQUIRE(district != nullptr);
+  BLACKBOX_REQUIRE(district->table.has_value());
+  BLACKBOX_CHECK(*district->table == "benchbase.district");
+  BLACKBOX_CHECK(district->classification ==
+                 blackbox::ResultSetClassification::Snapshot);
+  BLACKBOX_CHECK(district->result_shape ==
+                 blackbox::ResultSetShape::ExactKeyRow);
+  BLACKBOX_REQUIRE(district->trace_statement_id.has_value());
+  BLACKBOX_CHECK(*district->trace_statement_id == "stockGetDistOrderIdFullSQL");
+  BLACKBOX_CHECK(district->trace_projection == "full_row");
+
+  const auto count_stock = stock_level_contract("stockGetCountStockSQL");
+  BLACKBOX_REQUIRE(count_stock != nullptr);
+  BLACKBOX_REQUIRE(count_stock->table.has_value());
+  BLACKBOX_CHECK(*count_stock->table == "benchbase.stock");
+  BLACKBOX_CHECK(count_stock->classification ==
+                 blackbox::ResultSetClassification::Omit);
+  BLACKBOX_CHECK(count_stock->result_shape ==
+                 blackbox::ResultSetShape::AggregateScalar);
+  BLACKBOX_CHECK(!count_stock->trace_statement_id.has_value());
+  BLACKBOX_CHECK(count_stock->trace_projection == "omitted");
+  BLACKBOX_REQUIRE(count_stock->omission_reason.has_value());
+  BLACKBOX_CHECK(*count_stock->omission_reason == "aggregate_scalar");
+  BLACKBOX_CHECK(std::find(count_stock->semantics_ignored.begin(),
+                           count_stock->semantics_ignored.end(), "aggregate") !=
+                 count_stock->semantics_ignored.end());
+
+  auto unsupported_source = found->at("client_txn");
+  unsupported_source["reads"][0]["source"] = "locking";
+  expectError(tpcc_parser, unsupported_source.dump(),
+              MonitorErrorCode::UnsupportedReadSource);
+
+  auto malformed_local = found->at("client_txn");
+  malformed_local["reads"][0]["source"] = "LOCAL";
+  expectError(tpcc_parser, malformed_local.dump(),
+              MonitorErrorCode::UnsupportedReadSource);
+
+  auto malformed_source = found->at("client_txn");
+  malformed_source["reads"][0]["source"] = Json::object();
+  expectError(tpcc_parser, malformed_source.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto absent_with_value = found->at("client_txn");
+  absent_with_value["reads"][0]["value_state"] = "absent";
+  expectError(tpcc_parser, absent_with_value.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto missing_value = found->at("client_txn");
+  missing_value["reads"][0].erase("value_bytes_base64");
+  expectError(tpcc_parser, missing_value.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto wrong_district_value = found->at("client_txn");
+  wrong_district_value["reads"][0]["value_bytes_base64"] = "AA==";
+  expectError(tpcc_parser, wrong_district_value.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+
+  auto malformed_extra_stock = found->at("client_txn");
+  malformed_extra_stock["reads"].push_back(
+      Json{{"event_seq", 1},
+           {"key_bytes_base64",
+            encodeBase64(blackbox::CanonicalTpccCodec::encodeKey(
+                "benchbase", "stock", Json{{"s_w_id", 1}, {"s_i_id", 1}}))},
+           {"value_state", "present"},
+           {"value_bytes_base64", "AA=="},
+           {"source", "snapshot"}});
+  malformed_extra_stock["read_count"] = 2;
+  expectError(tpcc_parser, malformed_extra_stock.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+}
+
 } // namespace
 
 int runClientTxnTests() {
@@ -1311,5 +1427,6 @@ int runClientTxnTests() {
   testNewOrderFixtureProjectionAndDiscardedAttempt();
   testPaymentFixtureProjectionAndContract();
   testDeliveryFixtureProjectionAndContract();
+  testStockLevelFixtureProjectionAndContract();
   return 0;
 }

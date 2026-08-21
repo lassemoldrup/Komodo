@@ -1221,6 +1221,119 @@ void testDeliveryEmptyAndTerminalFailureAlgebra() {
   }
 }
 
+void testStockLevelFocusedReconciliationAndMalformedEvidence() {
+  const auto fixture = loadTpccTransactionFixture();
+  const auto client_fixture = loadTpccClientFixture();
+  const auto run_manifest = blackbox::ProtocolRecordParser{}.parseRunManifest(
+      client_fixture.at("run_manifest").dump());
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  const blackbox::ClientTxnParser parser(
+      run_manifest.run_id, run_manifest.expected_session_ids, adapter);
+  const auto semantic = [&](const std::string_view txn_type) {
+    const auto &transactions = client_fixture.at("semantic_transactions");
+    const auto found = std::find_if(
+        transactions.begin(), transactions.end(), [&](const Json &entry) {
+          return entry.at("client_txn").at("txn_type") == txn_type;
+        });
+    return found == transactions.end() ? nullptr : &*found;
+  };
+  const auto *payment_entry = semantic("Payment");
+  const auto *new_order_entry = semantic("NewOrder");
+  const auto *stock_level_entry = semantic("StockLevel");
+  BLACKBOX_REQUIRE(payment_entry != nullptr);
+  BLACKBOX_REQUIRE(new_order_entry != nullptr);
+  BLACKBOX_REQUIRE(stock_level_entry != nullptr);
+  BLACKBOX_CHECK(stock_level_entry->at("cdc_transaction") ==
+                 "stock_level_marker_only");
+  const auto parsed_stock_level =
+      parser.parse(stock_level_entry->at("client_txn").dump());
+  BLACKBOX_REQUIRE(parsed_stock_level.reads.size() == 1U);
+  BLACKBOX_CHECK(
+      parsed_stock_level.read_digest ==
+      "376b04a2c33d3bc987f6a1383f3f0e0a2bd6a24e4fed62095a4cbb37e9b291ca");
+
+  const auto run_case = [&](const std::vector<ClientRead> &stock_level_reads,
+                            const FinalOutcome expected) {
+    auto transactions = assembleTpccFixture(fixture);
+    BLACKBOX_REQUIRE(transactions.size() == 12U);
+    auto stock_level_client = stock_level_entry->at("client_txn");
+    stock_level_client["reads"] = Json::array();
+    for (const auto &read : stock_level_reads) {
+      stock_level_client["reads"].push_back(readJson(read));
+    }
+    stock_level_client["read_count"] = stock_level_reads.size();
+    stock_level_client["read_digest"] =
+        blackbox::computeClientReadDigest(stock_level_reads);
+
+    RunController controller(run_manifest);
+    discardStatuses(controller);
+    controller.acceptCdcTransaction(std::move(transactions[0]));
+    controller.acceptCdcTransaction(std::move(transactions[1]));
+    controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
+    controller.acceptCdcTransaction(std::move(transactions[2]));
+    controller.acceptClientPayload(payment_entry->at("client_txn").dump());
+    controller.acceptCdcTransaction(std::move(transactions[3]));
+    controller.acceptCdcTransaction(std::move(transactions[4]));
+    controller.acceptClientPayload(new_order_entry->at("client_txn").dump());
+    transactions[10].cdc_seq = 5U;
+    controller.acceptClientPayload(stock_level_client.dump());
+    controller.acceptCdcTransaction(std::move(transactions[10]));
+
+    const auto run = stock_level_client.at("run_id").get<std::string>();
+    const auto session = stock_level_client.at("session_id").get<std::string>();
+    const std::array marker_entries = {
+        SessionMarkerEntry{.session_seq = 1U, .txn_id = 1U},
+        SessionMarkerEntry{.session_seq = 2U, .txn_id = 2U},
+        SessionMarkerEntry{.session_seq = 8U, .txn_id = 8U}};
+    controller.acceptClientPayload(Json{
+        {"kind", "session_done"},
+        {"run_id", run},
+        {"session_id", session},
+        {"final_session_seq", 8},
+        {"logical_transactions_started", 8},
+        {"successful_transactions", 3},
+        {"terminal_aborted_transactions", 5},
+        {"physical_attempts_started", 8},
+        {"definitively_aborted_attempts", 5},
+        {"published_transactions", 3},
+        {"retry_attempts", 0},
+        {"ambiguous_attempts", 0},
+        {"rolling_correlation_digest",
+         blackbox::computeRollingSessionMarkerDigest(
+             run, session,
+             marker_entries)}}.dump());
+    transactions[11].cdc_seq = 6U;
+    controller.acceptCdcTransaction(std::move(transactions[11]));
+    controller.onInputIdle();
+
+    BLACKBOX_CHECK(controller.terminal());
+    BLACKBOX_CHECK(controller.finalOutcome() == expected);
+    BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+    const auto &reconciliation = *controller.finalReconciliation();
+    BLACKBOX_CHECK(reconciliation.evidence_reconciled);
+    BLACKBOX_CHECK(reconciliation.accepted_client_transactions == 3U);
+    BLACKBOX_CHECK(reconciliation.joined_workload_transactions == 3U);
+    BLACKBOX_CHECK(reconciliation.unmatched_client_records == 0U);
+    BLACKBOX_CHECK(reconciliation.unmatched_workload_cdc_slots == 0U);
+    const auto metrics = controller.joinerMetrics();
+    BLACKBOX_CHECK(metrics.marker_only_workload_transactions == 1U);
+    BLACKBOX_CHECK(metrics.joined_write_events == 10U);
+    if (expected == FinalOutcome::Pass) {
+      BLACKBOX_CHECK(metrics.joined_read_events == 7U);
+      BLACKBOX_CHECK(!hasDiagnostic(controller, "VIOLATION_OBSERVED"));
+    } else {
+      BLACKBOX_CHECK(hasDiagnostic(controller, "VIOLATION_OBSERVED"));
+    }
+  };
+
+  run_case(parsed_stock_level.reads, FinalOutcome::Pass);
+
+  auto absent_district = parsed_stock_level.reads;
+  absent_district[0].state = ClientValueState::Absent;
+  absent_district[0].value = std::nullopt;
+  run_case(absent_district, FinalOutcome::Violation);
+}
+
 void testCapturedTpccControllerReconciliation() {
   const auto fixture = loadTpccTransactionFixture();
   const auto client_fixture = loadTpccClientFixture();
@@ -1338,6 +1451,7 @@ int runRunControllerTests() {
   testCapturedPaymentRetryReconciliation();
   testCapturedDeliveryRetryReconciliation();
   testDeliveryEmptyAndTerminalFailureAlgebra();
+  testStockLevelFocusedReconciliationAndMalformedEvidence();
   testCapturedTpccControllerReconciliation();
   return 0;
 }

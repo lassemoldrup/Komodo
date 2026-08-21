@@ -1155,6 +1155,35 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_CHECK(actual[order_status_index].writes.empty());
   BLACKBOX_CHECK(order_status->at("raw_entries").size() == 3U);
 
+  const auto stock_level = std::find_if(
+      fixture.at("transactions").begin(), fixture.at("transactions").end(),
+      [](const Json &transaction) {
+        return transaction.at("name") == "stock_level_marker_only";
+      });
+  BLACKBOX_REQUIRE(stock_level != fixture.at("transactions").end());
+  const auto stock_level_index = static_cast<std::size_t>(
+      std::distance(fixture.at("transactions").begin(), stock_level));
+  BLACKBOX_REQUIRE(stock_level_index < actual.size());
+  BLACKBOX_CHECK(actual[stock_level_index].kind ==
+                 CdcTransactionKind::WorkloadMarked);
+  BLACKBOX_REQUIRE(actual[stock_level_index].correlation_id.has_value());
+  BLACKBOX_CHECK(actual[stock_level_index].correlation_id->txn_id == 8U);
+  BLACKBOX_CHECK(actual[stock_level_index].writes.empty());
+  BLACKBOX_CHECK(stock_level->at("expected").at("writes").empty());
+  BLACKBOX_REQUIRE(stock_level->at("raw_entries").size() == 3U);
+  const auto stock_level_marker =
+      entryEnvelope(stock_level->at("raw_entries")[1]);
+  BLACKBOX_CHECK(stock_level_marker.at("source").at("table") == "session_txn");
+  BLACKBOX_CHECK(stock_level_marker.at("before").at("txn_id") == 7U);
+  BLACKBOX_CHECK(stock_level_marker.at("after").at("txn_id") == 8U);
+  const auto stock_level_end = entryEnvelope(stock_level->at("raw_entries")[2]);
+  BLACKBOX_CHECK(stock_level_end.at("event_count") == 1U);
+  BLACKBOX_REQUIRE(stock_level_end.at("data_collections").size() == 1U);
+  BLACKBOX_CHECK(stock_level_end.at("data_collections")[0].at(
+                     "data_collection") == "benchbase.session_txn");
+  BLACKBOX_CHECK(stock_level_end.at("data_collections")[0].at("event_count") ==
+                 1U);
+
   const auto payment = std::find_if(
       fixture.at("transactions").begin(), fixture.at("transactions").end(),
       [](const Json &transaction) {
@@ -1500,6 +1529,46 @@ void checkCapturedTpccTransactionsAndFailures() {
     auto raw = tpccRawEntries(invalid);
     renumberStreamIds(raw);
     expectError(std::move(raw), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry =
+        tpccRowEntry(invalid, "stock_level_marker_only", "session_txn");
+    auto envelope = entryEnvelope(entry);
+    envelope["source"]["name"] = "other-source";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry =
+        tpccRowEntry(invalid, "stock_level_marker_only", "session_txn");
+    auto envelope = entryEnvelope(entry);
+    envelope["before"]["txn_id"] = 6;
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::MarkerChainMismatch,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry =
+        tpccRowEntry(invalid, "stock_level_marker_only", "session_txn");
+    auto key = entryKey(entry);
+    key["session_id"] = "tpcc/worker/other";
+    setEntryKey(entry, key);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::MarkerMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry =
+        tpccRowEntry(invalid, "stock_level_marker_only", "session_txn");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"]["txn_id"] = nullptr;
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::MarkerMalformed,
                 tpccAssemblerConfig(invalid), false);
   }
   {
