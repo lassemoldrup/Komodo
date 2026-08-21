@@ -667,9 +667,16 @@ void checkMeasurementMetrics() {
   BLACKBOX_CHECK(metrics.completed_workload_transactions == 7U);
   BLACKBOX_CHECK(metrics.raw_row_events == 23U);
   BLACKBOX_CHECK(metrics.normalized_write_events == 9U);
+  BLACKBOX_CHECK(metrics.active_transactions == 0U);
+  BLACKBOX_CHECK(metrics.active_transactions_high_water == 1U);
+  BLACKBOX_CHECK(metrics.observed_events_per_transaction_high_water == 5U);
   BLACKBOX_CHECK(metrics.active_assembly_bytes == 0U);
   BLACKBOX_CHECK(metrics.active_assembly_high_water_bytes > 0U);
+  BLACKBOX_CHECK(metrics.retained_identity_records == 11U);
   BLACKBOX_CHECK(metrics.retained_identity_bytes > 0U);
+  BLACKBOX_CHECK(metrics.retained_identity_high_water_records == 11U);
+  BLACKBOX_CHECK(metrics.retained_identity_high_water_bytes ==
+                 metrics.retained_identity_bytes);
 }
 
 void checkStructuralFailuresAreClosed() {

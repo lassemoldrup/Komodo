@@ -67,14 +67,36 @@ struct Options {
   std::chrono::milliseconds overall_timeout{120000};
   ProcessingMode processing_mode = ProcessingMode::Audited;
   std::optional<std::string> metrics_output;
+  std::size_t max_assembler_active_transactions =
+      blackbox::DebeziumAssemblerConfig{}.max_active_transactions;
+  std::size_t max_assembler_events_per_transaction =
+      blackbox::DebeziumAssemblerConfig{}.max_events_per_transaction;
+  std::size_t max_assembler_active_bytes =
+      blackbox::DebeziumAssemblerConfig{}.max_active_bytes;
+  std::size_t max_assembler_completed_transactions =
+      blackbox::DebeziumAssemblerConfig{}.max_completed_transactions;
+  std::size_t max_assembler_retained_identity_bytes =
+      blackbox::DebeziumAssemblerConfig{}.max_retained_identity_bytes;
+  std::size_t max_pending_client_records =
+      blackbox::TransactionJoinerLimits{}.max_pending_client_records;
   std::size_t max_pending_client_bytes =
       blackbox::TransactionJoinerLimits{}.max_pending_client_bytes;
+  std::size_t max_pending_cdc_slots =
+      blackbox::TransactionJoinerLimits{}.max_pending_cdc_slots;
+  std::size_t max_pending_cdc_bytes =
+      blackbox::TransactionJoinerLimits{}.max_pending_cdc_bytes;
+  std::size_t max_retained_identity_records =
+      blackbox::TransactionJoinerLimits{}.max_retained_identity_records;
   std::size_t max_retained_identity_bytes =
       blackbox::TransactionJoinerLimits{}.max_retained_identity_bytes;
+  std::size_t max_events_per_transaction =
+      blackbox::TransactionJoinerLimits{}.max_events_per_transaction;
   std::size_t max_bootstrap_state_rows =
       blackbox::TransactionJoinerLimits{}.max_bootstrap_state_rows;
   std::size_t max_bootstrap_state_bytes =
       blackbox::TransactionJoinerLimits{}.max_bootstrap_state_bytes;
+  std::size_t max_checker_state_bytes =
+      blackbox::TransactionJoinerLimits{}.max_checker_state_bytes;
 };
 
 [[nodiscard]] bool isLowerUuid(const std::string_view value) {
@@ -163,18 +185,51 @@ parseTimeout(const std::string_view value) {
         throw std::invalid_argument("metrics output path is invalid");
       }
       options.metrics_output = value;
+    } else if (argument == "--max-assembler-active-transactions") {
+      options.max_assembler_active_transactions =
+          parsePositiveSize(value, "max assembler active transactions");
+    } else if (argument == "--max-assembler-events-per-transaction") {
+      options.max_assembler_events_per_transaction =
+          parsePositiveSize(value, "max assembler events per transaction");
+    } else if (argument == "--max-assembler-active-bytes") {
+      options.max_assembler_active_bytes =
+          parsePositiveSize(value, "max assembler active bytes");
+    } else if (argument == "--max-assembler-completed-transactions") {
+      options.max_assembler_completed_transactions =
+          parsePositiveSize(value, "max assembler completed transactions");
+    } else if (argument == "--max-assembler-retained-identity-bytes") {
+      options.max_assembler_retained_identity_bytes =
+          parsePositiveSize(value, "max assembler retained identity bytes");
+    } else if (argument == "--max-pending-client-records") {
+      options.max_pending_client_records =
+          parsePositiveSize(value, "max pending client records");
     } else if (argument == "--max-pending-client-bytes") {
       options.max_pending_client_bytes =
           parsePositiveSize(value, "max pending client bytes");
+    } else if (argument == "--max-pending-cdc-slots") {
+      options.max_pending_cdc_slots =
+          parsePositiveSize(value, "max pending CDC slots");
+    } else if (argument == "--max-pending-cdc-bytes") {
+      options.max_pending_cdc_bytes =
+          parsePositiveSize(value, "max pending CDC bytes");
+    } else if (argument == "--max-retained-identity-records") {
+      options.max_retained_identity_records =
+          parsePositiveSize(value, "max retained identity records");
     } else if (argument == "--max-retained-identity-bytes") {
       options.max_retained_identity_bytes =
           parsePositiveSize(value, "max retained identity bytes");
+    } else if (argument == "--max-events-per-transaction") {
+      options.max_events_per_transaction =
+          parsePositiveSize(value, "max events per transaction");
     } else if (argument == "--max-bootstrap-state-rows") {
       options.max_bootstrap_state_rows =
           parsePositiveSize(value, "max bootstrap state rows");
     } else if (argument == "--max-bootstrap-state-bytes") {
       options.max_bootstrap_state_bytes =
           parsePositiveSize(value, "max bootstrap state bytes");
+    } else if (argument == "--max-checker-state-bytes") {
+      options.max_checker_state_bytes =
+          parsePositiveSize(value, "max checker state bytes");
     } else {
       throw std::invalid_argument("unknown argument: " + std::string(argument));
     }
@@ -418,10 +473,20 @@ assemblerMetricsJson(const blackbox::DebeziumAssemblerMetrics &metrics) {
        metrics.completed_workload_transactions},
       {"raw_row_events", metrics.raw_row_events},
       {"normalized_write_events", metrics.normalized_write_events},
+      {"active_transactions", metrics.active_transactions},
+      {"active_transactions_high_water",
+       metrics.active_transactions_high_water},
+      {"observed_events_per_transaction_high_water",
+       metrics.observed_events_per_transaction_high_water},
       {"active_assembly_bytes", metrics.active_assembly_bytes},
       {"active_assembly_high_water_bytes",
        metrics.active_assembly_high_water_bytes},
+      {"retained_identity_records", metrics.retained_identity_records},
       {"retained_identity_bytes", metrics.retained_identity_bytes},
+      {"retained_identity_high_water_records",
+       metrics.retained_identity_high_water_records},
+      {"retained_identity_high_water_bytes",
+       metrics.retained_identity_high_water_bytes},
   };
 }
 
@@ -441,6 +506,12 @@ checkerMetricsJson(const blackbox::CheckerAdapterMetrics &metrics) {
       {"consume_max_nanoseconds", metrics.consume_max_nanoseconds},
       {"mapped_identity_records", metrics.mapped_identity_records},
       {"mapped_identity_bytes", metrics.mapped_identity_bytes},
+      {"mapped_identity_high_water_records",
+       metrics.mapped_identity_high_water_records},
+      {"mapped_identity_high_water_bytes",
+       metrics.mapped_identity_high_water_bytes},
+      {"events_per_transaction_high_water",
+       metrics.events_per_transaction_high_water},
       {"engine",
        Json{
            {"retained_state_capacity_bytes",
@@ -536,12 +607,19 @@ joinerMetricsJson(const blackbox::TransactionJoinerMetrics &metrics) {
       {"cdc_first_matches", metrics.cdc_first_matches},
       {"pending_client_records", metrics.pending_client_records},
       {"pending_client_bytes", metrics.pending_client_bytes},
+      {"pending_client_high_water_records",
+       metrics.pending_client_high_water_records},
       {"pending_client_high_water_bytes",
        metrics.pending_client_high_water_bytes},
       {"pending_cdc_slots", metrics.pending_cdc_slots},
       {"pending_cdc_bytes", metrics.pending_cdc_bytes},
+      {"pending_cdc_high_water_slots", metrics.pending_cdc_high_water_slots},
       {"pending_cdc_high_water_bytes", metrics.pending_cdc_high_water_bytes},
+      {"join_buffer_high_water_records",
+       metrics.join_buffer_high_water_records},
       {"join_buffer_high_water_bytes", metrics.join_buffer_high_water_bytes},
+      {"released_events_per_transaction_high_water",
+       metrics.released_events_per_transaction_high_water},
       {"unmatched_client_records", metrics.unmatched_client_records},
       {"unmatched_workload_cdc_slots", metrics.unmatched_workload_cdc_slots},
       {"missing_client_head_wait_count",
@@ -554,8 +632,22 @@ joinerMetricsJson(const blackbox::TransactionJoinerMetrics &metrics) {
        metrics.missing_client_head_wait_max_nanoseconds},
       {"retained_identity_records", metrics.retained_identity_records},
       {"retained_identity_bytes", metrics.retained_identity_bytes},
+      {"retained_identity_high_water_records",
+       metrics.retained_identity_high_water_records},
+      {"retained_identity_high_water_bytes",
+       metrics.retained_identity_high_water_bytes},
       {"bootstrap_state_rows", metrics.bootstrap_state_rows},
       {"bootstrap_state_bytes", metrics.bootstrap_state_bytes},
+      {"bootstrap_state_high_water_rows",
+       metrics.bootstrap_state_high_water_rows},
+      {"bootstrap_state_high_water_bytes",
+       metrics.bootstrap_state_high_water_bytes},
+      {"drain_invocations", metrics.drain_invocations},
+      {"drain_total_nanoseconds", metrics.drain_total_nanoseconds},
+      {"drain_max_nanoseconds", metrics.drain_max_nanoseconds},
+      {"end_fence_drain_current_nanoseconds",
+       metrics.end_fence_drain_current_nanoseconds},
+      {"end_fence_drain_nanoseconds", metrics.end_fence_drain_nanoseconds},
       {"end_fence_observed", metrics.end_fence_observed},
       {"end_fence_processed", metrics.end_fence_processed},
       {"bootstrap_state_validated", metrics.bootstrap_state_validated},
@@ -815,14 +907,43 @@ public:
                                                   finished_usage.ru_stime)},
                          {"max_rss_kib", finished_usage.ru_maxrss}}},
         {"limits",
-         Json{{"joiner", Json{{"max_pending_client_bytes",
-                               options_.max_pending_client_bytes},
-                              {"max_retained_identity_bytes",
-                               options_.max_retained_identity_bytes},
-                              {"max_bootstrap_state_rows",
-                               options_.max_bootstrap_state_rows},
-                              {"max_bootstrap_state_bytes",
-                               options_.max_bootstrap_state_bytes}}}}},
+         Json{{"assembler",
+               Json{{"max_active_transactions",
+                     options_.max_assembler_active_transactions},
+                    {"max_events_per_transaction",
+                     options_.max_assembler_events_per_transaction},
+                    {"max_active_bytes", options_.max_assembler_active_bytes},
+                    {"max_completed_transactions",
+                     options_.max_assembler_completed_transactions},
+                    {"max_retained_identity_bytes",
+                     options_.max_assembler_retained_identity_bytes}}},
+              {"joiner",
+               Json{{"max_pending_client_records",
+                     options_.max_pending_client_records},
+                    {"max_pending_client_bytes",
+                     options_.max_pending_client_bytes},
+                    {"max_pending_cdc_slots", options_.max_pending_cdc_slots},
+                    {"max_pending_cdc_bytes", options_.max_pending_cdc_bytes},
+                    {"max_retained_identity_records",
+                     options_.max_retained_identity_records},
+                    {"max_retained_identity_bytes",
+                     options_.max_retained_identity_bytes},
+                    {"max_events_per_transaction",
+                     options_.max_events_per_transaction},
+                    {"max_bootstrap_state_rows",
+                     options_.max_bootstrap_state_rows},
+                    {"max_bootstrap_state_bytes",
+                     options_.max_bootstrap_state_bytes},
+                    {"max_checker_state_bytes",
+                     options_.max_checker_state_bytes}}},
+              {"checker", Json{{"max_retained_state_bytes",
+                                options_.max_checker_state_bytes},
+                               {"max_events_per_transaction",
+                                options_.max_events_per_transaction},
+                               {"max_mapped_identity_records",
+                                options_.max_retained_identity_records},
+                               {"max_mapped_identity_bytes",
+                                options_.max_retained_identity_bytes}}}}},
         {"assembler", assemblerMetricsJson(assembler_metrics_)},
         {"joiner", joinerMetricsJson(joiner_metrics_)},
         {"checker", checkerMetricsJson(joiner_metrics_.checker)},
@@ -1117,14 +1238,26 @@ int run(const Options &options) {
   try {
     blackbox::RunControllerConfig controller_config;
     controller_config.processing_mode = options.processing_mode;
+    controller_config.joiner_limits.max_pending_client_records =
+        options.max_pending_client_records;
     controller_config.joiner_limits.max_pending_client_bytes =
         options.max_pending_client_bytes;
+    controller_config.joiner_limits.max_pending_cdc_slots =
+        options.max_pending_cdc_slots;
+    controller_config.joiner_limits.max_pending_cdc_bytes =
+        options.max_pending_cdc_bytes;
+    controller_config.joiner_limits.max_retained_identity_records =
+        options.max_retained_identity_records;
     controller_config.joiner_limits.max_retained_identity_bytes =
         options.max_retained_identity_bytes;
+    controller_config.joiner_limits.max_events_per_transaction =
+        options.max_events_per_transaction;
     controller_config.joiner_limits.max_bootstrap_state_rows =
         options.max_bootstrap_state_rows;
     controller_config.joiner_limits.max_bootstrap_state_bytes =
         options.max_bootstrap_state_bytes;
+    controller_config.joiner_limits.max_checker_state_bytes =
+        options.max_checker_state_bytes;
     controller_storage.emplace(manifest, std::move(controller_config));
     controller_storage->setLastClientStreamId(manifest_evidence.stream_id);
     assembler_storage.emplace(DebeziumAssemblerConfig{
@@ -1138,6 +1271,14 @@ int run(const Options &options) {
         .application_tables = manifest.application_table_allowlist,
         .transaction_marker_table = manifest.transaction_marker_table,
         .run_fence_table = manifest.control_table_allowlist.front(),
+        .max_active_transactions = options.max_assembler_active_transactions,
+        .max_events_per_transaction =
+            options.max_assembler_events_per_transaction,
+        .max_active_bytes = options.max_assembler_active_bytes,
+        .max_completed_transactions =
+            options.max_assembler_completed_transactions,
+        .max_retained_identity_bytes =
+            options.max_assembler_retained_identity_bytes,
     });
     reader_storage = std::make_unique<BlockingRedisReader>(
         reader_context.get(),

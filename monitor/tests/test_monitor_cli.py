@@ -479,33 +479,84 @@ def check_join_only_early_failure_artifact(executable):
         assert set(("assembler", "joiner", "checker", "process")) <= set(
             measurement
         )
-        assert (
-            measurement["limits"]["joiner"]["max_pending_client_bytes"]
-            == 268435456
-        )
-        assert (
-            measurement["limits"]["joiner"]["max_retained_identity_bytes"]
-            == 536870912
-        )
-        assert (
-            measurement["limits"]["joiner"]["max_bootstrap_state_rows"]
-            == 10000000
-        )
-        assert (
-            measurement["limits"]["joiner"]["max_bootstrap_state_bytes"]
-            == 268435456
-        )
+        assert measurement["limits"]["assembler"] == {
+            "max_active_transactions": 1024,
+            "max_events_per_transaction": 100000,
+            "max_active_bytes": 268435456,
+            "max_completed_transactions": 10000000,
+            "max_retained_identity_bytes": 268435456,
+        }
+        assert measurement["limits"]["joiner"] == {
+            "max_pending_client_records": 1000000,
+            "max_pending_client_bytes": 268435456,
+            "max_pending_cdc_slots": 1000000,
+            "max_pending_cdc_bytes": 268435456,
+            "max_retained_identity_records": 10000000,
+            "max_retained_identity_bytes": 536870912,
+            "max_events_per_transaction": 101000,
+            "max_bootstrap_state_rows": 10000000,
+            "max_bootstrap_state_bytes": 268435456,
+            "max_checker_state_bytes": 536870912,
+        }
+        assert measurement["limits"]["checker"] == {
+            "max_retained_state_bytes": 536870912,
+            "max_events_per_transaction": 101000,
+            "max_mapped_identity_records": 10000000,
+            "max_mapped_identity_bytes": 536870912,
+        }
+        assert {
+            "active_transactions_high_water",
+            "observed_events_per_transaction_high_water",
+            "active_assembly_high_water_bytes",
+            "retained_identity_high_water_records",
+            "retained_identity_high_water_bytes",
+        } <= measurement["assembler"].keys()
+        assert {
+            "pending_client_high_water_records",
+            "pending_client_high_water_bytes",
+            "pending_cdc_high_water_slots",
+            "pending_cdc_high_water_bytes",
+            "join_buffer_high_water_records",
+            "join_buffer_high_water_bytes",
+            "released_events_per_transaction_high_water",
+            "retained_identity_high_water_records",
+            "retained_identity_high_water_bytes",
+            "bootstrap_state_high_water_rows",
+            "bootstrap_state_high_water_bytes",
+            "missing_client_head_wait_max_nanoseconds",
+            "drain_invocations",
+            "drain_total_nanoseconds",
+            "drain_max_nanoseconds",
+            "end_fence_drain_nanoseconds",
+        } <= measurement["joiner"].keys()
+        assert {
+            "mapped_identity_high_water_records",
+            "mapped_identity_high_water_bytes",
+            "events_per_transaction_high_water",
+        } <= measurement["checker"].keys()
+        assert "peak_retained_state_bytes" in measurement["checker"]["engine"]
         assert_no_audited_result(measurement)
         assert "outcome=INVALID" not in output(result)
     print("join-only early failure: failed measurement written without verdict")
 
 
-def check_joiner_limit_options(executable):
+def check_capacity_options(executable):
     for option in (
+        "--max-assembler-active-transactions",
+        "--max-assembler-events-per-transaction",
+        "--max-assembler-active-bytes",
+        "--max-assembler-completed-transactions",
+        "--max-assembler-retained-identity-bytes",
+        "--max-pending-client-records",
         "--max-pending-client-bytes",
+        "--max-pending-cdc-slots",
+        "--max-pending-cdc-bytes",
+        "--max-retained-identity-records",
         "--max-retained-identity-bytes",
+        "--max-events-per-transaction",
         "--max-bootstrap-state-rows",
         "--max-bootstrap-state-bytes",
+        "--max-checker-state-bytes",
     ):
         for invalid in ("0", "18446744073709551616"):
             result = subprocess.run(
@@ -534,36 +585,67 @@ def check_joiner_limit_options(executable):
                     "join-only",
                     "--metrics-output",
                     str(metrics_path),
+                    "--max-assembler-active-transactions",
+                    "2048",
+                    "--max-assembler-events-per-transaction",
+                    "200000",
+                    "--max-assembler-active-bytes",
+                    "536870912",
+                    "--max-assembler-completed-transactions",
+                    "20000000",
+                    "--max-assembler-retained-identity-bytes",
+                    "536870912",
+                    "--max-pending-client-records",
+                    "2000000",
                     "--max-pending-client-bytes",
                     "1073741824",
+                    "--max-pending-cdc-slots",
+                    "2000000",
+                    "--max-pending-cdc-bytes",
+                    "1073741824",
+                    "--max-retained-identity-records",
+                    "20000000",
                     "--max-retained-identity-bytes",
                     "2147483648",
+                    "--max-events-per-transaction",
+                    "202000",
                     "--max-bootstrap-state-rows",
                     "20000000",
                     "--max-bootstrap-state-bytes",
                     "1073741824",
+                    "--max-checker-state-bytes",
+                    "2147483648",
                 ],
             )
             assert result.returncode == 1, result
         measurement = json.loads(metrics_path.read_text(encoding="utf-8"))
-        assert (
-            measurement["limits"]["joiner"]["max_pending_client_bytes"]
-            == 1073741824
-        )
-        assert (
-            measurement["limits"]["joiner"]["max_retained_identity_bytes"]
-            == 2147483648
-        )
-        assert (
-            measurement["limits"]["joiner"]["max_bootstrap_state_rows"]
-            == 20000000
-        )
-        assert (
-            measurement["limits"]["joiner"]["max_bootstrap_state_bytes"]
-            == 1073741824
-        )
+        assert measurement["limits"]["assembler"] == {
+            "max_active_transactions": 2048,
+            "max_events_per_transaction": 200000,
+            "max_active_bytes": 536870912,
+            "max_completed_transactions": 20000000,
+            "max_retained_identity_bytes": 536870912,
+        }
+        assert measurement["limits"]["joiner"] == {
+            "max_pending_client_records": 2000000,
+            "max_pending_client_bytes": 1073741824,
+            "max_pending_cdc_slots": 2000000,
+            "max_pending_cdc_bytes": 1073741824,
+            "max_retained_identity_records": 20000000,
+            "max_retained_identity_bytes": 2147483648,
+            "max_events_per_transaction": 202000,
+            "max_bootstrap_state_rows": 20000000,
+            "max_bootstrap_state_bytes": 1073741824,
+            "max_checker_state_bytes": 2147483648,
+        }
+        assert measurement["limits"]["checker"] == {
+            "max_retained_state_bytes": 2147483648,
+            "max_events_per_transaction": 202000,
+            "max_mapped_identity_records": 20000000,
+            "max_mapped_identity_bytes": 2147483648,
+        }
         assert_no_audited_result(measurement)
-    print("joiner capacities: defaults, overrides, zero, and overflow validated")
+    print("monitor capacities: defaults, overrides, zero, and overflow validated")
 
 
 def main():
@@ -579,7 +661,7 @@ def main():
     check_tpcc_roster_mismatch_is_invalid(args.monitor)
     check_join_only_requires_metrics(args.monitor)
     check_join_only_early_failure_artifact(args.monitor)
-    check_joiner_limit_options(args.monitor)
+    check_capacity_options(args.monitor)
 
 
 if __name__ == "__main__":

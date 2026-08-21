@@ -318,6 +318,10 @@ public:
         .consume_max_nanoseconds = consume_max_nanoseconds_,
         .mapped_identity_records = mapped_identity_records_,
         .mapped_identity_bytes = mapped_identity_bytes_,
+        .mapped_identity_high_water_records =
+            mapped_identity_high_water_records_,
+        .mapped_identity_high_water_bytes = mapped_identity_high_water_bytes_,
+        .events_per_transaction_high_water = events_per_transaction_high_water_,
         .engine = engine_.metrics(),
     };
   }
@@ -410,6 +414,10 @@ private:
     }
     ++mapped_identity_records_;
     mapped_identity_bytes_ += charge;
+    mapped_identity_high_water_records_ =
+        std::max(mapped_identity_high_water_records_, mapped_identity_records_);
+    mapped_identity_high_water_bytes_ =
+        std::max(mapped_identity_high_water_bytes_, mapped_identity_bytes_);
   }
 
   void validateWrites(const std::span<const NormalizedWrite> writes) const {
@@ -547,6 +555,8 @@ private:
         saturating_add(read_events_, static_cast<std::uint64_t>(read_count));
     write_events_ =
         saturating_add(write_events_, static_cast<std::uint64_t>(write_count));
+    events_per_transaction_high_water_ =
+        std::max(events_per_transaction_high_water_, read_count + write_count);
     consume_total_nanoseconds_ =
         saturating_add(consume_total_nanoseconds_, duration);
     consume_max_nanoseconds_ = std::max(consume_max_nanoseconds_, duration);
@@ -652,6 +662,9 @@ private:
   std::uint64_t consume_max_nanoseconds_ = 0;
   std::size_t mapped_identity_records_ = 0;
   std::size_t mapped_identity_bytes_ = 0;
+  std::size_t mapped_identity_high_water_records_ = 0;
+  std::size_t mapped_identity_high_water_bytes_ = 0;
+  std::size_t events_per_transaction_high_water_ = 0;
 };
 
 CheckerAdapter::CheckerAdapter(CheckerAdapterConfig config)

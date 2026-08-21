@@ -404,6 +404,13 @@ void testHeadWaitClockAndCombinedJoinBufferPeak() {
                  metrics.pending_client_high_water_bytes);
   BLACKBOX_CHECK(metrics.join_buffer_high_water_bytes >
                  metrics.pending_cdc_high_water_bytes);
+  BLACKBOX_CHECK(metrics.pending_client_high_water_records == 1U);
+  BLACKBOX_CHECK(metrics.pending_cdc_high_water_slots == 2U);
+  BLACKBOX_CHECK(metrics.join_buffer_high_water_records == 3U);
+  BLACKBOX_CHECK(metrics.retained_identity_high_water_records ==
+                 metrics.retained_identity_records);
+  BLACKBOX_CHECK(metrics.retained_identity_high_water_bytes ==
+                 metrics.retained_identity_bytes);
 
   now = 250U;
   joiner.acceptClientPayload(clientPayload(session_one, 1U, 1U, 1U));
@@ -426,6 +433,40 @@ void testHeadWaitClockAndCombinedJoinBufferPeak() {
   BLACKBOX_CHECK(metrics.missing_client_head_wait_current_nanoseconds == 0U);
   BLACKBOX_CHECK(metrics.missing_client_head_wait_total_nanoseconds == 190U);
   BLACKBOX_CHECK(metrics.missing_client_head_wait_max_nanoseconds == 150U);
+
+  now = 350U;
+  joiner.acceptCdcTransaction(control(5U, RunFencePhase::EndFence));
+  now = 410U;
+  metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.end_fence_drain_current_nanoseconds == 60U);
+  joiner.processEndFence();
+  metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.end_fence_drain_current_nanoseconds == 0U);
+  BLACKBOX_CHECK(metrics.end_fence_drain_nanoseconds == 60U);
+  BLACKBOX_CHECK(metrics.drain_invocations > 0U);
+}
+
+void testDrainDurationClock() {
+  std::uint64_t now = 0U;
+  auto joiner_config = config();
+  joiner_config.monotonic_clock_nanoseconds = [&] {
+    now += 10U;
+    return now;
+  };
+  joiner_config.execute_consistency_check = false;
+  TransactionJoiner joiner(std::move(joiner_config));
+  openWorkload(joiner);
+  joiner.acceptClientPayload(clientPayload(session_one, 1U, 1U, 1U));
+  joiner.acceptCdcTransaction(workload(2U, session_one, 1U));
+  joiner.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+  joiner.processEndFence();
+  const auto metrics = joiner.metrics();
+  BLACKBOX_CHECK(metrics.drain_invocations > 0U);
+  BLACKBOX_CHECK(metrics.drain_total_nanoseconds ==
+                 metrics.drain_invocations * 10U);
+  BLACKBOX_CHECK(metrics.drain_max_nanoseconds == 10U);
+  BLACKBOX_CHECK(metrics.end_fence_drain_current_nanoseconds == 0U);
+  BLACKBOX_CHECK(metrics.end_fence_drain_nanoseconds > 0U);
 }
 
 void testOrderedJoiningWithoutCheckerExecution() {
@@ -474,6 +515,12 @@ void testOrderedJoiningWithoutCheckerExecution() {
   BLACKBOX_CHECK(metrics.joined_read_events == 1U);
   BLACKBOX_CHECK(metrics.joined_write_events == 1U);
   BLACKBOX_CHECK(metrics.joined_ordered_events == 2U);
+  BLACKBOX_CHECK(metrics.released_events_per_transaction_high_water == 2U);
+  BLACKBOX_CHECK(metrics.bootstrap_state_rows == 2U);
+  BLACKBOX_CHECK(metrics.bootstrap_state_high_water_rows == 2U);
+  BLACKBOX_CHECK(metrics.bootstrap_state_high_water_bytes ==
+                 metrics.bootstrap_state_bytes);
+  BLACKBOX_CHECK(metrics.drain_invocations > 0U);
   BLACKBOX_CHECK(joiner.checkerObservation() == CheckerObservation::NotStarted);
   BLACKBOX_CHECK(!joiner.firstViolation().has_value());
   BLACKBOX_CHECK(metrics.checker.next_commit_seq == 0U);
@@ -879,7 +926,9 @@ void testBoundsAreCountedWithoutDroppingEvidence() {
 
   limits = TransactionJoinerLimits{};
   limits.max_events_per_transaction = 1U;
-  TransactionJoiner event_limited(config(limits));
+  auto event_limited_config = config(limits);
+  event_limited_config.execute_consistency_check = false;
+  TransactionJoiner event_limited(std::move(event_limited_config));
   openWorkload(event_limited);
   event_limited.acceptClientPayload(clientPayload(
       session_one, 1U, 1U, 1U, {absentRead(0U, 1), absentRead(1U, 2)}));
@@ -887,6 +936,19 @@ void testBoundsAreCountedWithoutDroppingEvidence() {
       event_limited,
       [&] {
         event_limited.acceptCdcTransaction(workload(2U, session_one, 1U));
+      },
+      MonitorErrorCode::ResourceExhausted);
+
+  auto bootstrap_event_config = config(limits);
+  bootstrap_event_config.execute_consistency_check = false;
+  TransactionJoiner bootstrap_event_limited(std::move(bootstrap_event_config));
+  bootstrap_event_limited.acceptCdcTransaction(
+      control(0U, RunFencePhase::RunStart));
+  expectError(
+      bootstrap_event_limited,
+      [&] {
+        bootstrap_event_limited.acceptCdcTransaction(
+            bootstrap(1U, {presentWrite(1, "one"), presentWrite(2, "two")}));
       },
       MonitorErrorCode::ResourceExhausted);
 }
@@ -1057,6 +1119,7 @@ void testTpccCompositeAndHistoryWritesUseGenericJoiner() {
 int runTransactionJoinerTests() {
   testStrictReadyPrefixAndEndDeferral();
   testHeadWaitClockAndCombinedJoinBufferPeak();
+  testDrainDurationClock();
   testOrderedJoiningWithoutCheckerExecution();
   testEndFenceCannotPassMissingClient();
   testBootstrapGateAndAnchorLowerBound();

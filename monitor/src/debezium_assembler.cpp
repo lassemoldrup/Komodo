@@ -321,9 +321,18 @@ public:
         .completed_workload_transactions = completed_workload_transactions_,
         .raw_row_events = raw_row_events_,
         .normalized_write_events = normalized_write_events_,
+        .active_transactions = active_.size(),
+        .active_transactions_high_water = active_transactions_high_water_,
+        .observed_events_per_transaction_high_water =
+            observed_events_per_transaction_high_water_,
         .active_assembly_bytes = active_bytes_,
         .active_assembly_high_water_bytes = active_bytes_high_water_,
+        .retained_identity_records = completed_structural_ids_.size(),
         .retained_identity_bytes = retained_identity_bytes_,
+        .retained_identity_high_water_records =
+            retained_identity_high_water_records_,
+        .retained_identity_high_water_bytes =
+            retained_identity_high_water_bytes_,
     };
   }
 
@@ -1069,6 +1078,8 @@ private:
       transaction.begin_stream_id = record.stream_id;
       transaction.raw_bytes = raw_bytes;
       active_.emplace(envelope_id, std::move(transaction));
+      active_transactions_high_water_ =
+          std::max(active_transactions_high_water_, active_.size());
       ++begin_metadata_records_;
       return std::nullopt;
     }
@@ -1260,6 +1271,9 @@ private:
     active->second.table_counts[active->second.rows.back().table.full_name] =
         collection_order;
     active->second.raw_bytes += raw_bytes;
+    observed_events_per_transaction_high_water_ =
+        std::max(observed_events_per_transaction_high_water_,
+                 active->second.rows.size());
     ++row_records_;
   }
 
@@ -1282,6 +1296,8 @@ private:
            "retained CDC identity byte limit exceeded");
     }
     retained_identity_bytes_ += additional;
+    retained_identity_high_water_bytes_ =
+        std::max(retained_identity_high_water_bytes_, retained_identity_bytes_);
   }
 
   [[nodiscard]] std::optional<CdcTransaction> completeTransaction(
@@ -1339,6 +1355,9 @@ private:
     active_.erase(active);
     active_bytes_ -= released_bytes;
     completed_structural_ids_.insert(structural_id);
+    retained_identity_high_water_records_ =
+        std::max(retained_identity_high_water_records_,
+                 completed_structural_ids_.size());
     assembled.cdc_seq = next_cdc_seq_;
     ++next_cdc_seq_;
     raw_row_events_ += static_cast<std::uint64_t>(raw_row_count);
@@ -1808,9 +1827,13 @@ private:
   std::uint64_t completed_workload_transactions_ = 0;
   std::uint64_t raw_row_events_ = 0;
   std::uint64_t normalized_write_events_ = 0;
+  std::size_t active_transactions_high_water_ = 0;
+  std::size_t observed_events_per_transaction_high_water_ = 0;
   std::size_t active_bytes_ = 0;
   std::size_t active_bytes_high_water_ = 0;
   std::size_t retained_identity_bytes_ = 0;
+  std::size_t retained_identity_high_water_records_ = 0;
+  std::size_t retained_identity_high_water_bytes_ = 0;
   std::size_t startup_schema_snapshot_records_ = 0;
   std::size_t startup_schema_create_index_ = 0;
   std::optional<Failure> failure_;

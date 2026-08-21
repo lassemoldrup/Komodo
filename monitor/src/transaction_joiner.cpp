@@ -436,6 +436,13 @@ public:
       popCdcHead();
       lifecycle_ = JoinLifecycle::Closed;
       end_fence_processed_ = true;
+      if (end_fence_observed_nanoseconds_.has_value()) {
+        const auto now = monotonic_clock_nanoseconds_();
+        end_fence_drain_nanoseconds_ =
+            now >= *end_fence_observed_nanoseconds_
+                ? now - *end_fence_observed_nanoseconds_
+                : 0U;
+      }
       head_block_reason_ = HeadBlockReason::None;
     });
   }
@@ -488,6 +495,13 @@ public:
         missing_client_head_wait_completed_nanoseconds_, current_wait);
     const auto max_wait =
         std::max(missing_client_head_wait_max_nanoseconds_, current_wait);
+    std::uint64_t end_fence_drain_current = 0U;
+    if (end_fence_observed_nanoseconds_.has_value() && !end_fence_processed_) {
+      const auto now = monotonic_clock_nanoseconds_();
+      end_fence_drain_current = now >= *end_fence_observed_nanoseconds_
+                                    ? now - *end_fence_observed_nanoseconds_
+                                    : 0U;
+    }
     const auto checker_metrics =
         checker_.has_value() ? checker_->metrics() : CheckerAdapterMetrics{};
     return TransactionJoinerMetrics{
@@ -513,11 +527,16 @@ public:
         .cdc_first_matches = cdc_first_matches_,
         .pending_client_records = client_by_correlation_.size(),
         .pending_client_bytes = pending_client_bytes_,
+        .pending_client_high_water_records = pending_client_high_water_records_,
         .pending_client_high_water_bytes = pending_client_high_water_bytes_,
         .pending_cdc_slots = cdc_slots_.size(),
         .pending_cdc_bytes = pending_cdc_bytes_,
+        .pending_cdc_high_water_slots = pending_cdc_high_water_slots_,
         .pending_cdc_high_water_bytes = pending_cdc_high_water_bytes_,
+        .join_buffer_high_water_records = join_buffer_high_water_records_,
         .join_buffer_high_water_bytes = join_buffer_high_water_bytes_,
+        .released_events_per_transaction_high_water =
+            released_events_per_transaction_high_water_,
         .unmatched_client_records = unmatched_client_records_,
         .unmatched_workload_cdc_slots = unmatched_workload_cdc_slots_,
         .missing_client_head_wait_count = missing_client_head_wait_count_,
@@ -526,8 +545,19 @@ public:
         .missing_client_head_wait_max_nanoseconds = max_wait,
         .retained_identity_records = retained_identity_records_,
         .retained_identity_bytes = retained_identity_bytes_,
+        .retained_identity_high_water_records =
+            retained_identity_high_water_records_,
+        .retained_identity_high_water_bytes =
+            retained_identity_high_water_bytes_,
         .bootstrap_state_rows = bootstrap_state_.size(),
         .bootstrap_state_bytes = bootstrap_state_bytes_,
+        .bootstrap_state_high_water_rows = bootstrap_state_high_water_rows_,
+        .bootstrap_state_high_water_bytes = bootstrap_state_high_water_bytes_,
+        .drain_invocations = drain_invocations_,
+        .drain_total_nanoseconds = drain_total_nanoseconds_,
+        .drain_max_nanoseconds = drain_max_nanoseconds_,
+        .end_fence_drain_current_nanoseconds = end_fence_drain_current,
+        .end_fence_drain_nanoseconds = end_fence_drain_nanoseconds_,
         .end_fence_observed = end_fence_observed_,
         .end_fence_processed = end_fence_processed_,
         .bootstrap_state_validated = bootstrap_state_validated_,
@@ -683,6 +713,14 @@ private:
     checkedAdd(combined, pending_cdc_bytes_);
     join_buffer_high_water_bytes_ =
         std::max(join_buffer_high_water_bytes_, combined);
+    auto records = client_by_correlation_.size();
+    if (cdc_slots_.size() > std::numeric_limits<std::size_t>::max() - records) {
+      fail(MonitorErrorCode::ResourceExhausted,
+           "join-buffer record accounting overflowed");
+    }
+    records += cdc_slots_.size();
+    join_buffer_high_water_records_ =
+        std::max(join_buffer_high_water_records_, records);
   }
 
   void beginMissingClientHeadWait(const RunScopedCorrelationId &correlation) {
@@ -736,6 +774,11 @@ private:
 
   void requireJoinedEventCapacity(const std::size_t reads,
                                   const std::size_t writes) const {
+    if (reads > config_.limits.max_events_per_transaction ||
+        writes > config_.limits.max_events_per_transaction - reads) {
+      fail(MonitorErrorCode::ResourceExhausted,
+           "joined transaction event limit exceeded");
+    }
     const auto read_count = static_cast<std::uint64_t>(reads);
     const auto write_count = static_cast<std::uint64_t>(writes);
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
@@ -750,6 +793,10 @@ private:
   }
 
   void requireBootstrapEventCapacity(const std::size_t writes) const {
+    if (writes > config_.limits.max_events_per_transaction) {
+      fail(MonitorErrorCode::ResourceExhausted,
+           "bootstrap transaction event limit exceeded");
+    }
     const auto write_count = static_cast<std::uint64_t>(writes);
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
     if (write_count > maximum - released_bootstrap_write_events_ ||
@@ -766,12 +813,16 @@ private:
     joined_write_events_ += write_count;
     joined_ordered_events_ += read_count + write_count;
     released_ordered_events_ += read_count + write_count;
+    released_events_per_transaction_high_water_ =
+        std::max(released_events_per_transaction_high_water_, reads + writes);
   }
 
   void recordBootstrapEvents(const std::size_t writes) {
     const auto write_count = static_cast<std::uint64_t>(writes);
     released_bootstrap_write_events_ += write_count;
     released_ordered_events_ += write_count;
+    released_events_per_transaction_high_water_ =
+        std::max(released_events_per_transaction_high_water_, writes);
   }
 
   void reserveRetainedIdentities(const std::size_t records,
@@ -787,6 +838,10 @@ private:
     }
     retained_identity_records_ += records;
     retained_identity_bytes_ += bytes;
+    retained_identity_high_water_records_ = std::max(
+        retained_identity_high_water_records_, retained_identity_records_);
+    retained_identity_high_water_bytes_ =
+        std::max(retained_identity_high_water_bytes_, retained_identity_bytes_);
   }
 
   [[nodiscard]] std::size_t identityCharge(const std::string &value) const {
@@ -901,6 +956,8 @@ private:
     client_session_progress_[session_id] = SessionProgress{
         .session_seq = session_seq, .attempt_surplus = attempt_surplus};
     pending_client_bytes_ += charge;
+    pending_client_high_water_records_ = std::max(
+        pending_client_high_water_records_, client_by_correlation_.size());
     pending_client_high_water_bytes_ =
         std::max(pending_client_high_water_bytes_, pending_client_bytes_);
     updateJoinBufferHighWater();
@@ -1071,8 +1128,11 @@ private:
     }
     if (is_end_fence) {
       end_fence_observed_ = true;
+      end_fence_observed_nanoseconds_ = monotonic_clock_nanoseconds_();
     }
     pending_cdc_bytes_ += charge;
+    pending_cdc_high_water_slots_ =
+        std::max(pending_cdc_high_water_slots_, cdc_slots_.size());
     pending_cdc_high_water_bytes_ =
         std::max(pending_cdc_high_water_bytes_, pending_cdc_bytes_);
     updateJoinBufferHighWater();
@@ -1110,6 +1170,13 @@ private:
     }
   }
 
+  void updateBootstrapHighWater() {
+    bootstrap_state_high_water_rows_ =
+        std::max(bootstrap_state_high_water_rows_, bootstrap_state_.size());
+    bootstrap_state_high_water_bytes_ =
+        std::max(bootstrap_state_high_water_bytes_, bootstrap_state_bytes_);
+  }
+
   void applyBootstrapWrites(const std::vector<NormalizedWrite> &writes) {
     for (const auto &write : writes) {
       const auto found = bootstrap_state_.find(write.key);
@@ -1134,6 +1201,7 @@ private:
         checkedAdd(bootstrap_state_bytes_, actual);
         requireBootstrapCapacity(bootstrap_state_.size(),
                                  bootstrap_state_bytes_);
+        updateBootstrapHighWater();
         continue;
       }
 
@@ -1146,6 +1214,7 @@ private:
       checkedAdd(bootstrap_state_bytes_,
                  bootstrapEntryCharge(found->first, found->second));
       requireBootstrapCapacity(bootstrap_state_.size(), bootstrap_state_bytes_);
+      updateBootstrapHighWater();
     }
   }
 
@@ -1249,7 +1318,29 @@ private:
     cdc_slots_.pop_front();
   }
 
+  void recordDrainDuration(const std::uint64_t started) {
+    const auto finished = monotonic_clock_nanoseconds_();
+    const auto duration = finished >= started ? finished - started : 0U;
+    drain_total_nanoseconds_ =
+        saturatingAdd(drain_total_nanoseconds_, duration);
+    drain_max_nanoseconds_ = std::max(drain_max_nanoseconds_, duration);
+  }
+
   void drainReadyPrefix() {
+    const auto started = monotonic_clock_nanoseconds_();
+    if (drain_invocations_ != std::numeric_limits<std::uint64_t>::max()) {
+      ++drain_invocations_;
+    }
+    try {
+      drainReadyPrefixImpl();
+    } catch (...) {
+      recordDrainDuration(started);
+      throw;
+    }
+    recordDrainDuration(started);
+  }
+
+  void drainReadyPrefixImpl() {
     head_block_reason_ = HeadBlockReason::None;
     while (!cdc_slots_.empty()) {
       auto &head = cdc_slots_.front().transaction;
@@ -1402,18 +1493,31 @@ private:
   std::uint64_t client_first_matches_ = 0;
   std::uint64_t cdc_first_matches_ = 0;
   std::size_t pending_client_bytes_ = 0;
+  std::size_t pending_client_high_water_records_ = 0;
   std::size_t pending_client_high_water_bytes_ = 0;
   std::size_t pending_cdc_bytes_ = 0;
+  std::size_t pending_cdc_high_water_slots_ = 0;
   std::size_t pending_cdc_high_water_bytes_ = 0;
+  std::size_t join_buffer_high_water_records_ = 0;
   std::size_t join_buffer_high_water_bytes_ = 0;
+  std::size_t released_events_per_transaction_high_water_ = 0;
   std::size_t unmatched_client_records_ = 0;
   std::size_t unmatched_workload_cdc_slots_ = 0;
   std::size_t retained_identity_records_ = 0;
   std::size_t retained_identity_bytes_ = 0;
+  std::size_t retained_identity_high_water_records_ = 0;
+  std::size_t retained_identity_high_water_bytes_ = 0;
   std::size_t bootstrap_state_bytes_ = 0;
+  std::size_t bootstrap_state_high_water_rows_ = 0;
+  std::size_t bootstrap_state_high_water_bytes_ = 0;
   std::uint64_t missing_client_head_wait_count_ = 0;
   std::uint64_t missing_client_head_wait_completed_nanoseconds_ = 0;
   std::uint64_t missing_client_head_wait_max_nanoseconds_ = 0;
+  std::uint64_t drain_invocations_ = 0;
+  std::uint64_t drain_total_nanoseconds_ = 0;
+  std::uint64_t drain_max_nanoseconds_ = 0;
+  std::optional<std::uint64_t> end_fence_observed_nanoseconds_;
+  std::uint64_t end_fence_drain_nanoseconds_ = 0;
   bool end_fence_observed_ = false;
   bool end_fence_processed_ = false;
   bool bootstrap_state_validated_ = false;

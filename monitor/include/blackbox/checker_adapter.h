@@ -70,6 +70,9 @@ struct CheckerAdapterMetrics {
   std::uint64_t consume_max_nanoseconds = 0;
   std::size_t mapped_identity_records = 0;
   std::size_t mapped_identity_bytes = 0;
+  std::size_t mapped_identity_high_water_records = 0;
+  std::size_t mapped_identity_high_water_bytes = 0;
+  std::size_t events_per_transaction_high_water = 0;
   co_checker::online::SnapshotSOWWMetrics engine;
 };
 

@@ -49,9 +49,15 @@ struct DebeziumAssemblerMetrics {
   std::uint64_t completed_workload_transactions = 0;
   std::uint64_t raw_row_events = 0;
   std::uint64_t normalized_write_events = 0;
+  std::size_t active_transactions = 0;
+  std::size_t active_transactions_high_water = 0;
+  std::size_t observed_events_per_transaction_high_water = 0;
   std::size_t active_assembly_bytes = 0;
   std::size_t active_assembly_high_water_bytes = 0;
+  std::size_t retained_identity_records = 0;
   std::size_t retained_identity_bytes = 0;
+  std::size_t retained_identity_high_water_records = 0;
+  std::size_t retained_identity_high_water_bytes = 0;
 };
 
 class DebeziumTxnAssembler final {

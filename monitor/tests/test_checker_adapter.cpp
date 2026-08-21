@@ -201,6 +201,13 @@ void testConsumeTimingAndEventCounters() {
   BLACKBOX_CHECK(metrics.write_events == 2U);
   BLACKBOX_CHECK(metrics.consume_total_nanoseconds == 43U);
   BLACKBOX_CHECK(metrics.consume_max_nanoseconds == 25U);
+  BLACKBOX_CHECK(metrics.events_per_transaction_high_water == 3U);
+  BLACKBOX_CHECK(metrics.mapped_identity_high_water_records ==
+                 metrics.mapped_identity_records);
+  BLACKBOX_CHECK(metrics.mapped_identity_high_water_bytes ==
+                 metrics.mapped_identity_bytes);
+  BLACKBOX_CHECK(metrics.engine.peak_retained_state_bytes <=
+                 metrics.engine.retained_state_capacity_bytes);
 }
 
 void testAnchorLowerBoundAndViolationAttribution() {
