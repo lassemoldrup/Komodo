@@ -38,19 +38,6 @@ EXPECTED_WRITE_TABLES = {
     "benchbase.order_line",
 }
 EXPECTED_TABLES = common.EXPECTED_TABLES
-ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
-BENCHBASE_SECTIONS = (
-    "Completed Transactions:",
-    "Aborted Transactions:",
-    "Rejected Transactions (Server Retry):",
-    "Rejected Transactions (Retry Different):",
-    "Unexpected SQL Errors:",
-    "Unknown Status Transactions:",
-)
-BENCHBASE_TRANSACTION = re.compile(
-    r"^com\.oltpbenchmark\.benchmarks\.tpcc\.procedures\.([A-Za-z]+)/[0-9]+"
-    r"\s+\[\s*([0-9]+)\]"
-)
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -327,78 +314,11 @@ def decode_clients(
 def benchbase_outcomes(
     path: Path, successful: int, terminal_aborts: int, retries: int
 ) -> dict[str, int]:
-    try:
-        text = path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeError) as error:
-        raise AcceptanceError(f"cannot read BenchBase log: {error}") from error
-    lines = [ANSI_ESCAPE.sub("", line).strip() for line in text.splitlines()]
-    positions: dict[str, int] = {}
-    for heading in BENCHBASE_SECTIONS:
-        matches = [index for index, line in enumerate(lines) if line == heading]
-        require(len(matches) == 1, f"BenchBase log must contain one {heading} section")
-        positions[heading] = matches[0]
-    require(
-        [positions[heading] for heading in BENCHBASE_SECTIONS]
-        == sorted(positions.values()),
-        "BenchBase outcome sections are out of order",
+    result = common.benchbase_outcomes(
+        path, "NewOrder", successful, terminal_aborts, retries
     )
-
-    parsed: dict[str, dict[str, int]] = {}
-    empty: dict[str, bool] = {}
-    for section_index, heading in enumerate(BENCHBASE_SECTIONS):
-        start = positions[heading] + 1
-        end = (
-            positions[BENCHBASE_SECTIONS[section_index + 1]]
-            if section_index + 1 < len(BENCHBASE_SECTIONS)
-            else len(lines)
-        )
-        rows: dict[str, int] = {}
-        saw_empty = False
-        for line in lines[start:end]:
-            if line == "<EMPTY>":
-                saw_empty = True
-                continue
-            match = BENCHBASE_TRANSACTION.match(line)
-            if match is not None:
-                transaction_type, count = match.groups()
-                require(transaction_type not in rows, f"BenchBase {heading} repeats transaction type")
-                rows[transaction_type] = int(count)
-        require(not (saw_empty and rows), f"BenchBase {heading} mixes EMPTY and rows")
-        parsed[heading] = rows
-        empty[heading] = saw_empty
-
-    completed = parsed["Completed Transactions:"]
-    require(
-        completed.get("NewOrder") == successful
-        and all(count == 0 for name, count in completed.items() if name != "NewOrder"),
-        "BenchBase completed counts differ from published NewOrder clients",
-    )
-    expected_aborts = {} if terminal_aborts == 0 else {"NewOrder": terminal_aborts}
-    require(
-        parsed["Aborted Transactions:"] == expected_aborts
-        and empty["Aborted Transactions:"] == (terminal_aborts == 0),
-        "BenchBase aborted count differs from SessionDone terminal aborts",
-    )
-    expected_retries = {} if retries == 0 else {"NewOrder": retries}
-    require(
-        parsed["Rejected Transactions (Server Retry):"] == expected_retries
-        and empty["Rejected Transactions (Server Retry):"] == (retries == 0),
-        "BenchBase server-retry count differs from SessionDone retries",
-    )
-    for heading in (
-        "Rejected Transactions (Retry Different):",
-        "Unexpected SQL Errors:",
-        "Unknown Status Transactions:",
-    ):
-        require(empty[heading] and not parsed[heading], f"BenchBase {heading} is not empty")
-    return {
-        "completed": successful,
-        "expected_user_aborts": terminal_aborts,
-        "server_retries": retries,
-        "retry_different": 0,
-        "unexpected_sql_errors": 0,
-        "unknown_status": 0,
-    }
+    result["expected_user_aborts"] = result.pop("terminal_aborts")
+    return result
 
 
 def decimal(value: Any, label: str) -> Decimal:

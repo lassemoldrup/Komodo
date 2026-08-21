@@ -54,6 +54,12 @@ constexpr std::string_view session_id = "ycsb/worker/1";
                "mariadb_tpcc_client_txns.json"));
 }
 
+[[nodiscard]] Json loadTpccTransactionFixture() {
+  return Json::parse(
+      readFile(std::filesystem::path(BLACKBOX_PROTOCOL_FIXTURE_DIR) /
+               "mariadb_tpcc_transactions.json"));
+}
+
 [[nodiscard]] ClientTxnParser tpccParser(const Json &fixture) {
   std::vector<std::string> sessions;
   for (const auto &session :
@@ -899,6 +905,194 @@ void testNewOrderFixtureProjectionAndDiscardedAttempt() {
               MonitorErrorCode::CanonicalEncodingFailed);
 }
 
+void testPaymentFixtureProjectionAndContract() {
+  const auto fixture = loadTpccClientFixture();
+  const auto tpcc_parser = tpccParser(fixture);
+  const auto &adapter = blackbox::BenchmarkAdapterRegistry::require("tpcc");
+  const auto &transactions = fixture.at("semantic_transactions");
+  const auto found = std::find_if(
+      transactions.begin(), transactions.end(), [](const Json &entry) {
+        return entry.at("client_txn").at("txn_type") == "Payment";
+      });
+  BLACKBOX_REQUIRE(found != transactions.end());
+
+  const auto parsed = tpcc_parser.parse(found->at("client_txn").dump());
+  BLACKBOX_CHECK(parsed.txn_type == "Payment");
+  BLACKBOX_CHECK(parsed.session_seq == 1U);
+  BLACKBOX_CHECK(parsed.correlation_id.txn_id == 1U);
+  BLACKBOX_CHECK(
+      parsed.read_digest ==
+      "2ea67408a9b8cffa4002e0d7c25f6281bca4cf6f58e88affaf61a0667e78d225");
+  BLACKBOX_REQUIRE(parsed.reads.size() == 3U);
+  const std::array<ClientReadSource, 3> expected_sources = {
+      ClientReadSource::Local, ClientReadSource::Local,
+      ClientReadSource::Snapshot};
+  const std::array<std::string_view, 3> expected_tables = {
+      "benchbase.warehouse", "benchbase.district", "benchbase.customer"};
+  const std::array<std::string_view, 3> expected_statements = {
+      "payGetWhseFullSQL", "payGetDistFullSQL", "payGetCustFullSQL"};
+  const auto &provenance = found->at("read_provenance");
+  BLACKBOX_REQUIRE(provenance.size() == parsed.reads.size());
+  for (std::size_t index = 0; index < parsed.reads.size(); ++index) {
+    BLACKBOX_CHECK(parsed.reads[index].event_seq == index);
+    BLACKBOX_CHECK(parsed.reads[index].state == ClientValueState::Present);
+    BLACKBOX_CHECK(parsed.reads[index].source == expected_sources[index]);
+    BLACKBOX_REQUIRE(parsed.reads[index].value.has_value());
+    BLACKBOX_CHECK(provenance[index].at("table") == expected_tables[index]);
+    BLACKBOX_CHECK(provenance[index].at("trace_statement_id") ==
+                   expected_statements[index]);
+  }
+  BLACKBOX_CHECK(parsed.reads[0].key ==
+                 blackbox::CanonicalTpccCodec::encodeKey(
+                     "benchbase", "warehouse", Json{{"w_id", 1}}));
+  BLACKBOX_CHECK(parsed.reads[1].key == blackbox::CanonicalTpccCodec::encodeKey(
+                                            "benchbase", "district",
+                                            Json{{"d_w_id", 1}, {"d_id", 1}}));
+  BLACKBOX_CHECK(parsed.reads[2].key ==
+                 blackbox::CanonicalTpccCodec::encodeKey(
+                     "benchbase", "customer",
+                     Json{{"c_w_id", 1}, {"c_d_id", 1}, {"c_id", 1}}));
+
+  const auto payment_contract = [&](const std::string_view statement_id) {
+    const auto contracts = adapter.resultSets();
+    const auto contract = std::find_if(
+        contracts.begin(), contracts.end(), [&](const auto &entry) {
+          return entry.transaction_type == "Payment" &&
+                 entry.statement_id == statement_id;
+        });
+    return contract == contracts.end() ? nullptr : &*contract;
+  };
+  const auto check_contract =
+      [&](const std::string_view statement_id, const std::string_view table,
+          const blackbox::ResultSetClassification source,
+          const blackbox::ResultSetShape shape,
+          const std::string_view trace_statement_id) {
+        const auto contract = payment_contract(statement_id);
+        BLACKBOX_REQUIRE(contract != nullptr);
+        BLACKBOX_REQUIRE(contract->table.has_value());
+        BLACKBOX_CHECK(*contract->table == table);
+        BLACKBOX_CHECK(contract->classification == source);
+        BLACKBOX_CHECK(contract->result_shape == shape);
+        BLACKBOX_REQUIRE(contract->trace_statement_id.has_value());
+        BLACKBOX_CHECK(*contract->trace_statement_id == trace_statement_id);
+        BLACKBOX_CHECK(contract->trace_projection == "full_row");
+      };
+  check_contract("payGetWhseSQL", "benchbase.warehouse",
+                 blackbox::ResultSetClassification::Local,
+                 blackbox::ResultSetShape::ExactKeyRow, "payGetWhseFullSQL");
+  check_contract("payGetDistSQL", "benchbase.district",
+                 blackbox::ResultSetClassification::Local,
+                 blackbox::ResultSetShape::ExactKeyRow, "payGetDistFullSQL");
+  check_contract("payGetCustSQL", "benchbase.customer",
+                 blackbox::ResultSetClassification::Snapshot,
+                 blackbox::ResultSetShape::ExactKeyRow, "payGetCustFullSQL");
+  check_contract("customerByNameSQL", "benchbase.customer",
+                 blackbox::ResultSetClassification::Snapshot,
+                 blackbox::ResultSetShape::ReturnedRows,
+                 "customerByNameFullSQL");
+  check_contract("payGetCustCdataSQL", "benchbase.customer",
+                 blackbox::ResultSetClassification::Snapshot,
+                 blackbox::ResultSetShape::ExactKeyRow,
+                 "payGetCustCdataFullSQL");
+
+  const auto transaction_fixture = loadTpccTransactionFixture();
+  Json customer_row;
+  for (const auto &transaction : transaction_fixture.at("transactions")) {
+    if (transaction.at("name") != "payment_shape") {
+      continue;
+    }
+    for (const auto &entry : transaction.at("raw_entries")) {
+      const auto envelope = Json::parse(entry.at(1).at(1).get<std::string>());
+      if (envelope.contains("op") &&
+          envelope.at("source").at("table") == "customer") {
+        customer_row = envelope.at("before");
+      }
+    }
+  }
+  BLACKBOX_REQUIRE(customer_row.is_object());
+  customer_row["c_w_id"] = 2;
+  customer_row["c_d_id"] = 3;
+  customer_row["c_id"] = 4;
+  customer_row["c_credit"] = "B";
+  const auto remote_name_row = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "customer", customer_row);
+  customer_row["c_id"] = 5;
+  const auto selected_remote_row = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "customer", customer_row);
+  customer_row["c_id"] = 6;
+  const auto final_remote_name_row = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "customer", customer_row);
+  std::vector<ClientRead> name_bad_credit_reads = {
+      parsed.reads[0],
+      parsed.reads[1],
+      ClientRead{.event_seq = 2U,
+                 .key = remote_name_row.key,
+                 .state = ClientValueState::Present,
+                 .value = remote_name_row.value,
+                 .source = ClientReadSource::Snapshot},
+      ClientRead{.event_seq = 3U,
+                 .key = selected_remote_row.key,
+                 .state = ClientValueState::Present,
+                 .value = selected_remote_row.value,
+                 .source = ClientReadSource::Snapshot},
+      ClientRead{.event_seq = 4U,
+                 .key = final_remote_name_row.key,
+                 .state = ClientValueState::Present,
+                 .value = final_remote_name_row.value,
+                 .source = ClientReadSource::Snapshot},
+      ClientRead{.event_seq = 5U,
+                 .key = selected_remote_row.key,
+                 .state = ClientValueState::Present,
+                 .value = selected_remote_row.value,
+                 .source = ClientReadSource::Snapshot},
+  };
+  auto name_bad_credit = found->at("client_txn");
+  name_bad_credit["reads"] = Json::array();
+  for (const auto &read : name_bad_credit_reads) {
+    name_bad_credit["reads"].push_back(readJson(read));
+  }
+  name_bad_credit["read_count"] = name_bad_credit_reads.size();
+  name_bad_credit["read_digest"] =
+      blackbox::computeClientReadDigest(name_bad_credit_reads);
+  const auto parsed_name_bad_credit = tpcc_parser.parse(name_bad_credit.dump());
+  BLACKBOX_REQUIRE(parsed_name_bad_credit.reads.size() == 6U);
+  BLACKBOX_CHECK(parsed_name_bad_credit.reads[0].source ==
+                 ClientReadSource::Local);
+  BLACKBOX_CHECK(parsed_name_bad_credit.reads[1].source ==
+                 ClientReadSource::Local);
+  for (std::size_t index = 2U; index < 6U; ++index) {
+    BLACKBOX_CHECK(parsed_name_bad_credit.reads[index].source ==
+                   ClientReadSource::Snapshot);
+  }
+  BLACKBOX_CHECK(parsed_name_bad_credit.reads[2].key == remote_name_row.key);
+  BLACKBOX_CHECK(parsed_name_bad_credit.reads[3].key ==
+                 selected_remote_row.key);
+  BLACKBOX_CHECK(parsed_name_bad_credit.reads[4].key ==
+                 final_remote_name_row.key);
+  BLACKBOX_CHECK(parsed_name_bad_credit.reads[5].key ==
+                 selected_remote_row.key);
+
+  auto unsupported_source = found->at("client_txn");
+  unsupported_source["reads"][0]["source"] = "locking";
+  expectError(tpcc_parser, unsupported_source.dump(),
+              MonitorErrorCode::UnsupportedReadSource);
+
+  auto malformed_source = found->at("client_txn");
+  malformed_source["reads"][2]["source"] = Json::object();
+  expectError(tpcc_parser, malformed_source.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto missing_local_value = found->at("client_txn");
+  missing_local_value["reads"][1].erase("value_bytes_base64");
+  expectError(tpcc_parser, missing_local_value.dump(),
+              MonitorErrorCode::ClientRecordMalformed);
+
+  auto wrong_customer_value = found->at("client_txn");
+  wrong_customer_value["reads"][2]["value_bytes_base64"] = "AA==";
+  expectError(tpcc_parser, wrong_customer_value.dump(),
+              MonitorErrorCode::CanonicalEncodingFailed);
+}
+
 } // namespace
 
 int runClientTxnTests() {
@@ -914,5 +1108,6 @@ int runClientTxnTests() {
   testTpccClientFixtureAndFailures();
   testOrderStatusFixtureProjection();
   testNewOrderFixtureProjectionAndDiscardedAttempt();
+  testPaymentFixtureProjectionAndContract();
   return 0;
 }

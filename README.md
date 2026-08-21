@@ -267,6 +267,11 @@ Run the focused audited TPC-C transaction acceptances against a fresh stack with
   --benchbase-dist /path/to/benchbase-mariadb \
   --monitor-bin /path/to/blackbox_run_monitor \
   --output-dir /path/to/another-new-output-directory
+
+./tests/run_tpcc_payment_acceptance.sh \
+  --benchbase-dist /path/to/benchbase-mariadb \
+  --monitor-bin /path/to/blackbox_run_monitor \
+  --output-dir /path/to/a-third-new-output-directory
 ```
 
 The OrderStatus default uses one warehouse, one terminal, RR, seed 3, and weights
@@ -274,7 +279,8 @@ The OrderStatus default uses one warehouse, one terminal, RR, seed 3, and weight
 customer last-name cardinalities, client/status stream captures, the CDC tail
 strictly after `LOAD_FINISHED_SEEN`, monitor metrics, and an acceptance report.
 Every control has a command-line or corresponding
-`BLACKBOX_TPCC_ORDER_STATUS_*`/`BLACKBOX_TPCC_NEW_ORDER_*` environment form;
+`BLACKBOX_TPCC_ORDER_STATUS_*`, `BLACKBOX_TPCC_NEW_ORDER_*`, or
+`BLACKBOX_TPCC_PAYMENT_*` environment form;
 `--print-config` validates and prints the resolved non-destructive run
 configuration. NewOrder defaults to one warehouse, two terminals, RR, seed 144,
 and weights `100,0,0,0,0`; its report reconciles invalid-item aborts, retries,
@@ -283,6 +289,12 @@ selected with one warehouse, so that path remains fixture-only and the live
 report records `remote_item_live_applicable=false`. The live drivers are
 destructive to the repository Compose stack and tear that stack down unless
 `--keep-stack` is explicitly selected.
+
+Payment uses weights `0,100,0,0,0` and independently validates ID/name and
+good-/bad-credit reads, post-update local rows, four-table CDC writes, and
+generated history identities. A remote customer warehouse is impossible at
+one warehouse, so its report records `remote_customer_live_applicable=false`;
+the deterministic fixture covers that branch.
 
 ## Performance measurement
 

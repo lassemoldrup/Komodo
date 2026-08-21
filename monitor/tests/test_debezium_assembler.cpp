@@ -1095,6 +1095,76 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_CHECK(actual[order_status_index].writes.empty());
   BLACKBOX_CHECK(order_status->at("raw_entries").size() == 3U);
 
+  const auto payment = std::find_if(
+      fixture.at("transactions").begin(), fixture.at("transactions").end(),
+      [](const Json &transaction) {
+        return transaction.at("name") == "payment_shape";
+      });
+  BLACKBOX_REQUIRE(payment != fixture.at("transactions").end());
+  const auto payment_index = static_cast<std::size_t>(
+      std::distance(fixture.at("transactions").begin(), payment));
+  BLACKBOX_REQUIRE(payment_index < actual.size());
+  const auto payment_raw_row_count = [&](const std::string_view table,
+                                         const std::string_view operation) {
+    return static_cast<std::size_t>(
+        std::count_if(payment->at("raw_entries").begin(),
+                      payment->at("raw_entries").end(), [&](const Json &entry) {
+                        const auto envelope = entryEnvelope(entry);
+                        return envelope.contains("op") &&
+                               envelope.at("source").at("table") == table &&
+                               envelope.at("op") == operation;
+                      }));
+  };
+  BLACKBOX_CHECK(payment_raw_row_count("warehouse", "u") == 1U);
+  BLACKBOX_CHECK(payment_raw_row_count("district", "u") == 1U);
+  BLACKBOX_CHECK(payment_raw_row_count("customer", "u") == 1U);
+  BLACKBOX_CHECK(payment_raw_row_count("history", "c") == 1U);
+  BLACKBOX_CHECK(payment_raw_row_count("session_txn", "c") == 1U);
+  BLACKBOX_REQUIRE(actual[payment_index].writes.size() == 4U);
+  for (const auto table : {"benchbase.warehouse", "benchbase.district",
+                           "benchbase.customer", "benchbase.history"}) {
+    BLACKBOX_CHECK(std::count_if(payment->at("expected").at("writes").begin(),
+                                 payment->at("expected").at("writes").end(),
+                                 [&](const Json &write) {
+                                   return write.at("table") == table;
+                                 }) == 1);
+  }
+
+  const auto bootstrap_history =
+      entryEnvelope(tpccRowEntry(fixture, "bootstrap_rows", "history"));
+  const auto payment_history =
+      entryEnvelope(tpccRowEntry(fixture, "payment_shape", "history"));
+  BLACKBOX_CHECK(bootstrap_history.at("after").at("h_id") == 1);
+  BLACKBOX_CHECK(payment_history.at("after").at("h_id") == 2);
+  BLACKBOX_CHECK(payment_history.at("after").at("h_c_w_id") ==
+                 payment_history.at("after").at("h_w_id"));
+  const auto bootstrap_history_row = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "history", bootstrap_history.at("after"));
+  const auto payment_history_row = blackbox::CanonicalTpccCodec::encodeRow(
+      "benchbase", "history", payment_history.at("after"));
+  BLACKBOX_CHECK(bootstrap_history_row.key != payment_history_row.key);
+  const Json expected_history_key{{"h_id", 2}};
+  BLACKBOX_CHECK(entryKey(tpccRowEntry(fixture, "payment_shape", "history")) ==
+                 expected_history_key);
+  const auto history_write = std::find_if(
+      actual[payment_index].writes.begin(), actual[payment_index].writes.end(),
+      [&](const auto &write) { return write.key == payment_history_row.key; });
+  BLACKBOX_REQUIRE(history_write != actual[payment_index].writes.end());
+  BLACKBOX_CHECK(history_write->state == NormalizedValueState::Present);
+  BLACKBOX_REQUIRE(history_write->value.has_value());
+  BLACKBOX_CHECK(*history_write->value == payment_history_row.value);
+
+  const auto *history_contract =
+      blackbox::BenchmarkAdapterRegistry::require("tpcc").table(
+          "benchbase.history");
+  BLACKBOX_REQUIRE(history_contract != nullptr);
+  BLACKBOX_REQUIRE(history_contract->primary_key.size() == 1U);
+  BLACKBOX_CHECK(history_contract->primary_key[0] == "h_id");
+  BLACKBOX_REQUIRE(!history_contract->columns.empty());
+  BLACKBOX_CHECK(history_contract->columns[0].name == "h_id");
+  BLACKBOX_REQUIRE(history_contract->columns[0].generated.has_value());
+  BLACKBOX_CHECK(*history_contract->columns[0].generated == "auto_increment");
+
   const auto new_order = std::find_if(
       fixture.at("transactions").begin(), fixture.at("transactions").end(),
       [](const Json &transaction) {
@@ -1224,6 +1294,63 @@ void checkCapturedTpccTransactionsAndFailures() {
     auto &entry = tpccRowEntry(invalid, "payment_shape", "warehouse");
     auto envelope = entryEnvelope(entry);
     envelope["after"]["w_ytd"] = "not-a-decimal";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CanonicalEncodingFailed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "history");
+    auto key = entryKey(entry);
+    key.erase("h_id");
+    setEntryKey(entry, key);
+    expectError(tpccRawEntries(invalid),
+                CdcErrorCode::PrimaryKeyImageIncomplete,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "history");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"]["h_id"] = nullptr;
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid),
+                CdcErrorCode::PrimaryKeyImageIncomplete,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "history");
+    auto key = entryKey(entry);
+    key["h_id"] = 1;
+    setEntryKey(entry, key);
+    expectError(tpccRawEntries(invalid),
+                CdcErrorCode::PrimaryKeyImageIncomplete,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "history");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"]["h_amount"] = "not-a-decimal";
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CanonicalEncodingFailed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "customer");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"].erase("c_data");
+    setEntryEnvelope(entry, envelope);
+    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
+                tpccAssemblerConfig(invalid), false);
+  }
+  {
+    auto invalid = fixture;
+    auto &entry = tpccRowEntry(invalid, "payment_shape", "customer");
+    auto envelope = entryEnvelope(entry);
+    envelope["after"]["c_ytd_payment"] = "not-a-float";
     setEntryEnvelope(entry, envelope);
     expectError(tpccRawEntries(invalid), CdcErrorCode::CanonicalEncodingFailed,
                 tpccAssemblerConfig(invalid), false);

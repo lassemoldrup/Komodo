@@ -40,6 +40,19 @@ EXPECTED_TABLES = [
     "benchbase.new_order",
     "benchbase.order_line",
 ]
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+BENCHBASE_SECTIONS = (
+    "Completed Transactions:",
+    "Aborted Transactions:",
+    "Rejected Transactions (Server Retry):",
+    "Rejected Transactions (Retry Different):",
+    "Unexpected SQL Errors:",
+    "Unknown Status Transactions:",
+)
+BENCHBASE_TRANSACTION = re.compile(
+    r"^com\.oltpbenchmark\.benchmarks\.tpcc\.procedures\.([A-Za-z]+)/[0-9]+"
+    r"\s+\[\s*([0-9]+)\]"
+)
 
 
 class AcceptanceError(ValueError):
@@ -348,6 +361,85 @@ def validate_audited_status_and_metrics(
     for field, value in reconciliation.items():
         require(measured_reconciliation.get(field) == value, f"metrics reconciliation {field}")
     return final, load_finished["last_cdc_stream_id"]
+
+
+def benchbase_outcomes(
+    path: Path,
+    transaction_type: str,
+    successful: int,
+    terminal_aborts: int,
+    retries: int,
+) -> dict[str, int]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError) as error:
+        raise AcceptanceError(f"cannot read BenchBase log: {error}") from error
+    lines = [ANSI_ESCAPE.sub("", line).strip() for line in text.splitlines()]
+    positions: dict[str, int] = {}
+    for heading in BENCHBASE_SECTIONS:
+        matches = [index for index, line in enumerate(lines) if line == heading]
+        require(len(matches) == 1, f"BenchBase log must contain one {heading} section")
+        positions[heading] = matches[0]
+    require(
+        [positions[heading] for heading in BENCHBASE_SECTIONS]
+        == sorted(positions.values()),
+        "BenchBase outcome sections are out of order",
+    )
+    parsed: dict[str, dict[str, int]] = {}
+    empty: dict[str, bool] = {}
+    for section_index, heading in enumerate(BENCHBASE_SECTIONS):
+        start = positions[heading] + 1
+        end = (
+            positions[BENCHBASE_SECTIONS[section_index + 1]]
+            if section_index + 1 < len(BENCHBASE_SECTIONS)
+            else len(lines)
+        )
+        rows: dict[str, int] = {}
+        saw_empty = False
+        for line in lines[start:end]:
+            if line == "<EMPTY>":
+                saw_empty = True
+                continue
+            match = BENCHBASE_TRANSACTION.match(line)
+            if match is not None:
+                name, count = match.groups()
+                require(name not in rows, f"BenchBase {heading} repeats transaction type")
+                rows[name] = int(count)
+        require(not (saw_empty and rows), f"BenchBase {heading} mixes EMPTY and rows")
+        parsed[heading] = rows
+        empty[heading] = saw_empty
+    completed = parsed["Completed Transactions:"]
+    require(
+        completed.get(transaction_type) == successful
+        and all(count == 0 for name, count in completed.items() if name != transaction_type),
+        f"BenchBase completed counts differ from published {transaction_type} clients",
+    )
+    expected_aborts = {} if terminal_aborts == 0 else {transaction_type: terminal_aborts}
+    require(
+        parsed["Aborted Transactions:"] == expected_aborts
+        and empty["Aborted Transactions:"] == (terminal_aborts == 0),
+        "BenchBase aborted count differs from SessionDone terminal aborts",
+    )
+    expected_retries = {} if retries == 0 else {transaction_type: retries}
+    require(
+        parsed["Rejected Transactions (Server Retry):"] == expected_retries
+        and empty["Rejected Transactions (Server Retry):"] == (retries == 0),
+        "BenchBase server-retry count differs from SessionDone retries",
+    )
+    for heading in (
+        "Rejected Transactions (Retry Different):",
+        "Unexpected SQL Errors:",
+        "Unknown Status Transactions:",
+    ):
+        require(empty[heading] and not parsed[heading], f"BenchBase {heading} is not empty")
+    return {
+        "completed": successful,
+        "terminal_aborts": terminal_aborts,
+        "server_retries": retries,
+        "retry_different": 0,
+        "unexpected_sql_errors": 0,
+        "unknown_status": 0,
+    }
 
 
 def write_report(path: Path, report: dict[str, Any]) -> None:
