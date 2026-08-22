@@ -2,8 +2,14 @@
 
 #include "blackbox/benchmark_adapter.h"
 
+#include <nlohmann/json_fwd.hpp>
+
+#include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace blackbox {
 
@@ -39,6 +45,30 @@ struct BackendDatabaseDefaults {
   bool operator==(const BackendDatabaseDefaults &) const = default;
 };
 
+struct CdcStartupSchemaConfig {
+  std::string backend_source_id;
+  std::string debezium_version;
+  std::vector<std::string> application_tables;
+  std::vector<std::string> control_tables;
+};
+
+struct CdcStartupSchemaObservation {
+  std::optional<StartupTableSchema> application_table_schema;
+  bool complete = false;
+};
+
+// Startup schema evidence is backend-owned because connector DDL envelopes are
+// not part of the opaque transaction/row contract consumed by the assembler.
+class CdcStartupSchemaDecoder {
+public:
+  virtual ~CdcStartupSchemaDecoder() = default;
+
+  [[nodiscard]] virtual CdcStartupSchemaObservation
+  accept(const nlohmann::json &key, const nlohmann::json &envelope) = 0;
+  [[nodiscard]] virtual bool sawRecord() const noexcept = 0;
+  [[nodiscard]] virtual bool complete() const noexcept = 0;
+};
+
 class BackendAdapter {
 public:
   virtual ~BackendAdapter() = default;
@@ -52,6 +82,8 @@ public:
   databaseDefaults() const noexcept = 0;
   [[nodiscard]] virtual ApplicationTableRequirements
   applicationTableRequirements() const noexcept = 0;
+  [[nodiscard]] virtual std::unique_ptr<CdcStartupSchemaDecoder>
+  createCdcStartupSchemaDecoder(CdcStartupSchemaConfig config) const = 0;
 };
 
 class BackendAdapterRegistry final {

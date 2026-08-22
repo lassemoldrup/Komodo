@@ -57,6 +57,18 @@ MariaDB uses `INSERT ... ON DUPLICATE KEY UPDATE`; YugabyteDB uses
 `INSERT ... ON CONFLICT DO UPDATE`; Oracle uses `MERGE`. Connector/server
 transaction identifiers are ignored for correlation.
 
+The CDC assembler also treats Debezium `transaction.id` as an opaque structural
+identity used only to match `BEGIN`, rows, and `END`. It does not interpret or
+cross-check connector-specific source transaction fields such as MariaDB GTID,
+nor does it require database, binlog position, server ID, or connector-specific
+source members in workload rows. The pinned Debezium version, configured source
+name, live/non-snapshot flag, and a table identity resolvable to the unique
+configured table roster remain mandatory. `END.data_collection` namespace
+qualifiers are opaque; the unique terminal table component is reconciled with
+the row table and configured roster. Backend-specific startup DDL/schema
+attestation remains behind the backend adapter and is completed before any
+transactional evidence is accepted.
+
 Rationale: the same client/monitor contract works on every backend, every
 successful transaction is observable in CDC order, and the marker before-image
 provides an independent per-session loss check.

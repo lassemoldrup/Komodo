@@ -74,7 +74,7 @@ FINAL
 | `CDC_RECORD_MALFORMED` | A Debezium envelope cannot be decoded or validated. |
 | `CDC_BEGIN_MISSING` | A row/end appears without a legal transaction begin. |
 | `CDC_END_MISSING` | A transaction never receives its required end record. |
-| `CDC_TRANSACTION_ID_MISMATCH` | Records grouped as one transaction disagree on source identity. |
+| `CDC_TRANSACTION_ID_MISMATCH` | Debezium metadata key/envelope or row `transaction.id` values disagree for one opaque structural transaction. |
 | `CDC_EVENT_ORDINAL_INVALID` | Event ordinals repeat, regress, or contain a gap. |
 | `CDC_EVENT_COUNT_MISMATCH` | Observed rows disagree with `END.event_count` or table counts. |
 | `CDC_DUPLICATE_CONFLICT` | A stable CDC identity is replayed with different content. |

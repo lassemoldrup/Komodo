@@ -217,8 +217,8 @@ public:
              "one CDC record exceeds the configured assembly byte limit");
       }
       validateStreamOrder(record);
-      const auto key = detail::parseStrictJson(record.key_json);
-      const auto envelope = detail::parseStrictJson(record.envelope_json);
+      auto key = detail::parseStrictJson(record.key_json);
+      auto envelope = detail::parseStrictJson(record.envelope_json);
       if (!envelope.is_object()) {
         fail(CdcErrorCode::CdcRecordMalformed,
              "Debezium envelope is not a JSON object");
@@ -228,7 +228,7 @@ public:
       std::optional<CdcTransaction> completed;
       if (has_status == has_operation) {
         if (!has_status && envelope.contains("ddl")) {
-          acceptStartupSchemaSnapshot(key, envelope);
+          acceptStartupSchemaRecord(key, envelope);
         } else {
           fail(CdcErrorCode::CdcRecordMalformed,
                "Debezium record must be exactly one of transaction metadata "
@@ -237,7 +237,7 @@ public:
       } else if (has_status) {
         completed = acceptTransactionMetadata(record, key, envelope);
       } else {
-        acceptRow(record, key, envelope);
+        acceptRow(record, std::move(key), std::move(envelope));
       }
       recordAcceptedRaw(record);
       recordAcceptProcessing(accept_started, completed);
@@ -282,7 +282,7 @@ public:
       rememberFailure(error);
       throw error;
     }
-    if (!saw_startup_schema_snapshot_) {
+    if (!startup_schema_decoder_->sawRecord()) {
       const CdcAssemblerError error(
           CdcErrorCode::CdcRecordMalformed,
           "end of input reached without the required startup schema snapshot",
@@ -290,7 +290,7 @@ public:
       rememberFailure(error);
       throw error;
     }
-    if (!startup_schema_snapshot_finished_) {
+    if (!startup_schema_decoder_->complete()) {
       const CdcAssemblerError error(
           CdcErrorCode::DdlObserved,
           "end of input reached before the startup schema snapshot's last "
@@ -372,15 +372,6 @@ private:
     Bootstrap,
     Workload,
     Closed,
-  };
-
-  enum class StartupSchemaStage {
-    ServerSettings,
-    DropTables,
-    CreateDatabase,
-    UseDatabase,
-    CreateTables,
-    Complete,
   };
 
   struct RowEvent {
@@ -503,12 +494,23 @@ private:
     }
 
     std::unordered_set<std::string> all_tables;
+    const auto register_table = [this,
+                                 &all_tables](const QualifiedTable &table) {
+      if (!all_tables.insert(table.full_name).second ||
+          !tables_by_leaf_.emplace(table.table, table).second) {
+        throw std::invalid_argument(
+            "assembler table roster is duplicated or has an ambiguous leaf "
+            "name: " +
+            table.full_name);
+      }
+    };
     for (const auto &name : config_.application_tables) {
       const auto parsed = parseQualifiedTable(name);
-      if (!parsed.has_value() || !all_tables.insert(name).second) {
+      if (!parsed.has_value()) {
         throw std::invalid_argument(
             "assembler application table is invalid or duplicated: " + name);
       }
+      register_table(*parsed);
       application_tables_.emplace(name, *parsed);
     }
     config_.benchmark_adapter->validateApplicationTableRoster(
@@ -524,12 +526,21 @@ private:
     if (!marker.has_value() || !fence.has_value()) {
       throw std::invalid_argument("assembler control table name is invalid");
     }
-    if (!all_tables.insert(marker->full_name).second ||
-        !all_tables.insert(fence->full_name).second) {
-      throw std::invalid_argument("assembler table roles overlap");
-    }
+    register_table(*marker);
+    register_table(*fence);
     marker_table_ = *marker;
     fence_table_ = *fence;
+    startup_schema_decoder_ =
+        config_.backend_adapter->createCdcStartupSchemaDecoder(
+            CdcStartupSchemaConfig{
+                .backend_source_id = config_.backend_source_id,
+                .debezium_version = config_.debezium_version,
+                .application_tables = config_.application_tables,
+                .control_tables = {marker->full_name, fence->full_name},
+            });
+    if (startup_schema_decoder_ == nullptr) {
+      throw std::invalid_argument("backend startup schema decoder is missing");
+    }
   }
 
   void validateStreamOrder(const CdcStreamRecord &record) {
@@ -627,343 +638,10 @@ private:
     return result;
   }
 
-  void validateNullableString(const Json &value,
-                              const std::string_view label) const {
-    if (!value.is_null() && !value.is_string()) {
-      fail(CdcErrorCode::DdlObserved,
-           std::string(label) + " is neither null nor a string");
-    }
-  }
-
-  void validateSnapshotSchemaColumn(const Json &column) const {
-    constexpr auto code = CdcErrorCode::DdlObserved;
-    requireExactKeys(column,
-                     {"name", "jdbcType", "nativeType", "typeName",
-                      "typeExpression", "charsetName", "length", "scale",
-                      "position", "optional", "autoIncremented", "generated",
-                      "comment", "defaultValueExpression", "enumValues"},
-                     "startup schema snapshot column", code);
-    if (stringValue(member(column, "name", "startup schema column", code),
-                    "startup schema column.name", code)
-            .empty() ||
-        !member(column, "jdbcType", "startup schema column", code)
-             .is_number_integer()) {
-      fail(code, "startup schema snapshot column identity is malformed");
-    }
-    validateNullableString(
-        member(column, "nativeType", "startup schema column", code),
-        "startup schema column.nativeType");
-    (void)stringValue(member(column, "typeName", "startup schema column", code),
-                      "startup schema column.typeName", code);
-    (void)stringValue(
-        member(column, "typeExpression", "startup schema column", code),
-        "startup schema column.typeExpression", code);
-    validateNullableString(
-        member(column, "charsetName", "startup schema column", code),
-        "startup schema column.charsetName");
-    for (const auto field : {"length", "scale"}) {
-      const auto &value = member(column, field, "startup schema column", code);
-      if (!value.is_null() && !value.is_number_integer()) {
-        fail(code, "startup schema column numeric metadata is malformed");
-      }
-    }
-    if (uintValue(member(column, "position", "startup schema column", code),
-                  "startup schema column.position",
-                  std::numeric_limits<std::uint32_t>::max(), code) == 0U) {
-      fail(code, "startup schema column.position must be positive");
-    }
-    for (const auto field : {"optional", "autoIncremented", "generated"}) {
-      if (!member(column, field, "startup schema column", code).is_boolean()) {
-        fail(code, "startup schema column boolean metadata is malformed");
-      }
-    }
-    validateNullableString(
-        member(column, "comment", "startup schema column", code),
-        "startup schema column.comment");
-    validateNullableString(
-        member(column, "defaultValueExpression", "startup schema column", code),
-        "startup schema column.defaultValueExpression");
-    const auto &enum_values =
-        member(column, "enumValues", "startup schema column", code);
-    if (!enum_values.is_null()) {
-      if (!enum_values.is_array()) {
-        fail(code, "startup schema column.enumValues is malformed");
-      }
-      for (const auto &value : enum_values) {
-        (void)stringValue(value, "startup schema column enum value", code);
-      }
-    }
-  }
-
-  [[nodiscard]] std::optional<std::string>
-  startupNullableString(const Json &value) const {
-    if (value.is_null()) {
-      return std::nullopt;
-    }
-    return value.get<std::string>();
-  }
-
-  [[nodiscard]] std::optional<std::uint64_t>
-  startupNullableUint(const Json &value, const std::string_view label) const {
-    if (value.is_null()) {
-      return std::nullopt;
-    }
-    return uintValue(value, label, std::numeric_limits<std::uint64_t>::max(),
-                     CdcErrorCode::DdlObserved);
-  }
-
-  [[nodiscard]] StartupSchemaColumn
-  decodeStartupSchemaColumn(const Json &column) const {
-    constexpr auto code = CdcErrorCode::DdlObserved;
-    return StartupSchemaColumn{
-        .name =
-            stringValue(member(column, "name", "startup schema column", code),
-                        "startup schema column.name", code),
-        .type_name = stringValue(
-            member(column, "typeName", "startup schema column", code),
-            "startup schema column.typeName", code),
-        .type_expression = stringValue(
-            member(column, "typeExpression", "startup schema column", code),
-            "startup schema column.typeExpression", code),
-        .length = startupNullableUint(
-            member(column, "length", "startup schema column", code),
-            "startup schema column.length"),
-        .scale = startupNullableUint(
-            member(column, "scale", "startup schema column", code),
-            "startup schema column.scale"),
-        .charset_name = startupNullableString(
-            member(column, "charsetName", "startup schema column", code)),
-        .position =
-            uintValue(member(column, "position", "startup schema column", code),
-                      "startup schema column.position",
-                      std::numeric_limits<std::uint32_t>::max(), code),
-        .nullable = member(column, "optional", "startup schema column", code)
-                        .get<bool>(),
-        .auto_incremented =
-            member(column, "autoIncremented", "startup schema column", code)
-                .get<bool>(),
-        .generated = member(column, "generated", "startup schema column", code)
-                         .get<bool>(),
-    };
-  }
-
-  [[nodiscard]] StartupTableSchema
-  decodeStartupTableSchema(const QualifiedTable &qualified_table,
-                           const std::string &ddl, const Json &table) const {
-    constexpr auto code = CdcErrorCode::DdlObserved;
-    StartupTableSchema result{
-        .name = qualified_table.full_name,
-        .ddl = ddl,
-        .default_charset_name = startupNullableString(
-            member(table, "defaultCharsetName", "startup schema table", code)),
-        .primary_key_columns = {},
-        .columns = {},
-    };
-    const auto &primary_keys =
-        member(table, "primaryKeyColumnNames", "startup schema table", code);
-    result.primary_key_columns.reserve(primary_keys.size());
-    for (const auto &primary_key : primary_keys) {
-      result.primary_key_columns.push_back(
-          stringValue(primary_key, "startup schema primary-key name", code));
-    }
-    const auto &columns =
-        member(table, "columns", "startup schema table", code);
-    result.columns.reserve(columns.size());
-    for (const auto &column : columns) {
-      result.columns.push_back(decodeStartupSchemaColumn(column));
-    }
-    return result;
-  }
-
-  void validateSnapshotTableDefinition(const Json &table) const {
-    constexpr auto code = CdcErrorCode::DdlObserved;
-    requireExactKeys(
-        table,
-        {"defaultCharsetName", "primaryKeyColumnNames", "columns", "comment"},
-        "startup schema snapshot table", code);
-    validateNullableString(
-        member(table, "defaultCharsetName", "startup schema table", code),
-        "startup schema table.defaultCharsetName");
-    const auto &primary_keys =
-        member(table, "primaryKeyColumnNames", "startup schema table", code);
-    const auto &columns =
-        member(table, "columns", "startup schema table", code);
-    if (!primary_keys.is_array() || !columns.is_array() || columns.empty()) {
-      fail(code, "startup schema snapshot table arrays are malformed");
-    }
-    for (const auto &primary_key : primary_keys) {
-      (void)stringValue(primary_key, "startup schema primary-key name", code);
-    }
-    for (const auto &column : columns) {
-      validateSnapshotSchemaColumn(column);
-    }
-    validateNullableString(
-        member(table, "comment", "startup schema table", code),
-        "startup schema table.comment");
-  }
-
-  [[nodiscard]] static std::string
-  snapshotTableIdentifier(const QualifiedTable &table) {
-    return "\"" + table.schema + "\".\"" + table.table + "\"";
-  }
-
-  [[nodiscard]] bool
-  snapshotContainsConfiguredTable(const QualifiedTable &table) const {
-    return std::binary_search(startup_schema_dropped_table_ids_.begin(),
-                              startup_schema_dropped_table_ids_.end(),
-                              snapshotTableIdentifier(table));
-  }
-
-  void requireConfiguredSnapshotTables() const {
-    constexpr auto code = CdcErrorCode::DdlObserved;
-    for (const auto &[unused, table] : application_tables_) {
-      (void)unused;
-      if (!snapshotContainsConfiguredTable(table)) {
-        fail(code, "startup schema snapshot is missing a configured table");
-      }
-    }
-    if (!snapshotContainsConfiguredTable(marker_table_) ||
-        !snapshotContainsConfiguredTable(fence_table_)) {
-      fail(code, "startup schema snapshot is missing a configured table");
-    }
-  }
-
-  void requireSnapshotFlag(const std::string_view actual,
-                           const std::string_view expected) const {
-    if (actual != expected) {
-      fail(CdcErrorCode::DdlObserved,
-           "startup schema snapshot marker is out of order");
-    }
-  }
-
-  void
-  acceptStartupSchemaSemantics(const std::string &database,
-                               const std::optional<std::string> &source_table,
-                               const std::string &ddl, const Json &changes,
-                               const std::string &snapshot) {
-    constexpr auto code = CdcErrorCode::DdlObserved;
-    if (!changes.is_array()) {
-      fail(code, "startup schema snapshot tableChanges is not an array");
-    }
-
-    if (changes.empty()) {
-      if (source_table.has_value()) {
-        fail(code, "startup database schema record unexpectedly names a table");
-      }
-      switch (startup_schema_stage_) {
-      case StartupSchemaStage::ServerSettings:
-        if (!database.empty() || !std::string_view(ddl).starts_with("SET ")) {
-          fail(code, "startup server-settings schema record is malformed");
-        }
-        requireSnapshotFlag(snapshot, "true");
-        startup_schema_stage_ = StartupSchemaStage::DropTables;
-        return;
-      case StartupSchemaStage::DropTables:
-        if (database != marker_table_.schema ||
-            !std::string_view(ddl).starts_with("DROP DATABASE ") ||
-            startup_schema_dropped_table_ids_.empty()) {
-          fail(code, "startup DROP DATABASE record is out of order");
-        }
-        requireSnapshotFlag(snapshot, "true");
-        requireConfiguredSnapshotTables();
-        startup_schema_stage_ = StartupSchemaStage::CreateDatabase;
-        return;
-      case StartupSchemaStage::CreateDatabase:
-        if (database != marker_table_.schema ||
-            !std::string_view(ddl).starts_with("CREATE DATABASE ")) {
-          fail(code, "startup CREATE DATABASE record is out of order");
-        }
-        requireSnapshotFlag(snapshot, "true");
-        startup_schema_stage_ = StartupSchemaStage::UseDatabase;
-        return;
-      case StartupSchemaStage::UseDatabase:
-        if (database != marker_table_.schema ||
-            !std::string_view(ddl).starts_with("USE ")) {
-          fail(code, "startup USE DATABASE record is out of order");
-        }
-        requireSnapshotFlag(snapshot, "true");
-        startup_schema_stage_ = StartupSchemaStage::CreateTables;
-        return;
-      case StartupSchemaStage::CreateTables:
-      case StartupSchemaStage::Complete:
-        fail(code, "empty startup schema record is out of order");
-      }
-    }
-
-    if (changes.size() != 1U || database != marker_table_.schema ||
-        !source_table.has_value()) {
-      fail(code, "startup table schema record is malformed");
-    }
-    const auto &change = changes.front();
-    requireExactKeys(change, {"type", "id", "table"},
-                     "startup schema snapshot table change", code);
-    const auto type =
-        stringValue(member(change, "type", "startup schema table change", code),
-                    "startup schema table change.type", code);
-    const auto identifier =
-        stringValue(member(change, "id", "startup schema table change", code),
-                    "startup schema table change.id", code);
-    const QualifiedTable source_qualified{
-        .schema = database,
-        .table = *source_table,
-        .full_name = database + "." + *source_table,
-    };
-    if (identifier != snapshotTableIdentifier(source_qualified)) {
-      fail(code, "startup schema table-change/source identity mismatch");
-    }
-    const auto &table =
-        member(change, "table", "startup schema table change", code);
-
-    if (startup_schema_stage_ == StartupSchemaStage::DropTables) {
-      if (type != "DROP" || !table.is_null() ||
-          !std::string_view(ddl).starts_with("DROP TABLE ")) {
-        fail(code, "startup DROP TABLE record is malformed");
-      }
-      requireSnapshotFlag(snapshot, "true");
-      if (!startup_schema_dropped_table_ids_.empty() &&
-          identifier <= startup_schema_dropped_table_ids_.back()) {
-        fail(code,
-             "startup DROP TABLE identifiers are duplicated or reordered");
-      }
-      startup_schema_dropped_table_ids_.push_back(identifier);
-      return;
-    }
-
-    if (startup_schema_stage_ != StartupSchemaStage::CreateTables ||
-        type != "CREATE" ||
-        !std::string_view(ddl).starts_with("CREATE TABLE ")) {
-      fail(code, "startup CREATE TABLE record is out of order");
-    }
-    validateSnapshotTableDefinition(table);
-    if (application_tables_.contains(source_qualified.full_name)) {
-      try {
-        config_.benchmark_adapter->validateStartupTableSchema(
-            decodeStartupTableSchema(source_qualified, ddl, table),
-            config_.backend_adapter->applicationTableRequirements());
-      } catch (const AdapterSchemaError &error) {
-        fail(code, error.what());
-      }
-    }
-    if (startup_schema_create_index_ >=
-            startup_schema_dropped_table_ids_.size() ||
-        identifier !=
-            startup_schema_dropped_table_ids_[startup_schema_create_index_]) {
-      fail(code, "startup CREATE TABLE identifiers do not match ordered drops");
-    }
-    const bool final_table = startup_schema_create_index_ + 1U ==
-                             startup_schema_dropped_table_ids_.size();
-    requireSnapshotFlag(snapshot, final_table ? "last" : "true");
-    ++startup_schema_create_index_;
-    if (final_table) {
-      startup_schema_stage_ = StartupSchemaStage::Complete;
-      startup_schema_snapshot_finished_ = true;
-    }
-  }
-
-  void acceptStartupSchemaSnapshot(const Json &key, const Json &envelope) {
+  void acceptStartupSchemaRecord(const Json &key, const Json &envelope) {
     constexpr auto code = CdcErrorCode::DdlObserved;
     if (lifecycle_phase_ != LifecyclePhase::AwaitRunStart || !active_.empty() ||
-        next_cdc_seq_ != 0U || startup_schema_snapshot_finished_) {
+        next_cdc_seq_ != 0U || startup_schema_decoder_->complete()) {
       fail(code, "Debezium schema-change/DDL envelope was observed after "
                  "transactional run evidence began");
     }
@@ -972,101 +650,17 @@ private:
       fail(CdcErrorCode::ResourceExhausted,
            "startup schema snapshot record limit exceeded");
     }
-
-    requireExactKeys(key, {"databaseName"}, "startup schema snapshot key",
-                     code);
-    requireExactKeys(envelope,
-                     {"source", "ts_ms", "databaseName", "schemaName", "ddl",
-                      "tableChanges"},
-                     "startup schema snapshot envelope", code);
-    const auto key_database = stringValue(
-        member(key, "databaseName", "startup schema snapshot key", code),
-        "startup schema snapshot key.databaseName", code);
-    const auto database = stringValue(
-        member(envelope, "databaseName", "startup schema snapshot", code),
-        "startup schema snapshot.databaseName", code);
-    if (key_database != database ||
-        (!database.empty() && database != marker_table_.schema)) {
-      fail(code, "startup schema snapshot database identity is invalid");
-    }
-    if (!member(envelope, "schemaName", "startup schema snapshot", code)
-             .is_null()) {
-      fail(code, "startup schema snapshot schemaName is unexpectedly non-null");
-    }
-    const auto ddl =
-        stringValue(member(envelope, "ddl", "startup schema snapshot", code),
-                    "startup schema snapshot.ddl", code);
-    if (ddl.empty()) {
-      fail(code, "startup schema snapshot DDL is empty");
-    }
-    (void)uintValue(member(envelope, "ts_ms", "startup schema snapshot", code),
-                    "startup schema snapshot.ts_ms",
-                    std::numeric_limits<std::uint64_t>::max(), code);
-    const auto &table_changes =
-        member(envelope, "tableChanges", "startup schema snapshot", code);
-
-    const auto &source =
-        member(envelope, "source", "startup schema snapshot", code);
-    requireExactKeys(source,
-                     {"version", "connector", "name", "ts_ms", "snapshot", "db",
-                      "sequence", "ts_us", "ts_ns", "table", "server_id",
-                      "gtid", "file", "pos", "row", "thread", "query"},
-                     "startup schema snapshot source", code);
-    if (stringValue(member(source, "version", "startup schema source", code),
-                    "startup schema source.version",
-                    code) != config_.debezium_version ||
-        stringValue(member(source, "connector", "startup schema source", code),
-                    "startup schema source.connector", code) != "mariadb" ||
-        stringValue(member(source, "name", "startup schema source", code),
-                    "startup schema source.name",
-                    code) != config_.backend_source_id ||
-        stringValue(member(source, "db", "startup schema source", code),
-                    "startup schema source.db", code) != database) {
-      fail(code, "startup schema snapshot source identity is invalid");
-    }
-    const auto snapshot =
-        stringValue(member(source, "snapshot", "startup schema source", code),
-                    "startup schema source.snapshot", code);
-    if (snapshot != "true" && snapshot != "last") {
-      fail(code, "non-snapshot DDL was observed");
-    }
-    for (const auto field : {"sequence", "gtid", "thread", "query"}) {
-      if (!member(source, field, "startup schema source", code).is_null()) {
-        fail(code, "startup schema source nullable metadata is non-null");
+    try {
+      auto observation = startup_schema_decoder_->accept(key, envelope);
+      if (observation.application_table_schema.has_value()) {
+        config_.benchmark_adapter->validateStartupTableSchema(
+            *observation.application_table_schema,
+            config_.backend_adapter->applicationTableRequirements());
       }
+    } catch (const AdapterSchemaError &error) {
+      fail(code, error.what());
     }
-    const auto &table_value =
-        member(source, "table", "startup schema source", code);
-    std::optional<std::string> source_table;
-    if (!table_value.is_null()) {
-      const auto table_name =
-          stringValue(table_value, "startup schema source.table", code);
-      if (database.empty() || !isCanonicalIdentifier(table_name)) {
-        fail(code, "startup schema source table identity is invalid");
-      }
-      source_table = table_name;
-    }
-    if (uintValue(member(source, "server_id", "startup schema source", code),
-                  "startup schema source.server_id",
-                  std::numeric_limits<std::uint64_t>::max(), code) != 0U) {
-      fail(code, "startup schema snapshot server_id is not zero");
-    }
-    const auto file =
-        stringValue(member(source, "file", "startup schema source", code),
-                    "startup schema source.file", code);
-    if (file.empty()) {
-      fail(code, "startup schema snapshot source.file is empty");
-    }
-    for (const auto field : {"ts_ms", "ts_us", "ts_ns", "pos", "row"}) {
-      (void)uintValue(member(source, field, "startup schema source", code),
-                      std::string("startup schema source.") + field,
-                      std::numeric_limits<std::uint64_t>::max(), code);
-    }
-
-    acceptStartupSchemaSemantics(database, source_table, ddl, table_changes,
-                                 snapshot);
     ++startup_schema_snapshot_records_;
-    saw_startup_schema_snapshot_ = true;
   }
 
   [[nodiscard]] std::string validateMetadataKey(const Json &key) const {
@@ -1091,8 +685,8 @@ private:
     const auto status =
         stringValue(member(envelope, "status", "transaction metadata"),
                     "transaction metadata.status");
-    if (!startup_schema_snapshot_finished_) {
-      if (!saw_startup_schema_snapshot_) {
+    if (!startup_schema_decoder_->complete()) {
+      if (!startup_schema_decoder_->sawRecord()) {
         fail(CdcErrorCode::CdcRecordMalformed,
              "transactional evidence began without the required startup "
              "schema snapshot");
@@ -1124,8 +718,8 @@ private:
       }
       if (!active_.empty()) {
         fail(CdcErrorCode::CdcOrderInvalid,
-             "nested or interleaved Debezium BEGIN violates contiguous "
-             "MariaDB transaction framing");
+             "nested or interleaved Debezium BEGIN violates configured "
+             "contiguous transaction framing");
       }
       if (active_.size() >= config_.max_active_transactions) {
         fail(CdcErrorCode::ResourceExhausted,
@@ -1165,83 +759,55 @@ private:
     return completed;
   }
 
-  void validateSource(const Json &source, const std::string &transaction_id,
-                      QualifiedTable &table) const {
-    requireExactKeys(source,
-                     {"version", "connector", "name", "ts_ms", "snapshot", "db",
-                      "sequence", "ts_us", "ts_ns", "table", "server_id",
-                      "gtid", "file", "pos", "row", "thread", "query"},
-                     "Debezium MariaDB source metadata");
+  [[nodiscard]] const QualifiedTable &
+  resolveDataCollection(const std::string_view identity,
+                        const CdcErrorCode code) const {
+    const auto separator = identity.rfind('.');
+    const auto leaf = separator == std::string_view::npos
+                          ? identity
+                          : identity.substr(separator + 1U);
+    if (!isCanonicalIdentifier(leaf)) {
+      fail(code, "CDC data-collection identity is not canonical");
+    }
+    const auto found = tables_by_leaf_.find(std::string(leaf));
+    if (found == tables_by_leaf_.end()) {
+      fail(code,
+           "CDC data collection is outside the configured table roster: " +
+               std::string(identity));
+    }
+    return found->second;
+  }
+
+  void validateSource(const Json &source, QualifiedTable &table) const {
+    requireObject(source, "Debezium source metadata");
     const auto version =
         stringValue(member(source, "version", "source"), "source.version");
-    const auto connector =
-        stringValue(member(source, "connector", "source"), "source.connector");
+    if (version != config_.debezium_version) {
+      fail(CdcErrorCode::CdcRecordMalformed,
+           "unsupported Debezium envelope version");
+    }
     const auto source_name =
         stringValue(member(source, "name", "source"), "source.name");
-    if (version != config_.debezium_version || connector != "mariadb") {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "unsupported Debezium connector kind or version");
-    }
     if (source_name != config_.backend_source_id) {
       fail(CdcErrorCode::CdcRecordMalformed,
-           "CDC source identity differs from the configured backend source");
+           "CDC source identity differs from the configured source");
     }
-
-    const auto database =
-        stringValue(member(source, "db", "source"), "source.db");
     const auto table_name =
         stringValue(member(source, "table", "source"), "source.table");
-    if (!isCanonicalIdentifier(database) ||
-        !isCanonicalIdentifier(table_name)) {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "CDC source table identifiers are not canonical lowercase names");
-    }
-    table = QualifiedTable{.schema = database,
-                           .table = table_name,
-                           .full_name = database + "." + table_name};
-
-    const auto source_transaction_id =
-        stringValue(member(source, "gtid", "source"), "source.gtid");
-    if (source_transaction_id != transaction_id) {
-      fail(CdcErrorCode::CdcTransactionIdMismatch,
-           "row source GTID disagrees with its Debezium transaction ID");
-    }
+    table = resolveDataCollection(table_name, CdcErrorCode::UnexpectedTable);
 
     const auto &snapshot = member(source, "snapshot", "source");
     const bool snapshot_false =
         (snapshot.is_boolean() && !snapshot.get<bool>()) ||
-        (snapshot.is_string() && snapshot.get<std::string>() == "false");
+        (snapshot.is_string() &&
+         snapshot.get_ref<const std::string &>() == "false");
     if (!snapshot_false) {
       fail(CdcErrorCode::ExternalWriterObserved,
            "snapshot CDC row is outside the captured live run");
     }
-    if (!member(source, "sequence", "source").is_null()) {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "MariaDB source.sequence is unexpectedly non-null");
-    }
-    if (!member(source, "query", "source").is_null()) {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "MariaDB source.query is unexpectedly non-null");
-    }
-    const auto &thread = member(source, "thread", "source");
-    if (!thread.is_null()) {
-      (void)uintValue(thread, "source.thread");
-    }
-    const auto file =
-        stringValue(member(source, "file", "source"), "source.file");
-    if (file.empty()) {
-      fail(CdcErrorCode::CdcRecordMalformed, "source.file is empty");
-    }
-    (void)uintValue(member(source, "ts_ms", "source"), "source.ts_ms");
-    (void)uintValue(member(source, "ts_us", "source"), "source.ts_us");
-    (void)uintValue(member(source, "ts_ns", "source"), "source.ts_ns");
-    (void)uintValue(member(source, "server_id", "source"), "source.server_id");
-    (void)uintValue(member(source, "pos", "source"), "source.pos");
-    (void)uintValue(member(source, "row", "source"), "source.row");
   }
 
-  void acceptRow(const CdcStreamRecord &record, const Json &key,
-                 const Json &envelope) {
+  void acceptRow(const CdcStreamRecord &record, Json key, Json envelope) {
     requireExactKeys(envelope,
                      {"before", "after", "source", "transaction", "op", "ts_ms",
                       "ts_us", "ts_ns"},
@@ -1274,8 +840,7 @@ private:
     current_timed_structural_id_ = transaction_id;
 
     QualifiedTable table;
-    validateSource(member(envelope, "source", "row envelope"), transaction_id,
-                   table);
+    validateSource(member(envelope, "source", "row envelope"), table);
     const bool application = application_tables_.contains(table.full_name);
     const bool marker = table.full_name == marker_table_.full_name;
     const bool fence = table.full_name == fence_table_.full_name;
@@ -1322,9 +887,9 @@ private:
     const auto raw_bytes = record.key_json.size() + record.envelope_json.size();
     reserveActiveBytes(raw_bytes);
     active->second.rows.push_back(RowEvent{
-        .key = key,
-        .before = before,
-        .after = after,
+        .key = std::move(key),
+        .before = std::move(envelope["before"]),
+        .after = std::move(envelope["after"]),
         .operation = operation,
         .table = std::move(table),
         .total_order = total_order,
@@ -1386,10 +951,13 @@ private:
       const auto name =
           stringValue(member(collection, "data_collection", "END collection"),
                       "END data_collection");
+      const auto &table =
+          resolveDataCollection(name, CdcErrorCode::CdcEventCountMismatch);
       const auto count =
           uintValue(member(collection, "event_count", "END collection"),
                     "END data_collection.event_count");
-      if (count == 0U || !declared_counts.emplace(name, count).second) {
+      if (count == 0U ||
+          !declared_counts.emplace(table.full_name, count).second) {
         fail(CdcErrorCode::CdcEventCountMismatch,
              "END contains an empty or duplicate data-collection count");
       }
@@ -1438,9 +1006,8 @@ private:
       break;
     case CdcTransactionKind::WorkloadMarked:
       ++completed_workload_transactions_;
-      workload_raw_row_events_ =
-          saturatingAdd(workload_raw_row_events_,
-                        static_cast<std::uint64_t>(raw_row_count));
+      workload_raw_row_events_ = saturatingAdd(
+          workload_raw_row_events_, static_cast<std::uint64_t>(raw_row_count));
       workload_normalized_write_events_ =
           saturatingAdd(workload_normalized_write_events_,
                         static_cast<std::uint64_t>(normalized_write_count));
@@ -1512,7 +1079,12 @@ private:
              "bootstrap transaction contains non-application evidence");
       }
       result.kind = CdcTransactionKind::BootstrapApp;
-      result.writes = normalizeApplicationWrites(transaction.rows);
+      std::vector<const RowEvent *> application_rows;
+      application_rows.reserve(transaction.rows.size());
+      for (const auto &row : transaction.rows) {
+        application_rows.push_back(&row);
+      }
+      result.writes = normalizeApplicationWrites(application_rows);
       return result;
     }
 
@@ -1537,11 +1109,11 @@ private:
     }
 
     const auto marker = validateMarker(transaction.rows[marker_index]);
-    std::vector<RowEvent> application_rows;
+    std::vector<const RowEvent *> application_rows;
     application_rows.reserve(application_count);
     for (const auto &row : transaction.rows) {
       if (application_tables_.contains(row.table.full_name)) {
-        application_rows.push_back(row);
+        application_rows.push_back(&row);
       }
     }
     result.kind = CdcTransactionKind::WorkloadMarked;
@@ -1721,7 +1293,7 @@ private:
   }
 
   [[nodiscard]] std::vector<NormalizedWrite>
-  normalizeApplicationWrites(const std::vector<RowEvent> &rows) const {
+  normalizeApplicationWrites(const std::vector<const RowEvent *> &rows) const {
     std::map<CanonicalBytes, NormalizedWrite, CanonicalBytesLess> collapsed;
     std::map<CanonicalBytes, std::optional<CanonicalBytes>, CanonicalBytesLess>
         local_state;
@@ -1766,7 +1338,8 @@ private:
           }
         };
 
-    for (const auto &row : rows) {
+    for (const auto *row_pointer : rows) {
+      const auto &row = *row_pointer;
       const auto *codec =
           config_.benchmark_adapter->rowCodec(row.table.full_name);
       if (codec == nullptr) {
@@ -1878,16 +1451,16 @@ private:
   DebeziumAssemblerConfig config_;
   std::function<std::uint64_t()> monotonic_clock_nanoseconds_;
   std::unordered_map<std::string, QualifiedTable> application_tables_;
+  std::unordered_map<std::string, QualifiedTable> tables_by_leaf_;
+  std::unique_ptr<CdcStartupSchemaDecoder> startup_schema_decoder_;
   QualifiedTable marker_table_;
   QualifiedTable fence_table_;
   std::unordered_map<std::string, ActiveTransaction> active_;
   std::unordered_set<std::string> completed_structural_ids_;
   std::unordered_map<std::string, std::uint64_t> last_marker_by_session_;
   std::unordered_set<std::string> seen_marker_identities_;
-  std::vector<std::string> startup_schema_dropped_table_ids_;
   std::set<RunFencePhase> seen_fences_;
   LifecyclePhase lifecycle_phase_ = LifecyclePhase::AwaitRunStart;
-  StartupSchemaStage startup_schema_stage_ = StartupSchemaStage::ServerSettings;
   std::optional<StreamId> last_stream_id_;
   std::uint64_t next_cdc_seq_ = 0;
   std::uint64_t accepted_raw_records_ = 0;
@@ -1914,13 +1487,10 @@ private:
   std::size_t retained_identity_high_water_records_ = 0;
   std::size_t retained_identity_high_water_bytes_ = 0;
   std::size_t startup_schema_snapshot_records_ = 0;
-  std::size_t startup_schema_create_index_ = 0;
   std::optional<Failure> failure_;
   std::optional<std::string> current_timed_structural_id_;
   std::uint64_t completed_processing_before_current_ = 0;
   std::string current_stream_id_;
-  bool saw_startup_schema_snapshot_ = false;
-  bool startup_schema_snapshot_finished_ = false;
   bool finished_ = false;
 };
 

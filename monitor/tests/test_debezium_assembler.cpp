@@ -738,12 +738,22 @@ void checkStructuralFailuresAreClosed() {
   expectError(std::move(wrong_table_count),
               CdcErrorCode::CdcEventCountMismatch);
 
-  auto mismatched_source_id = captured;
-  envelope = envelopeAt(mismatched_source_id, 1U);
-  envelope["source"]["gtid"] = "different-structural-id";
-  setEnvelope(mismatched_source_id, 1U, envelope);
-  expectError(std::move(mismatched_source_id),
-              CdcErrorCode::CdcTransactionIdMismatch);
+  auto opaque_source_metadata = captured;
+  envelope = envelopeAt(opaque_source_metadata, 1U);
+  const auto opaque_table = envelope["source"]["table"].get<std::string>();
+  envelope["source"] = {
+      {"version", "3.6.1.Final"},
+      {"name", "mariadb-main"},
+      {"snapshot", false},
+      {"table", "opaque.namespace." + opaque_table},
+      {"vendor_metadata", {{"transaction", "not-a-join-key"}}},
+  };
+  setEnvelope(opaque_source_metadata, 1U, envelope);
+  envelope = envelopeAt(opaque_source_metadata, 2U);
+  envelope["data_collections"][0]["data_collection"] =
+      "opaque.namespace." + opaque_table;
+  setEnvelope(opaque_source_metadata, 2U, envelope);
+  BLACKBOX_CHECK(replay(std::move(opaque_source_metadata)).size() == 11U);
 
   auto mismatched_end_id = captured;
   envelope = envelopeAt(mismatched_end_id, 2U);
