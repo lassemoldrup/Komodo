@@ -472,9 +472,9 @@ private:
                  "FINAL SchemaAttestation is duplicated");
       return;
     }
-    if (!startup_schema_attestation_.has_value() || !endFenceObserved()) {
+    if (!startup_schema_attestation_.has_value()) {
       invalidate(MonitorErrorCode::SchemaAttestationMismatch,
-                 "FINAL SchemaAttestation arrived before STARTUP/END_FENCE");
+                 "FINAL SchemaAttestation arrived before STARTUP");
       return;
     }
     const auto &startup = *startup_schema_attestation_;

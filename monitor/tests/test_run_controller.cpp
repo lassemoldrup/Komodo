@@ -589,6 +589,32 @@ void testCleanPassRequiresDoneEndAndIdle() {
   BLACKBOX_CHECK(controller.takePendingStatuses().empty());
 }
 
+void testFinalAttestationMayPrecedeEndFenceObservation() {
+  RunController controller(manifest());
+  openWorkload(controller);
+  controller.acceptClientPayload(clientPayload(1U));
+  controller.acceptCdcTransaction(workload(2U, 1U));
+  controller.acceptClientPayload(donePayload(1U));
+
+  controller.acceptClientPayload(
+      attestationPayload("ycsb", SchemaAttestationPhase::Final));
+  BLACKBOX_CHECK(!controller.terminal());
+  BLACKBOX_CHECK(controller.diagnostics().empty());
+  controller.onInputIdle();
+  BLACKBOX_CHECK(!controller.terminal());
+
+  controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
+  BLACKBOX_CHECK(!controller.terminal());
+  controller.onInputIdle();
+  BLACKBOX_CHECK(controller.terminal());
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
+  BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+  BLACKBOX_CHECK(controller.finalReconciliation()->evidence_reconciled);
+  BLACKBOX_CHECK(controller.finalReconciliation()->final_schema_attested);
+  BLACKBOX_CHECK(controller.finalReconciliation()->end_fence_seen);
+  BLACKBOX_CHECK(controller.diagnostics().empty());
+}
+
 void testSchemaAttestationGatesAndDrift() {
   {
     RunController controller(manifest());
@@ -1965,6 +1991,7 @@ void testCapturedTpccControllerReconciliation() {
 
 int runRunControllerTests() {
   testCleanPassRequiresDoneEndAndIdle();
+  testFinalAttestationMayPrecedeEndFenceObservation();
   testSchemaAttestationGatesAndDrift();
   testEndWithoutDoneIsInvalid();
   testOtherwiseCleanRunWithoutEndFenceIsInvalid();
