@@ -64,7 +64,7 @@ blackbox_load_backend_driver() {
   local operation
   for operation in initialize prepare_run require_commands database \
     database_query capture_schema_metadata verify_schema count_table commit_fence \
-    active_application_connections wait_for_connector_progress \
+    active_external_connections wait_for_connector_progress \
     capture_attestation_inputs start_database_schema start_connector teardown \
     status; do
     declare -F "blackbox_backend_$operation" >/dev/null || {
@@ -524,9 +524,9 @@ blackbox_session_has_processes() {
 }
 
 
-blackbox_active_application_connections() {
+blackbox_active_external_connections() {
   local count
-  count=$(blackbox_backend_active_application_connections) || return 1
+  count=$(blackbox_backend_active_external_connections) || return 1
   count=${count//[[:space:]]/}
   [[ $count =~ ^[0-9]+$ ]] || {
     blackbox_die "invalid active-connection count: $count"
@@ -543,7 +543,7 @@ blackbox_prove_quiescence() {
 
   while (( $(date +%s) <= deadline )); do
     local active_connections
-    active_connections=$(blackbox_active_application_connections) || return 1
+    active_connections=$(blackbox_active_external_connections) || return 1
     if ! blackbox_session_has_processes "$process_session_id" && (( active_connections == 0 )); then
       ((consecutive_clean_checks += 1))
       if (( consecutive_clean_checks >= 2 )); then

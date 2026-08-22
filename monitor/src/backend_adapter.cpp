@@ -633,7 +633,6 @@ constexpr auto yugabyte_fact_contract = std::to_array<BackendFactRule>({
     {"slot_database", BackendFactValueRule::Exact, "benchbase"},
     {"slot_plugin", BackendFactValueRule::Exact, "pgoutput"},
     {"slot_lsn_type", BackendFactValueRule::Exact, "SEQUENCE"},
-    {"slot_active_consumers", BackendFactValueRule::Exact, "1"},
     {"streaming_mode", BackendFactValueRule::Exact, "default"},
     {"connector_class", BackendFactValueRule::Exact,
      "io.debezium.connector.postgresql.YugabyteDBConnector"},

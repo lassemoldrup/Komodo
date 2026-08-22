@@ -111,6 +111,61 @@ blackbox_backend_capture_schema_metadata() {
      ORDER BY c.relname, keys.ordinality"
 }
 
+blackbox_backend_capture_security_catalog() {
+  blackbox_backend_admin_query "
+    WITH security_lines AS (
+      SELECT concat_ws(E'\\t', 'ROLE', rolname, rolsuper, rolinherit,
+                       rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,
+                       rolbypassrls) AS line
+        FROM pg_roles WHERE rolname !~ '^pg_'
+      UNION ALL
+      SELECT concat_ws(E'\\t', 'MEMBERSHIP', granted.rolname, member.rolname,
+                       grantor.rolname, membership.admin_option)
+        FROM pg_auth_members membership
+        JOIN pg_roles granted ON granted.oid = membership.roleid
+        JOIN pg_roles member ON member.oid = membership.member
+        JOIN pg_roles grantor ON grantor.oid = membership.grantor
+       WHERE granted.rolname !~ '^pg_' OR member.rolname !~ '^pg_'
+      UNION ALL
+      SELECT concat_ws(E'\\t', 'DATABASE', database.datname, owner.rolname,
+                       COALESCE(array_to_string(database.datacl, ','), '-'))
+        FROM pg_database database JOIN pg_roles owner ON owner.oid = database.datdba
+       WHERE database.datname = 'benchbase'
+      UNION ALL
+      SELECT concat_ws(E'\\t', 'SCHEMA', namespace.nspname, owner.rolname,
+                       COALESCE(array_to_string(namespace.nspacl, ','), '-'))
+        FROM pg_namespace namespace JOIN pg_roles owner ON owner.oid = namespace.nspowner
+       WHERE namespace.nspname = 'benchbase'
+      UNION ALL
+      SELECT concat_ws(E'\\t', 'TABLE', namespace.nspname || '.' || relation.relname,
+                       owner.rolname,
+                       COALESCE(array_to_string(relation.relacl, ','), '-'))
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        JOIN pg_roles owner ON owner.oid = relation.relowner
+       WHERE namespace.nspname = 'benchbase' AND relation.relkind = 'r'
+      UNION ALL
+      SELECT concat_ws(E'\\t', 'PUBLICATION', publication.pubname, owner.rolname)
+        FROM pg_publication publication
+        JOIN pg_roles owner ON owner.oid = publication.pubowner
+       WHERE publication.pubname = '$BLACKBOX_YSQL_PUBLICATION_NAME'
+      UNION ALL
+      SELECT concat_ws(E'\\t', 'DEFAULT_ACL', owner.rolname,
+                       COALESCE(namespace.nspname, '-'), defaults.defaclobjtype,
+                       array_to_string(defaults.defaclacl, ','))
+        FROM pg_default_acl defaults
+        JOIN pg_roles owner ON owner.oid = defaults.defaclrole
+        LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
+       WHERE owner.rolname !~ '^pg_' OR namespace.nspname = 'benchbase'
+      UNION ALL
+      SELECT concat_ws(E'\\t', 'EFFECTIVE_DDL', role.rolname,
+                       has_database_privilege(role.oid, 'benchbase', 'CREATE'),
+                       has_schema_privilege(role.oid, 'benchbase', 'CREATE'))
+        FROM pg_roles role WHERE role.rolcanlogin AND role.rolname !~ '^pg_'
+    )
+    SELECT line FROM security_lines ORDER BY line"
+}
+
 blackbox_backend_verify_schema() {
   blackbox_backend_capture_schema_metadata |
     python3 "$BLACKBOX_ROOT/scripts/backends/yugabytedb_ysql_catalog.py" \
@@ -163,13 +218,111 @@ blackbox_backend_verify_schema() {
     blackbox_die "YugabyteDB before-image flags differ"
     return 1
   }
-  local unsafe_roles
-  unsafe_roles=$(blackbox_backend_admin_query \
-    "SELECT count(*) FROM pg_roles WHERE rolname IN ('blackbox_application','blackbox_replication') AND (rolsuper OR rolcreaterole OR rolcreatedb)") || return 1
-  [[ ${unsafe_roles//[[:space:]]/} == 0 ]] || {
-    blackbox_die "YugabyteDB workload/connector role has DDL administration capability"
+  local role_contract_mismatches ownership_mismatches privilege_mismatches
+  local membership_mismatches unauthorized_ddl_logins
+  role_contract_mismatches=$(blackbox_backend_admin_query "
+    WITH expected(role_name) AS (
+      VALUES ('blackbox_setup'), ('blackbox_application'), ('blackbox_replication')
+    )
+    SELECT count(*) FROM expected
+    LEFT JOIN pg_roles role ON role.rolname = expected.role_name
+    WHERE role.oid IS NULL OR NOT (
+      role.rolcanlogin AND NOT role.rolsuper AND NOT role.rolcreaterole AND
+      NOT role.rolcreatedb AND NOT role.rolbypassrls AND
+      CASE WHEN expected.role_name = 'blackbox_replication'
+           THEN role.rolreplication ELSE NOT role.rolreplication END
+    )") || return 1
+  ownership_mismatches=$(blackbox_backend_admin_query "
+    SELECT count(*) FROM (
+      SELECT owner.rolname AS owner_name
+        FROM pg_database database JOIN pg_roles owner ON owner.oid = database.datdba
+       WHERE database.datname = 'benchbase'
+      UNION ALL
+      SELECT owner.rolname
+        FROM pg_namespace namespace JOIN pg_roles owner ON owner.oid = namespace.nspowner
+       WHERE namespace.nspname = 'benchbase'
+      UNION ALL
+      SELECT owner.rolname
+        FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        JOIN pg_roles owner ON owner.oid = relation.relowner
+       WHERE namespace.nspname = 'benchbase' AND relation.relkind = 'r'
+    ) owned WHERE owner_name <> 'blackbox_setup'") || return 1
+  privilege_mismatches=$(blackbox_backend_admin_query "
+    SELECT CASE WHEN
+      has_schema_privilege('blackbox_application', 'benchbase', 'USAGE') AND
+      NOT has_schema_privilege('blackbox_application', 'benchbase', 'CREATE') AND
+      has_schema_privilege('blackbox_replication', 'benchbase', 'USAGE') AND
+      NOT has_schema_privilege('blackbox_replication', 'benchbase', 'CREATE') AND
+      NOT has_database_privilege('blackbox_application', 'benchbase', 'CREATE') AND
+      NOT has_database_privilege('blackbox_replication', 'benchbase', 'CREATE') AND
+      NOT EXISTS (
+        SELECT 1 FROM pg_class relation
+        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'benchbase' AND relation.relkind = 'r' AND NOT (
+          has_table_privilege('blackbox_application', relation.oid, 'SELECT') AND
+          has_table_privilege('blackbox_application', relation.oid, 'INSERT') AND
+          has_table_privilege('blackbox_application', relation.oid, 'UPDATE') AND
+          has_table_privilege('blackbox_application', relation.oid, 'DELETE') AND
+          NOT has_table_privilege('blackbox_application', relation.oid, 'TRUNCATE') AND
+          NOT has_table_privilege('blackbox_application', relation.oid, 'REFERENCES') AND
+          NOT has_table_privilege('blackbox_application', relation.oid, 'TRIGGER') AND
+          has_table_privilege('blackbox_replication', relation.oid, 'SELECT') AND
+          NOT has_table_privilege('blackbox_replication', relation.oid, 'INSERT') AND
+          NOT has_table_privilege('blackbox_replication', relation.oid, 'UPDATE') AND
+          NOT has_table_privilege('blackbox_replication', relation.oid, 'DELETE') AND
+          NOT has_table_privilege('blackbox_replication', relation.oid, 'TRUNCATE') AND
+          NOT has_table_privilege('blackbox_replication', relation.oid, 'REFERENCES') AND
+          NOT has_table_privilege('blackbox_replication', relation.oid, 'TRIGGER')
+        )
+      ) THEN 0 ELSE 1 END") || return 1
+  membership_mismatches=$(blackbox_backend_admin_query "
+    SELECT count(*) FROM pg_auth_members membership
+    JOIN pg_roles granted ON granted.oid = membership.roleid
+    JOIN pg_roles member ON member.oid = membership.member
+    WHERE granted.rolname IN ('blackbox_setup','blackbox_application','blackbox_replication')
+       OR member.rolname IN ('blackbox_setup','blackbox_application','blackbox_replication')") || return 1
+  unauthorized_ddl_logins=$(blackbox_backend_admin_query "
+    WITH RECURSIVE membership(member, granted_role) AS (
+      SELECT member, roleid FROM pg_auth_members
+      UNION
+      SELECT membership.member, inherited.roleid
+        FROM membership JOIN pg_auth_members inherited
+          ON inherited.member = membership.granted_role
+    ), ddl_roles(role_id) AS (
+      SELECT role.oid FROM pg_roles role WHERE
+        role.rolsuper OR role.rolcreaterole OR role.rolcreatedb OR
+        has_database_privilege(role.oid, 'benchbase', 'CREATE') OR
+        has_schema_privilege(role.oid, 'benchbase', 'CREATE') OR
+        EXISTS (SELECT 1 FROM pg_database database
+                WHERE database.datname = 'benchbase' AND database.datdba = role.oid) OR
+        EXISTS (SELECT 1 FROM pg_namespace namespace
+                WHERE namespace.nspname = 'benchbase' AND namespace.nspowner = role.oid) OR
+        EXISTS (SELECT 1 FROM pg_class relation
+                JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = 'benchbase' AND relation.relkind = 'r'
+                  AND relation.relowner = role.oid)
+    ), capable_logins(role_id) AS (
+      SELECT role.oid FROM pg_roles role
+       WHERE role.rolcanlogin AND (
+         role.oid IN (SELECT role_id FROM ddl_roles) OR
+         EXISTS (SELECT 1 FROM membership
+                  WHERE membership.member = role.oid
+                    AND membership.granted_role IN (SELECT role_id FROM ddl_roles))
+       )
+    )
+    SELECT count(*) FROM capable_logins
+    JOIN pg_roles role ON role.oid = capable_logins.role_id
+    WHERE role.rolname NOT IN ('yugabyte','postgres','blackbox_setup')") || return 1
+  if [[ ${role_contract_mismatches//[[:space:]]/} != 0 ||
+        ${ownership_mismatches//[[:space:]]/} != 0 ||
+        ${privilege_mismatches//[[:space:]]/} != 0 ||
+        ${membership_mismatches//[[:space:]]/} != 0 ||
+        ${unauthorized_ddl_logins//[[:space:]]/} != 0 ]]; then
+    blackbox_die \
+      "YugabyteDB dedicated role/ownership/DDL privilege contract differs: role=$role_contract_mismatches ownership=$ownership_mismatches privileges=$privilege_mismatches membership=$membership_mismatches unauthorized_ddl_logins=$unauthorized_ddl_logins"
     return 1
-  }
+  fi
 }
 
 blackbox_backend_count_table() {
@@ -184,9 +337,43 @@ blackbox_backend_commit_fence() {
     "BEGIN; INSERT INTO benchbase.checker_run_fence (run_id, phase, nonce) VALUES ('$run_id', '$phase', '$nonce'); COMMIT;" >/dev/null
 }
 
-blackbox_backend_active_application_connections() {
-  blackbox_backend_admin_query \
-    "SELECT COUNT(*) FROM pg_stat_activity WHERE usename='$BLACKBOX_DB_USER' AND datname='benchbase' AND pid <> pg_backend_pid()"
+blackbox_backend_active_external_connections() {
+  blackbox_backend_admin_query "
+    WITH RECURSIVE membership(member, granted_role) AS (
+      SELECT member, roleid FROM pg_auth_members
+      UNION
+      SELECT membership.member, inherited.roleid
+        FROM membership JOIN pg_auth_members inherited
+          ON inherited.member = membership.granted_role
+    ), ddl_roles(role_id) AS (
+      SELECT role.oid FROM pg_roles role WHERE
+        role.rolsuper OR role.rolcreaterole OR role.rolcreatedb OR
+        has_database_privilege(role.oid, 'benchbase', 'CREATE') OR
+        has_schema_privilege(role.oid, 'benchbase', 'CREATE') OR
+        EXISTS (SELECT 1 FROM pg_database database
+                WHERE database.datname = 'benchbase' AND database.datdba = role.oid) OR
+        EXISTS (SELECT 1 FROM pg_namespace namespace
+                WHERE namespace.nspname = 'benchbase' AND namespace.nspowner = role.oid) OR
+        EXISTS (SELECT 1 FROM pg_class relation
+                JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = 'benchbase' AND relation.relkind = 'r'
+                  AND relation.relowner = role.oid)
+    ), capable_logins(role_id) AS (
+      SELECT role.oid FROM pg_roles role
+       WHERE role.rolcanlogin AND (
+         role.oid IN (SELECT role_id FROM ddl_roles) OR
+         EXISTS (SELECT 1 FROM membership
+                  WHERE membership.member = role.oid
+                    AND membership.granted_role IN (SELECT role_id FROM ddl_roles))
+       )
+    )
+    SELECT count(*) FROM pg_stat_activity activity
+    WHERE activity.pid <> pg_backend_pid() AND
+      activity.backend_type = 'client backend' AND (
+      activity.usesysid IN (SELECT role_id FROM capable_logins) OR
+      (activity.datname = 'benchbase' AND
+       activity.usename <> 'blackbox_replication')
+    )"
 }
 
 blackbox_backend_wait_for_connector_progress() {
@@ -240,8 +427,7 @@ blackbox_backend_capture_attestation_inputs() {
   types_digest=$(blackbox_backend_admin_query \
     "SELECT c.oid || E'\\t' || n.nspname || '.' || c.relname || E'\\t' || a.attnum || E'\\t' || a.attname || E'\\t' || a.atttypid || E'\\t' || a.atttypmod || E'\\t' || a.attnotnull FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid WHERE n.nspname='benchbase' AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum" |
     sha256sum | cut -d' ' -f1) || return 1
-  privileges_digest=$(blackbox_backend_admin_query \
-    "SELECT grantee || E'\\t' || table_schema || '.' || table_name || E'\\t' || privilege_type FROM information_schema.role_table_grants WHERE grantee IN ('blackbox_application','blackbox_replication') ORDER BY 1,2,3" |
+  privileges_digest=$(blackbox_backend_capture_security_catalog |
     sha256sum | cut -d' ' -f1) || return 1
   local session_settings client_encoding time_zone search_path isolation follower_reads
   session_settings=$(blackbox_backend_database_query \
@@ -253,10 +439,10 @@ blackbox_backend_capture_attestation_inputs() {
     on|true) follower_reads=true ;;
     *) return 1 ;;
   esac
-  local slot_facts observed_slot observed_plugin observed_database observed_lsn active_consumers
+  local slot_facts observed_slot observed_plugin observed_database observed_lsn
   slot_facts=$(blackbox_backend_admin_query \
-    "SELECT slot_name || E'\\t' || plugin || E'\\t' || database || E'\\t' || yb_lsn_type || E'\\t' || CASE WHEN active THEN '1' ELSE '0' END FROM pg_replication_slots WHERE slot_name='$BLACKBOX_YSQL_SLOT_NAME'") || return 1
-  IFS=$'\t' read -r observed_slot observed_plugin observed_database observed_lsn active_consumers \
+    "SELECT slot_name || E'\\t' || plugin || E'\\t' || database || E'\\t' || yb_lsn_type FROM pg_replication_slots WHERE slot_name='$BLACKBOX_YSQL_SLOT_NAME'") || return 1
+  IFS=$'\t' read -r observed_slot observed_plugin observed_database observed_lsn \
     <<<"$slot_facts"
   local build_text server_version server_build_hash container_command intra_before null_before
   build_text=$("$BLACKBOX_DOCKER" exec "$BLACKBOX_DATABASE_CONTAINER" \
@@ -281,7 +467,7 @@ blackbox_backend_capture_attestation_inputs() {
     --arg search_path "$search_path" --arg isolation "$isolation" \
     --arg follower_reads "$follower_reads" --arg observed_slot "$observed_slot" \
     --arg observed_plugin "$observed_plugin" --arg observed_database "$observed_database" \
-    --arg observed_lsn "$observed_lsn" --arg active_consumers "$active_consumers" \
+    --arg observed_lsn "$observed_lsn" \
     --arg intra_before "$intra_before" --arg null_before "$null_before" '
     [
       {name:"database_name",canonical_value:"benchbase"},
@@ -298,7 +484,6 @@ blackbox_backend_capture_attestation_inputs() {
       {name:"slot_database",canonical_value:$observed_database},
       {name:"slot_plugin",canonical_value:$observed_plugin},
       {name:"slot_lsn_type",canonical_value:$observed_lsn},
-      {name:"slot_active_consumers",canonical_value:$active_consumers},
       {name:"streaming_mode",canonical_value:"default"},
       {name:"connector_class",canonical_value:"io.debezium.connector.postgresql.YugabyteDBConnector"},
       {name:"connector_source",canonical_value:"postgresql"},

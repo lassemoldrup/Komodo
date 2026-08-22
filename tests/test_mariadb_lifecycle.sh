@@ -756,7 +756,7 @@ main() {
   blackbox_database_query "SELECT SLEEP(2)" >/dev/null &
   local sleeper_pid=$!
   sleep 0.2
-  [[ $(blackbox_active_application_connections) -ge 1 ]]
+  [[ $(blackbox_active_external_connections) -ge 1 ]]
   wait "$sleeper_pid"
 
   start_connector_with_snapshot_schema

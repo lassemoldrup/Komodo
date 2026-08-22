@@ -55,7 +55,6 @@
     {"name": "slot_database", "value_rule": "exact", "expected_value": "benchbase"},
     {"name": "slot_plugin", "value_rule": "exact", "expected_value": "pgoutput"},
     {"name": "slot_lsn_type", "value_rule": "exact", "expected_value": "SEQUENCE"},
-    {"name": "slot_active_consumers", "value_rule": "exact", "expected_value": "1"},
     {"name": "streaming_mode", "value_rule": "exact", "expected_value": "default"},
     {"name": "connector_class", "value_rule": "exact", "expected_value": "io.debezium.connector.postgresql.YugabyteDBConnector"},
     {"name": "connector_source", "value_rule": "exact", "expected_value": "postgresql"},

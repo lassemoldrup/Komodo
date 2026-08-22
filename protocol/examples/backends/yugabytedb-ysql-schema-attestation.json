@@ -169,10 +169,6 @@
       "canonical_value": "SEQUENCE"
     },
     {
-      "name": "slot_active_consumers",
-      "canonical_value": "1"
-    },
-    {
       "name": "streaming_mode",
       "canonical_value": "default"
     },
@@ -229,5 +225,5 @@
       "canonical_value": "9999999999999999999999999999999999999999999999999999999999999999"
     }
   ],
-  "canonical_attestation_digest": "2aa592d21b73c79a29337d4e85d5f54c4c0f1381e8cb5d2e7c163266cdbbce2d"
+  "canonical_attestation_digest": "7982839d609182e2261aab522c4d472219bd02121243819dab825acc7d2b23e1"
 }

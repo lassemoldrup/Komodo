@@ -120,9 +120,9 @@ blackbox_backend_commit_fence() {
     "START TRANSACTION; INSERT INTO checker_run_fence (run_id, phase, nonce) VALUES ('$run_id', '$phase', '$nonce'); COMMIT;" >/dev/null
 }
 
-blackbox_backend_active_application_connections() {
+blackbox_backend_active_external_connections() {
   blackbox_backend_database_query \
-    "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER = '$BLACKBOX_DB_USER' AND DB = 'benchbase' AND ID <> CONNECTION_ID()"
+    "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE DB = 'benchbase' AND USER <> 'debezium' AND ID <> CONNECTION_ID()"
 }
 
 blackbox_backend_wait_for_connector_progress() {

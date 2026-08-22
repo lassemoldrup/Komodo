@@ -30,8 +30,8 @@ blackbox_backend_commit_fence() {
   mock_driver_gate commit_fence || return 1
   printf 'fence:%s\n' "$2" >>"$MOCK_EVENT_LOG"
 }
-blackbox_backend_active_application_connections() {
-  mock_driver_gate active_connections && printf '0\n'
+blackbox_backend_active_external_connections() {
+  mock_driver_gate active_external_connections && printf '0\n'
 }
 blackbox_backend_wait_for_connector_progress() { mock_driver_gate connector_progress; }
 blackbox_backend_capture_attestation_inputs() {
@@ -108,7 +108,7 @@ export ROOT
 MOCK_FAILURE_EXAMPLE="$ROOT/protocol/examples/schema-attestation-startup.json"
 export MOCK_FAILURE_EXAMPLE
 for operation in prepare_run database_query verify_schema count_table commit_fence \
-  active_connections connector_progress capture_attestation start_database_schema \
+  active_external_connections connector_progress capture_attestation start_database_schema \
   start_connector teardown status; do
   if BLACKBOX_BACKEND=mariadb BLACKBOX_BACKEND_DRIVER_DIR="$TEST_ROOT/drivers" \
       MOCK_SOURCE_ID=mariadb-main \
@@ -122,7 +122,7 @@ case "$TEST_OPERATION" in
   verify_schema) blackbox_backend_verify_schema ;;
   count_table) blackbox_backend_count_table benchbase.usertable ;;
   commit_fence) blackbox_backend_commit_fence run RUN_START nonce ;;
-  active_connections) blackbox_backend_active_application_connections ;;
+  active_external_connections) blackbox_backend_active_external_connections ;;
   connector_progress) blackbox_backend_wait_for_connector_progress ;;
   capture_attestation)
     blackbox_backend_capture_attestation_inputs /tmp/unused-tables /tmp/unused-facts ;;

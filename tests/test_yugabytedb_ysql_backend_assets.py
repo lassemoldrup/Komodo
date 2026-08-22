@@ -113,6 +113,42 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         self.assertIn("CREATE PUBLICATION $publication_name FOR TABLE $capture_tables", init)
         self.assertIn("'pgoutput', false, false, 'SEQUENCE'", init)
 
+        connector = (
+            DEBEZIUM / "application-yugabytedb-ysql.properties"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("blackbox_setup", connector)
+        self.assertNotIn("database.user=yugabyte", connector)
+
+    def test_privilege_attestation_covers_effective_ddl_authority(self) -> None:
+        driver = (
+            ROOT / "scripts" / "backends" / "yugabytedb_ysql.sh"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "pg_auth_members",
+            "pg_default_acl",
+            "database.datacl",
+            "namespace.nspacl",
+            "relation.relacl",
+            "relation.relowner",
+            "has_database_privilege",
+            "has_schema_privilege",
+            "unauthorized_ddl_logins",
+            "activity.usesysid IN (SELECT role_id FROM capable_logins)",
+            "activity.backend_type = 'client backend'",
+            "activity.usename <> 'blackbox_replication'",
+        ):
+            self.assertIn(required, driver)
+        self.assertNotIn("slot_active_consumers", driver)
+
+        backend = json.loads(
+            (ROOT / "protocol" / "backends" / "yugabytedb_ysql.json").read_text()
+        )
+        stable_facts = {
+            fact["name"] for fact in backend["attestation_fact_contract"]
+        }
+        self.assertNotIn("slot_active_consumers", stable_facts)
+        self.assertIn("dedicated_privileges_sha256", stable_facts)
+
     def test_generic_lifecycle_has_no_backend_name_or_physical_sql_branch(self) -> None:
         generic = "\n".join(
             path.read_text(encoding="utf-8")

@@ -15,6 +15,11 @@ compose() {
     --file "$script_dir/docker-compose.production-assets.yml" "$@"
 }
 
+cleanup_gate() {
+  compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+}
+trap cleanup_gate EXIT
+
 wait_for_streaming() {
   local deadline=$((SECONDS + 180))
   while ((SECONDS < deadline)); do
@@ -79,6 +84,95 @@ compose exec -T -e PGPASSWORD=blackbox_application_password yugabytedb_ysql \
   >"$output_dir/startup-session-settings.tsv"
 [[ $(tr -d '\r' <"$output_dir/startup-session-settings.tsv") == $'UTF8\tUTC\tbenchbase\trepeatable read\toff' ]]
 
+(
+  export BLACKBOX_BACKEND=yugabytedb_ysql
+  export BLACKBOX_BENCHMARK=ycsb
+  export BLACKBOX_DOCKER=docker
+  export BLACKBOX_YSQL_SLOT_NAME=production_asset_slot
+  export BLACKBOX_YSQL_PUBLICATION_NAME=production_asset_publication
+  export BLACKBOX_YSQL_CAPTURE_TABLES=benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn
+  # shellcheck source=scripts/blackbox_lifecycle.sh
+  . "$script_dir/../../scripts/blackbox_lifecycle.sh"
+  BLACKBOX_DATABASE_CONTAINER=connector-contract-yugabytedb-ysql
+  BLACKBOX_CONNECTOR_CONTAINER=connector-contract-debezium-server
+  blackbox_compose() {
+    docker compose --file "$script_dir/docker-compose.yml" \
+      --file "$script_dir/docker-compose.production-assets.yml" "$@"
+  }
+  wait_for_no_external_sessions() {
+    local deadline=$((SECONDS + 5))
+    while ((SECONDS < deadline)); do
+      [[ $(blackbox_backend_active_external_connections | tr -d '[:space:]') == 0 ]] &&
+        return 0
+      sleep 0.05
+    done
+    blackbox_backend_admin_query \
+      "SELECT pid, datname, usename, application_name, state, left(query, 160) FROM pg_stat_activity WHERE pid <> pg_backend_pid() ORDER BY datname, usename, pid" \
+      >"$output_dir/external-session-timeout.txt" || true
+    return 1
+  }
+
+  blackbox_backend_verify_schema
+  blackbox_backend_capture_security_catalog \
+    >"$output_dir/security-catalog-startup.txt"
+  wait_for_no_external_sessions
+
+  blackbox_compose exec -T -e PGPASSWORD=blackbox_setup_password \
+    -e PGAPPNAME=privilege_gate_setup \
+    yugabytedb_ysql bin/ysqlsh --host yugabytedb_ysql \
+    --username blackbox_setup --dbname benchbase --no-psqlrc \
+    --set ON_ERROR_STOP=on --command "SELECT pg_sleep(10)" \
+    >"$output_dir/external-ddl-session.log" 2>&1 &
+  external_session_pid=$!
+  blackbox_compose exec -T -e PGAPPNAME=privilege_gate_admin \
+    yugabytedb_ysql bin/ysqlsh --host yugabytedb_ysql \
+    --username yugabyte --dbname yugabyte --no-psqlrc \
+    --set ON_ERROR_STOP=on --command "SELECT pg_sleep(10)" \
+    >"$output_dir/external-admin-session.log" 2>&1 &
+  external_admin_pid=$!
+  external_count=0
+  deadline=$((SECONDS + 5))
+  while ((SECONDS < deadline)); do
+    external_count=$(blackbox_backend_active_external_connections | tr -d '[:space:]')
+    (( external_count >= 2 )) && break
+    sleep 0.05
+  done
+  printf '%s\n' "$external_count" >"$output_dir/external-ddl-session-count.txt"
+  (( external_count >= 2 ))
+  blackbox_backend_admin_query \
+    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name IN ('privilege_gate_setup','privilege_gate_admin') AND pid <> pg_backend_pid()" \
+    >/dev/null
+  wait "$external_session_pid" 2>/dev/null || true
+  wait "$external_admin_pid" 2>/dev/null || true
+  wait_for_no_external_sessions
+
+  blackbox_backend_admin_query \
+    "GRANT CREATE ON SCHEMA benchbase TO blackbox_application" >/dev/null
+  blackbox_backend_capture_security_catalog \
+    >"$output_dir/security-catalog-with-unauthorized-create.txt"
+  if blackbox_backend_verify_schema \
+      >"$output_dir/privilege-negative.log" 2>&1; then
+    echo "schema CREATE privilege unexpectedly passed verification" >&2
+    exit 1
+  fi
+  blackbox_backend_admin_query \
+    "REVOKE CREATE ON SCHEMA benchbase FROM blackbox_application" >/dev/null
+  blackbox_backend_verify_schema
+  blackbox_backend_capture_security_catalog \
+    >"$output_dir/security-catalog-restored.txt"
+  cmp "$output_dir/security-catalog-startup.txt" \
+    "$output_dir/security-catalog-restored.txt"
+  sha256sum \
+    "$output_dir/security-catalog-startup.txt" \
+    "$output_dir/security-catalog-with-unauthorized-create.txt" \
+    "$output_dir/security-catalog-restored.txt" \
+    >"$output_dir/security-catalog-digests.txt"
+  startup_digest=$(sha256sum "$output_dir/security-catalog-startup.txt" | cut -d' ' -f1)
+  unauthorized_digest=$(sha256sum \
+    "$output_dir/security-catalog-with-unauthorized-create.txt" | cut -d' ' -f1)
+  [[ $startup_digest != "$unauthorized_digest" ]]
+)
+
 compose exec -T -e PGPASSWORD=blackbox_application_password yugabytedb_ysql \
   bin/ysqlsh --host yugabytedb_ysql --username blackbox_application \
   --dbname benchbase --no-psqlrc --set ON_ERROR_STOP=on \
@@ -124,4 +218,5 @@ python3 "$script_dir/verify_raw_contract.py" --plugin pgoutput \
   sha256sum --check SHA256SUMS
 )
 compose down --volumes --remove-orphans
+trap - EXIT
 echo "production YugabyteDB asset gate evidence preserved at $output_dir"
