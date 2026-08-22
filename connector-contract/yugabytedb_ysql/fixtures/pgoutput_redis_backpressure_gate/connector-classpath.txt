@@ -1,4 +1,0 @@
-/debezium/lib/yugabytedb-source-connector-dz.2.5.2.yb.2026.1.jar
-4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98  /debezium/lib/yugabytedb-source-connector-dz.2.5.2.yb.2026.1.jar
-io/debezium/connector/postgresql/YugabyteDBConnector.class
-io/debezium/connector/postgresql/YugabyteDBConnector.class
