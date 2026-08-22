@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -11,13 +12,122 @@ from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[1] / "connector-contract" / "yugabytedb_ysql"
-FIXTURE = ROOT / "fixtures" / "pgoutput_opaque_transaction_id_mismatch" / "redis-stream.json"
-LIVE_CAPTURES = (
-    ("pgoutput_cross_tablet_batching_gate", 2, 1),
-    ("pgoutput_concurrent_commit_order_gate", 3, 2),
-    ("pgoutput_redis_backpressure_gate", 2, 12),
-    ("pgoutput_production_assets_gate_v3", 2, 1),
-)
+
+
+def canonical_capture() -> list[list[object]]:
+    def encoded_entry(
+        stream_id: str, key: dict[str, object], value: dict[str, object]
+    ) -> list[object]:
+        return [
+            stream_id,
+            [
+                json.dumps(key, separators=(",", ":")),
+                json.dumps(value, separators=(",", ":")),
+            ],
+        ]
+
+    def source(table: str, sequence: int) -> dict[str, object]:
+        return {
+            "version": "dz.2.5.2.yb.2026.1",
+            "connector": "postgresql",
+            "name": "connector_contract",
+            "ts_ms": 1,
+            "snapshot": "false",
+            "db": "benchbase",
+            "sequence": f'["1","{sequence}"]',
+            "schema": "benchbase",
+            "table": table,
+            "txId": 1,
+            "lsn": sequence,
+            "xmin": None,
+            "origin": None,
+            "origin_lsn": None,
+        }
+
+    def row(
+        stream_id: str,
+        table: str,
+        key: dict[str, object],
+        after: dict[str, object],
+        total_order: int,
+        collection_order: int,
+    ) -> list[object]:
+        return encoded_entry(
+            stream_id,
+            key,
+            {
+                "before": None,
+                "after": after,
+                "source": source(table, total_order + 1),
+                "op": "c",
+                "ts_ms": 1,
+                "transaction": {
+                    "id": f"row-diagnostic-{total_order}",
+                    "total_order": total_order,
+                    "data_collection_order": collection_order,
+                },
+            },
+        )
+
+    user_one: dict[str, object] = {"ycsb_key": 1}
+    user_two: dict[str, object] = {"ycsb_key": 2}
+    for index in range(1, 11):
+        user_one[f"field{index}"] = "alpha" if index == 1 else None
+        user_two[f"field{index}"] = "beta" if index == 1 else None
+
+    return [
+        encoded_entry(
+            "1-0",
+            {"id": "begin-diagnostic"},
+            {
+                "status": "BEGIN",
+                "id": "begin-diagnostic",
+                "event_count": None,
+                "data_collections": None,
+                "ts_ms": 1,
+            },
+        ),
+        row("2-0", "usertable", {"ycsb_key": 1}, user_one, 1, 1),
+        row("3-0", "usertable", {"ycsb_key": 2}, user_two, 2, 2),
+        row(
+            "4-0",
+            "checker_run_fence",
+            {"run_id": "00000000-0000-0000-0000-000000000001", "phase": "TEST"},
+            {
+                "run_id": "00000000-0000-0000-0000-000000000001",
+                "phase": "TEST",
+                "nonce": "00000000-0000-0000-0000-000000000002",
+            },
+            3,
+            1,
+        ),
+        row(
+            "5-0",
+            "session_txn",
+            {"session_id": "cross_tablet"},
+            {"session_id": "cross_tablet", "txn_id": 1},
+            4,
+            1,
+        ),
+        encoded_entry(
+            "6-0",
+            {"id": "end-diagnostic"},
+            {
+                "status": "END",
+                "id": "end-diagnostic",
+                "event_count": 4,
+                "data_collections": [
+                    {"data_collection": "benchbase.usertable", "event_count": 2},
+                    {
+                        "data_collection": "benchbase.checker_run_fence",
+                        "event_count": 1,
+                    },
+                    {"data_collection": "benchbase.session_txn", "event_count": 1},
+                ],
+                "ts_ms": 1,
+            },
+        ),
+    ]
 
 
 class YugabyteYsqlConnectorContractTest(unittest.TestCase):
@@ -39,7 +149,7 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
     def mutated_capture(
         self, mutate: Callable[[list[list[object]]], None], expected_violation: str
     ) -> None:
-        capture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        capture = canonical_capture()
         mutate(capture)
         with tempfile.TemporaryDirectory(prefix="yugabytedb-ysql-contract-test-") as temporary:
             path = Path(temporary) / "redis-stream.json"
@@ -64,34 +174,106 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
         subprocess.run([sys.executable, str(ROOT / "verify_provenance.py")], check=True)
 
     def test_captured_pgoutput_fixture_accepts_cross_record_id_variation(self) -> None:
-        result = self.run_verifier(FIXTURE, "--redis-batch-size", "1000")
+        with tempfile.TemporaryDirectory(prefix="opaque-id-raw-fixture-") as temporary:
+            capture = Path(temporary) / "redis-stream.json"
+            capture.write_text(json.dumps(canonical_capture()), encoding="utf-8")
+            result = self.run_verifier(capture, "--redis-batch-size", "1000")
         summary = json.loads(result.stdout)
         self.assertEqual(summary["completed_transactions"], 1)
-        self.assertEqual(summary["frames"][0]["frame_identity"], "1787413277950-0")
+        self.assertEqual(summary["frames"][0]["frame_identity"], "1-0")
         self.assertEqual(summary["frames"][0]["marker"], {"session_id": "cross_tablet", "txn_id": 1})
         self.assertNotIn("opaque_transaction_id", summary)
 
-    def test_live_gate_captures_and_artifact_manifests_pass(self) -> None:
-        for directory, redis_batch_size, completed_transactions in LIVE_CAPTURES:
-            with self.subTest(directory=directory):
-                capture_dir = ROOT / "fixtures" / directory
-                result = self.run_verifier(
-                    capture_dir / "redis-stream.json",
+    def test_capture_report_requires_independent_ordering_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="missing-order-evidence-") as temporary:
+            capture = Path(temporary) / "redis-stream.json"
+            capture.write_text(json.dumps(canonical_capture()), encoding="utf-8")
+            metadata = {
+                "capture_id": "synthetic",
+                "captured_at_utc": "2026-01-01T00:00:00Z",
+                "scenario": "cross_tablet_marker_last",
+                "platform": "linux/amd64",
+                "plugin": "pgoutput",
+                "slot_lsn_type": "SEQUENCE",
+                "streaming_mode": "default",
+                "logical_slots": 1,
+                "publication_count": 1,
+                "publication_name": "connector_contract_publication",
+                "connector_tasks": 1,
+                "redis_streams": ["cdc"],
+                "source_max_batch_size": 2,
+                "redis_sink_batch_size": 2,
+                "database_image": "pinned",
+                "database_binary_version": "pinned",
+                "database_build_hash": "0" * 40,
+                "connector_version": "dz.2.5.2.yb.2026.1",
+                "connector_sha256": "0" * 64,
+                "debezium_server_version": "2.5.2.Final",
+                "java_runtime_version": "21",
+                "redis_version": "7",
+                "locally_built_image_id": "sha256:" + "0" * 64,
+                "expected_completed_transactions": [
+                    {"session_id": "cross_tablet", "txn_id": 1}
+                ],
+                "gate": {
+                    "name": "raw_connector_redis_contract",
+                    "status": "PASSED",
+                    "decision_boundary": (
+                        "Connector IDs, source.txId, LSN, and HybridTime are diagnostic metadata only; "
+                        "the verifier frames only the unique contiguous BEGIN/rows/END interval and "
+                        "correlates completed frames only by the SQL-last client marker."
+                    ),
+                },
+                "file_sha256": {
+                    "redis-stream.json": hashlib.sha256(capture.read_bytes()).hexdigest()
+                },
+            }
+            capture.with_name("capture-metadata.json").write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+            self.run_verifier(
+                capture,
+                "--redis-batch-size",
+                "2",
+                "--expect-violation",
+                "INDEPENDENT_ORDER_EVIDENCE_MISSING",
+            )
+
+    def test_connector_output_extractor_uses_monitor_commands_not_expected_order(self) -> None:
+        capture = canonical_capture()
+        monitor_lines = ["OK"]
+        for sequence, entry in enumerate(capture, start=1):
+            fields = entry[1]
+            assert isinstance(fields, list)
+            command = ["XADD", "cdc", "*", fields[0], fields[1]]
+            monitor_lines.append(
+                f"{sequence}.0 [0 connector:6379] "
+                + " ".join(json.dumps(token) for token in command)
+            )
+        with tempfile.TemporaryDirectory(prefix="connector-output-extractor-") as temporary:
+            monitor = Path(temporary) / "redis-monitor.log"
+            monitor.write_text("\n".join(monitor_lines) + "\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "extract_connector_output.py"),
                     "--redis-batch-size",
-                    str(redis_batch_size),
-                )
-                summary = json.loads(result.stdout)
-                self.assertEqual(summary["completed_transactions"], completed_transactions)
-                subprocess.run(
-                    ["sha256sum", "--check", "SHA256SUMS"],
-                    check=True,
-                    cwd=capture_dir,
-                    text=True,
-                    capture_output=True,
-                )
+                    "2",
+                    str(monitor),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+        evidence = json.loads(result.stdout)
+        self.assertEqual(evidence["source"], "redis_monitor_connector_xadd_order")
+        self.assertEqual(
+            evidence["completed_transactions"],
+            [{"session_id": "cross_tablet", "txn_id": 1}],
+        )
 
     def test_arbitrary_bounded_cross_record_ids_remain_diagnostic_only(self) -> None:
-        capture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        capture = canonical_capture()
         for index in (0, 5):
             fields = capture[index][1]
             assert isinstance(fields, list)
@@ -171,7 +353,7 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
             value = self.value(capture, 5)
             collections = value["data_collections"]
             assert isinstance(collections, list)
-            collection = collections[1]
+            collection = collections[0]
             assert isinstance(collection, dict)
             collection["event_count"] = 1
             self.replace_value(capture, 5, value)

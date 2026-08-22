@@ -202,14 +202,47 @@ def load_capture_metadata(capture_path: Path, plugin: str, redis_batch_size: int
     )
     require(metadata["connector_version"] == SOURCE_VERSION, "SOURCE_VERSION_MISMATCH", "metadata connector version differs")
     if metadata["scenario"] == "redis_backpressure":
+        backpressure = metadata.get("backpressure")
         require(
-            metadata.get("backpressure")
+            isinstance(backpressure, dict)
+            and set(backpressure)
             == {
-                "redis_client_pause_write_ms": 750,
-                "transport_errors_observed": False,
+                "mechanism",
+                "requested_pause_ms",
+                "pause_started_monotonic_ns",
+                "workload_commits_completed_monotonic_ns",
+                "connector_xadd_observed_monotonic_ns",
+                "explicit_unpause_monotonic_ns",
+                "connector_xadd_observed_during_pause",
+                "stream_length_before_pause",
+                "stream_length_while_connector_blocked",
+                "stream_length_after_unpause",
+                "transport_errors_observed",
             },
-            "FIXTURE_METADATA_INVALID",
-            "Redis backpressure evidence differs",
+            "BACKPRESSURE_EVIDENCE_INVALID",
+            "Redis backpressure evidence fields differ",
+        )
+        assert isinstance(backpressure, dict)
+        ordered_times = [
+            backpressure["pause_started_monotonic_ns"],
+            backpressure["workload_commits_completed_monotonic_ns"],
+            backpressure["connector_xadd_observed_monotonic_ns"],
+            backpressure["explicit_unpause_monotonic_ns"],
+        ]
+        require(
+            backpressure["mechanism"] == "redis_client_pause_write"
+            and type(backpressure["requested_pause_ms"]) is int
+            and backpressure["requested_pause_ms"] > 0
+            and all(type(value) is int and value > 0 for value in ordered_times)
+            and ordered_times == sorted(ordered_times)
+            and backpressure["connector_xadd_observed_during_pause"] is True
+            and backpressure["stream_length_before_pause"] == 0
+            and backpressure["stream_length_while_connector_blocked"] == 0
+            and type(backpressure["stream_length_after_unpause"]) is int
+            and backpressure["stream_length_after_unpause"] > 0
+            and backpressure["transport_errors_observed"] is False,
+            "BACKPRESSURE_EVIDENCE_INVALID",
+            "Redis WRITE pause did not demonstrably overlap connector output",
         )
     else:
         require("backpressure" not in metadata, "FIXTURE_METADATA_INVALID", "unexpected backpressure evidence")
@@ -231,6 +264,26 @@ def load_capture_metadata(capture_path: Path, plugin: str, redis_batch_size: int
     checksums = metadata["file_sha256"]
     require(isinstance(checksums, dict) and bool(checksums), "FIXTURE_METADATA_INVALID", "file_sha256 is absent")
     require("redis-stream.json" in checksums, "FIXTURE_METADATA_INVALID", "Redis capture checksum is absent")
+    for independent_name in (
+        "commit-order.json",
+        "connector-output-order.json",
+        "redis-monitor.log",
+    ):
+        require(
+            independent_name in checksums,
+            "INDEPENDENT_ORDER_EVIDENCE_MISSING",
+            f"independent ordering artifact is absent: {independent_name}",
+        )
+    if metadata["scenario"] == "redis_backpressure":
+        for evidence_name in (
+            "backpressure-evidence.json",
+            "redis-paused-clients.txt",
+        ):
+            require(
+                evidence_name in checksums,
+                "BACKPRESSURE_EVIDENCE_INVALID",
+                f"backpressure artifact is absent: {evidence_name}",
+            )
     for name, expected in checksums.items():
         require(
             isinstance(name, str) and Path(name).name == name,
@@ -284,11 +337,24 @@ def load_capture_metadata(capture_path: Path, plugin: str, redis_batch_size: int
         order_evidence = json.loads((capture_path.parent / "commit-order.json").read_text(encoding="utf-8"))
         require(
             isinstance(order_evidence, dict)
-            and order_evidence.get("source") == "ysqlsh_commit_acknowledgement_order"
+            and order_evidence.get("source") == "observed_ysqlsh_commit_acknowledgements"
             and order_evidence.get("completed_transactions") == metadata["expected_completed_transactions"],
             "FIXTURE_METADATA_INVALID",
             "commit acknowledgement evidence differs from the capture report",
         )
+    connector_evidence = json.loads(
+        (capture_path.parent / "connector-output-order.json").read_text(encoding="utf-8")
+    )
+    require(
+        isinstance(connector_evidence, dict)
+        and connector_evidence.get("source") == "redis_monitor_connector_xadd_order"
+        and connector_evidence.get("completed_transactions")
+        == metadata["expected_completed_transactions"]
+        and type(connector_evidence.get("xadd_commands")) is int
+        and connector_evidence["xadd_commands"] > 0,
+        "COMPLETED_TRANSACTION_ORDER_MISMATCH",
+        "independently captured connector output order differs from the capture report",
+    )
     if "redis-streams.txt" in checksums:
         streams = (capture_path.parent / "redis-streams.txt").read_text(encoding="utf-8").splitlines()
         require(streams == ["cdc"], "CAPTURE_TOPOLOGY_INVALID", f"Redis stream roster differs: {streams}")

@@ -18,13 +18,6 @@ DECISION_BOUNDARY = (
 )
 
 
-def completed_transaction(value: str) -> dict[str, Any]:
-    session_id, separator, txn_id_text = value.rpartition(":")
-    if not separator or not session_id or not txn_id_text.isdigit() or int(txn_id_text) <= 0:
-        raise argparse.ArgumentTypeError("completed transactions must use nonempty-session:positive-txn-id")
-    return {"session_id": session_id, "txn_id": int(txn_id_text)}
-
-
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -35,12 +28,10 @@ def main() -> int:
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--redis-batch-size", type=int, required=True)
     parser.add_argument("--source-batch-size", type=int, required=True)
-    parser.add_argument("--completed", type=completed_transaction, action="append", required=True)
-    parser.add_argument("--backpressure-ms", type=int, default=0)
     args = parser.parse_args()
 
-    if args.redis_batch_size <= 0 or args.source_batch_size <= 0 or args.backpressure_ms < 0:
-        parser.error("batch sizes must be positive and backpressure must be nonnegative")
+    if args.redis_batch_size <= 0 or args.source_batch_size <= 0:
+        parser.error("batch sizes must be positive")
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -60,13 +51,22 @@ def main() -> int:
     if build_hash_match is None:
         raise SystemExit("database build hash is absent")
 
-    order_evidence = {
-        "source": "ysqlsh_commit_acknowledgement_order",
-        "completed_transactions": args.completed,
-    }
-    (output_dir / "commit-order.json").write_text(
-        json.dumps(order_evidence, indent=2) + "\n", encoding="utf-8"
+    order_evidence = json.loads((output_dir / "commit-order.json").read_text(encoding="utf-8"))
+    connector_evidence = json.loads(
+        (output_dir / "connector-output-order.json").read_text(encoding="utf-8")
     )
+    application_order = order_evidence.get("completed_transactions")
+    connector_order = connector_evidence.get("completed_transactions")
+    if (
+        order_evidence.get("source") != "observed_ysqlsh_commit_acknowledgements"
+        or connector_evidence.get("source") != "redis_monitor_connector_xadd_order"
+        or not isinstance(application_order, list)
+        or not application_order
+        or connector_order != application_order
+    ):
+        raise SystemExit(
+            "application acknowledgements and independently captured connector output differ"
+        )
 
     timestamp = datetime.now(timezone.utc)
     metadata: dict[str, Any] = {
@@ -93,23 +93,22 @@ def main() -> int:
         "java_runtime_version": artifacts["java_runtime"]["version"],
         "redis_version": artifacts["redis"]["version"],
         "locally_built_image_id": local_image_id,
-        "expected_completed_transactions": args.completed,
+        "expected_completed_transactions": connector_order,
         "gate": {
             "name": "raw_connector_redis_contract",
             "status": "PASSED",
             "decision_boundary": DECISION_BOUNDARY,
         },
     }
-    if args.backpressure_ms:
-        metadata["backpressure"] = {
-            "redis_client_pause_write_ms": args.backpressure_ms,
-            "transport_errors_observed": False,
-        }
+    if args.scenario == "redis_backpressure":
+        metadata["backpressure"] = json.loads(
+            (output_dir / "backpressure-evidence.json").read_text(encoding="utf-8")
+        )
 
     metadata["file_sha256"] = {
         path.name: sha256(path)
         for path in sorted(output_dir.iterdir())
-        if path.is_file() and path.name != "capture-metadata.json"
+        if path.is_file() and path.name not in {"capture-metadata.json", "SHA256SUMS"}
     }
     (output_dir / "capture-metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"

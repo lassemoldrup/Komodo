@@ -6,7 +6,7 @@ readonly script_dir
 readonly scenario=${1:-cross_tablet_marker_last}
 readonly redis_batch_size=${2:-2}
 readonly source_batch_size=${CONNECTOR_CONTRACT_SOURCE_BATCH_SIZE:-2}
-readonly backpressure_ms=750
+readonly backpressure_ms=5000
 readonly capture_timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 readonly output_dir=${3:-"$script_dir/fixtures/pgoutput-${scenario}-${capture_timestamp}"}
 readonly plugin=pgoutput
@@ -89,9 +89,65 @@ wait_for_application_query() {
         | tr -d '\r' | grep -qx '1'; then
       return
     fi
-    sleep 1
+    sleep 0.05
   done
   echo "did not observe $application_name executing $query_pattern" >&2
+  return 1
+}
+
+start_connector_output_monitor() {
+  : >"$output_dir/redis-monitor.log"
+  compose exec -T redis redis-cli --raw MONITOR \
+    >"$output_dir/redis-monitor.log" 2>&1 &
+  connector_monitor_pid=$!
+  local deadline=$((SECONDS + 20))
+  while ((SECONDS < deadline)); do
+    if grep -qx 'OK' "$output_dir/redis-monitor.log"; then
+      return
+    fi
+    if ! kill -0 "$connector_monitor_pid" 2>/dev/null; then
+      echo "Redis MONITOR exited before acknowledging capture" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+  echo "timed out waiting for Redis MONITOR" >&2
+  return 1
+}
+
+stop_connector_output_monitor() {
+  if [[ -n ${connector_monitor_pid:-} ]] && kill -0 "$connector_monitor_pid" 2>/dev/null; then
+    local monitor_client_id
+    monitor_client_id=$(compose exec -T redis redis-cli --raw CLIENT LIST 2>/dev/null |
+      awk '/(^| )cmd=monitor( |$)/ { for (i = 1; i <= NF; ++i) if ($i ~ /^id=/) { sub(/^id=/, "", $i); print $i } }')
+    if [[ $monitor_client_id =~ ^[1-9][0-9]*$ ]]; then
+      compose exec -T redis redis-cli --raw CLIENT KILL ID "$monitor_client_id" \
+        >/dev/null 2>&1 || true
+    else
+      kill "$connector_monitor_pid" 2>/dev/null || true
+    fi
+    wait "$connector_monitor_pid" 2>/dev/null || true
+  fi
+  connector_monitor_pid=
+}
+
+redis_stream_length() {
+  compose exec -T redis redis-cli --raw XLEN cdc | tr -d '\r[:space:]'
+}
+
+wait_for_paused_connector_write() {
+  local deadline=$((SECONDS + 4))
+  : >"$output_dir/redis-paused-clients.txt"
+  while ((SECONDS < deadline)); do
+    compose exec -T redis redis-cli --raw CLIENT LIST \
+      >"$output_dir/redis-paused-clients.txt"
+    if grep -Eqi '(^| )cmd=xadd( |$)' "$output_dir/redis-paused-clients.txt"; then
+      connector_write_observed_ns=$(date +%s%N)
+      return
+    fi
+    sleep 0.05
+  done
+  echo "connector XADD did not overlap the Redis WRITE pause" >&2
   return 1
 }
 
@@ -115,7 +171,7 @@ run_cross_tablet_marker_last() {
   ysql_application contract_cross_tablet \
     --file /connector-contract/workload/cross_tablet_marker_last.sql \
     >"$output_dir/workload.log" 2>&1
-  completed_transactions=(cross_tablet:1)
+  commit_order_logs=("$output_dir/workload.log")
 }
 
 run_concurrent_commit_order() {
@@ -138,22 +194,39 @@ run_concurrent_commit_order() {
     --set session_id=commit_b \
     --set txn_id=1 \
     >"$output_dir/commit-b.log" 2>&1
-  completed_transactions=(commit_b:1)
   wait "$commit_a_pid"
-  completed_transactions+=(commit_a:1)
+  commit_order_logs=("$output_dir/commit-b.log" "$output_dir/commit-a.log")
 }
 
 run_redis_backpressure() {
-  compose exec -T redis redis-cli CLIENT PAUSE "$backpressure_ms" WRITE \
-    >"$output_dir/redis-backpressure.log" 2>&1
+  local workload_pid
   ysql_application contract_backpressure \
     --file /connector-contract/workload/backpressure_commit_order.sql \
-    >"$output_dir/workload.log" 2>&1
-  completed_transactions=()
-  local txn_id
-  for txn_id in $(seq 1 12); do
-    completed_transactions+=("backpressure:$txn_id")
-  done
+    --set start_delay_seconds=2 \
+    >"$output_dir/workload.log" 2>&1 &
+  workload_pid=$!
+  wait_for_application_query contract_backpressure 'SELECT pg_sleep%'
+
+  stream_length_before=$(redis_stream_length)
+  [[ $stream_length_before == 0 ]] || {
+    echo "Redis stream was not empty before backpressure" >&2
+    return 1
+  }
+  pause_started_ns=$(date +%s%N)
+  compose exec -T redis redis-cli CLIENT PAUSE "$backpressure_ms" WRITE \
+    >"$output_dir/redis-backpressure.log" 2>&1
+  wait "$workload_pid"
+  workload_committed_ns=$(date +%s%N)
+  wait_for_paused_connector_write
+  stream_length_during=$(redis_stream_length)
+  [[ $stream_length_during == "$stream_length_before" ]] || {
+    echo "Redis stream advanced while connector XADD was paused" >&2
+    return 1
+  }
+  compose exec -T redis redis-cli CLIENT UNPAUSE \
+    >>"$output_dir/redis-backpressure.log" 2>&1
+  unpause_ns=$(date +%s%N)
+  commit_order_logs=("$output_dir/workload.log")
 }
 
 preserve_evidence() {
@@ -208,11 +281,25 @@ preserve_evidence() {
 }
 
 mkdir -p -- "$output_dir"
-declare -a completed_transactions=()
+declare -a commit_order_logs=()
+connector_monitor_pid=
+pause_started_ns=
+workload_committed_ns=
+connector_write_observed_ns=
+unpause_ns=
+stream_length_before=
+stream_length_during=
+
+cleanup_capture() {
+  stop_connector_output_monitor
+  compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+}
+trap cleanup_capture EXIT
 
 compose down --volumes --remove-orphans
 compose up --detach --build
 wait_for_streaming
+start_connector_output_monitor
 
 case "$scenario" in
   cross_tablet_marker_last) run_cross_tablet_marker_last ;;
@@ -220,7 +307,30 @@ case "$scenario" in
   redis_backpressure) run_redis_backpressure ;;
 esac
 
-wait_for_ends "${#completed_transactions[@]}"
+python3 "$script_dir/extract_commit_order.py" "${commit_order_logs[@]}" \
+  >"$output_dir/commit-order.json"
+expected_completed_transactions=$(jq -er '.completed_transactions | length' \
+  "$output_dir/commit-order.json")
+wait_for_ends "$expected_completed_transactions"
+if [[ "$scenario" == redis_backpressure ]]; then
+  stream_length_after=$(redis_stream_length)
+  python3 "$script_dir/write_backpressure_evidence.py" \
+    --pause-ms "$backpressure_ms" \
+    --pause-start-ns "$pause_started_ns" \
+    --workload-committed-ns "$workload_committed_ns" \
+    --connector-write-observed-ns "$connector_write_observed_ns" \
+    --unpause-ns "$unpause_ns" \
+    --stream-length-before "$stream_length_before" \
+    --stream-length-during "$stream_length_during" \
+    --stream-length-after "$stream_length_after" \
+    --client-list "$output_dir/redis-paused-clients.txt" \
+    >"$output_dir/backpressure-evidence.json"
+fi
+stop_connector_output_monitor
+python3 "$script_dir/extract_connector_output.py" \
+  --redis-batch-size "$redis_batch_size" \
+  "$output_dir/redis-monitor.log" \
+  >"$output_dir/connector-output-order.json"
 preserve_evidence
 
 python3 "$script_dir/verify_provenance.py"
@@ -235,12 +345,6 @@ metadata_arguments=(
   --redis-batch-size "$redis_batch_size"
   --source-batch-size "$source_batch_size"
 )
-if [[ "$scenario" == redis_backpressure ]]; then
-  metadata_arguments+=(--backpressure-ms "$backpressure_ms")
-fi
-for completed in "${completed_transactions[@]}"; do
-  metadata_arguments+=(--completed "$completed")
-done
 python3 "$script_dir/write_capture_metadata.py" "${metadata_arguments[@]}"
 
 python3 "$script_dir/verify_raw_contract.py" \
@@ -256,4 +360,5 @@ python3 "$script_dir/verify_raw_contract.py" \
 )
 
 compose down --volumes --remove-orphans
+trap - EXIT
 echo "connector-contract evidence preserved at $output_dir"

@@ -15,3 +15,4 @@ VALUES (
 INSERT INTO session_txn (session_id, txn_id)
 VALUES ('cross_tablet', 1);
 COMMIT;
+\echo ACK cross_tablet 1
