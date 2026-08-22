@@ -535,6 +535,85 @@ if [[ ${LEAVE_ACTIVE_CONNECTION:-0} == 1 ]]; then
 fi
 SCRIPT
 
+  mkdir -p "$case_root/drivers"
+  cat >"$case_root/drivers/template.sh" <<'DRIVER'
+mock_driver_gate() {
+  printf 'driver:%s\n' "$1" >>"$EVENT_LOG"
+  [[ ${FAIL_DRIVER_OPERATION:-} != "$1" ]]
+}
+blackbox_backend_initialize() {
+  mock_driver_gate initialize || return 1
+  BLACKBOX_COMPOSE_PROFILE=$BLACKBOX_BACKEND
+  BLACKBOX_DATABASE_SERVICE=database
+  BLACKBOX_DATABASE_CONTAINER=database-container
+  BLACKBOX_CONNECTOR_SERVICE=connector
+  BLACKBOX_CONNECTOR_CONTAINER=connector-container
+  BLACKBOX_DB_PORT=1
+  BLACKBOX_DB_USER=application
+  BLACKBOX_DB_PASSWORD=password
+  BLACKBOX_BACKEND_SOURCE_ID=$MOCK_SOURCE_ID
+}
+blackbox_backend_prepare_run() { mock_driver_gate prepare_run; }
+blackbox_backend_require_commands() { mock_driver_gate require_commands; }
+blackbox_backend_database() { mock_driver_gate database; }
+blackbox_backend_database_query() {
+  mock_driver_gate database_query || return 1
+  if [[ $1 != *"ORDER BY"*"ycsb_key"* ]]; then
+    printf '0\n'
+  fi
+}
+blackbox_backend_capture_schema_metadata() {
+  mock_driver_gate capture_schema_metadata
+}
+blackbox_backend_verify_schema() {
+  mock_driver_gate verify_schema || return 1
+  blackbox_backend_capture_schema_metadata >/dev/null
+}
+blackbox_backend_count_table() {
+  mock_driver_gate count_table || return 1
+  case "$1" in
+    benchbase.session_txn) cat "$MARKER_ROWS_FILE" ;;
+    benchbase.usertable) printf '%s\n' "${OBSERVED_LOADER_ROWS:-0}" ;;
+    *) printf '0\n' ;;
+  esac
+}
+blackbox_backend_commit_fence() {
+  mock_driver_gate commit_fence || return 1
+  printf 'fence:%s\n' "$2" >>"$EVENT_LOG"
+}
+blackbox_backend_active_external_connections() {
+  mock_driver_gate active_external_connections || return 1
+  cat "$ACTIVE_CONNECTIONS_FILE"
+}
+blackbox_backend_wait_for_connector_progress() {
+  mock_driver_gate wait_for_connector_progress
+}
+blackbox_backend_capture_attestation_inputs() {
+  mock_driver_gate capture_attestation_inputs || return 1
+  python3 "$BLACKBOX_RECORD_TOOL" attestation-tables \
+    --benchmark "$BLACKBOX_BENCHMARK" >"$1"
+  jq '.backend_facts' "$MOCK_ATTESTATION_EXAMPLE" >"$2"
+}
+blackbox_backend_start_database_schema() {
+  mock_driver_gate start_database_schema || return 1
+  printf 'stack:database\n' >>"$EVENT_LOG"
+}
+blackbox_backend_start_connector() {
+  mock_driver_gate start_connector || return 1
+  printf 'stack:cdc\n' >>"$EVENT_LOG"
+}
+blackbox_backend_teardown() {
+  mock_driver_gate teardown || return 1
+  printf 'stack:teardown\n' >>"$EVENT_LOG"
+}
+blackbox_backend_status() {
+  mock_driver_gate status || return 1
+  printf 'status:healthy\n'
+}
+DRIVER
+  cp "$case_root/drivers/template.sh" "$case_root/drivers/mariadb.sh"
+  cp "$case_root/drivers/template.sh" "$case_root/drivers/yugabytedb_ysql.sh"
+
   chmod +x "$case_root/bin/"*
 }
 
@@ -565,6 +644,9 @@ run_case() {
   local declared_loader_rows=${16:-0}
   local bootstrap_state_rows=${17:-}
   local bootstrap_state_bytes=${18:-}
+  local backend=${19:-mariadb}
+  local use_mock_driver=${20:-0}
+  local fail_driver_operation=${21:-}
   local case_root="$TEST_ROOT/$name"
   mkdir -p "$case_root"
   write_test_programs "$case_root"
@@ -586,6 +668,20 @@ run_case() {
   export OBSERVED_LOADER_ROWS=$observed_loader_rows
   export LOADER_DECLARED_ROWS=$declared_loader_rows
 
+  local backend_driver_dir=
+  local attestation_example=
+  local source_id=
+  if (( use_mock_driver == 1 )); then
+    backend_driver_dir="$case_root/drivers"
+    if [[ $backend == yugabytedb_ysql ]]; then
+      attestation_example="$ROOT/protocol/examples/backends/yugabytedb-ysql-schema-attestation.json"
+      source_id=yugabytedb-ysql-main
+    else
+      attestation_example="$ROOT/protocol/examples/schema-attestation-startup.json"
+      source_id=mariadb-main
+    fi
+  fi
+
   local metrics_path=
   local run_id_path=
   local bootstrap_manifest_path=
@@ -599,6 +695,11 @@ run_case() {
 
   local status
   if BLACKBOX_DOCKER="$case_root/bin/docker" \
+      BLACKBOX_BACKEND="$backend" \
+      BLACKBOX_BACKEND_DRIVER_DIR="$backend_driver_dir" \
+      MOCK_ATTESTATION_EXAMPLE="$attestation_example" \
+      MOCK_SOURCE_ID="$source_id" \
+      FAIL_DRIVER_OPERATION="$fail_driver_operation" \
       BLACKBOX_LIVE_LOCK_TARGET="$case_root" \
       BLACKBOX_REDIS_CLI="$case_root/bin/redis-cli" \
       BLACKBOX_MARIADB_CLI="$case_root/bin/mariadb" \
@@ -927,5 +1028,38 @@ grep -q '^fence:END_FENCE$' "$CASE_LOG" || fail 'quiescent marker contamination 
 if grep -q '^fence:LOAD_FINISHED$\|^phase:workload$' "$CASE_LOG"; then
   fail 'loader marker contamination advanced into LOAD_FINISHED/workload'
 fi
+
+run_mock_backend_case() {
+  local name=$1 backend=$2 failure=${3:-}
+  run_case "$name" 0 0 0 0 0 0 '' audited 0 '' '' ycsb 128 0 0 '' '' \
+    "$backend" 1 "$failure"
+}
+
+run_mock_backend_case coordinator_mariadb mariadb
+mariadb_status=$CASE_STATUS
+mariadb_events=$CASE_LOG
+mariadb_root=$CASE_ROOT
+run_mock_backend_case coordinator_yugabytedb_ysql yugabytedb_ysql
+[[ $mariadb_status == 0 && $CASE_STATUS == 0 ]] ||
+  fail "dual-backend coordinator clean paths did not both succeed: MariaDB=$mariadb_status ($(cat "$mariadb_root/stderr")); YugabyteDB=$CASE_STATUS ($(cat "$CASE_ROOT/stderr"))"
+diff -u "$mariadb_events" "$CASE_LOG" ||
+  fail 'MariaDB and YugabyteDB did not execute the same coordinator state machine'
+
+for operation in initialize prepare_run require_commands database_query \
+  capture_schema_metadata verify_schema count_table commit_fence \
+  active_external_connections wait_for_connector_progress \
+  capture_attestation_inputs start_database_schema start_connector teardown; do
+  run_mock_backend_case "failure_mariadb_$operation" mariadb "$operation"
+  mariadb_status=$CASE_STATUS
+  mariadb_events=$CASE_LOG
+  run_mock_backend_case "failure_yugabytedb_ysql_$operation" \
+    yugabytedb_ysql "$operation"
+  [[ $mariadb_status != 0 && $CASE_STATUS != 0 ]] ||
+    fail "driver failure did not stop both coordinators: $operation"
+  [[ $mariadb_status == "$CASE_STATUS" ]] ||
+    fail "driver failure exit status differs by backend: $operation"
+  diff -u "$mariadb_events" "$CASE_LOG" ||
+    fail "driver failure propagated differently by backend: $operation"
+done
 
 echo 'lifecycle tests passed'
