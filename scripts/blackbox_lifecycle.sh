@@ -9,10 +9,10 @@ BLACKBOX_RECORD_TOOL="$BLACKBOX_ROOT/scripts/blackbox_record.py"
 BLACKBOX_REDIS_HOST=${BLACKBOX_REDIS_HOST:-host.docker.internal}
 BLACKBOX_REDIS_PORT=${BLACKBOX_REDIS_PORT:-6379}
 BLACKBOX_DB_HOST=${BLACKBOX_DB_HOST:-host.docker.internal}
-BLACKBOX_DB_PORT=${BLACKBOX_DB_PORT:-3306}
-BLACKBOX_DB_USER=${BLACKBOX_DB_USER:-app}
-BLACKBOX_DB_PASSWORD=${BLACKBOX_DB_PASSWORD:-app_pw}
-BLACKBOX_BACKEND_SOURCE_ID=${BLACKBOX_BACKEND_SOURCE_ID:-mariadb-main}
+BLACKBOX_DB_PORT=${BLACKBOX_DB_PORT:-}
+BLACKBOX_DB_USER=${BLACKBOX_DB_USER:-}
+BLACKBOX_DB_PASSWORD=${BLACKBOX_DB_PASSWORD:-}
+BLACKBOX_BACKEND_SOURCE_ID=${BLACKBOX_BACKEND_SOURCE_ID:-}
 BLACKBOX_BACKEND=${BLACKBOX_BACKEND:-mariadb}
 BLACKBOX_BENCHMARK=${BLACKBOX_BENCHMARK:-ycsb}
 BLACKBOX_DECLARED_ISOLATION=${BLACKBOX_DECLARED_ISOLATION:-REPEATABLE_READ}
@@ -26,8 +26,6 @@ BLACKBOX_STATUS_TIMEOUT_SECONDS=${BLACKBOX_STATUS_TIMEOUT_SECONDS:-120}
 BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS=${BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS:-30}
 
 BLACKBOX_REDIS_CLI=${BLACKBOX_REDIS_CLI:-redis-cli}
-BLACKBOX_MARIADB_CLI=${BLACKBOX_MARIADB_CLI:-mariadb}
-
 STATUS_CURSOR=0-0
 MATCHED_STATUS=
 STATUS_TERMINAL_SEEN=0
@@ -48,6 +46,37 @@ blackbox_die() {
 blackbox_require_command() {
   command -v "$1" >/dev/null 2>&1 || blackbox_die "required command not found: $1"
 }
+
+
+blackbox_load_backend_driver() {
+  [[ $BLACKBOX_BACKEND =~ ^[A-Za-z][A-Za-z0-9_]{0,63}$ ]] || {
+    blackbox_die "backend name is not a bounded registry identifier"
+    return 1
+  }
+  local driver_root=${BLACKBOX_BACKEND_DRIVER_DIR:-$BLACKBOX_ROOT/scripts/backends}
+  local driver="$driver_root/$BLACKBOX_BACKEND.sh"
+  [[ -f $driver ]] || {
+    blackbox_die "registered coordinator backend driver is missing: $driver"
+    return 1
+  }
+  # shellcheck disable=SC1090
+  . "$driver"
+  local operation
+  for operation in initialize prepare_run require_commands database \
+    database_query capture_schema_metadata verify_schema count_table commit_fence \
+    active_application_connections wait_for_connector_progress \
+    capture_attestation_inputs start_database_schema start_connector teardown \
+    status; do
+    declare -F "blackbox_backend_$operation" >/dev/null || {
+      blackbox_die "backend driver lacks operation: $operation"
+      return 1
+    }
+  done
+  blackbox_backend_initialize
+}
+
+
+blackbox_load_backend_driver
 
 
 blackbox_acquire_live_stack_lock() {
@@ -144,24 +173,18 @@ blackbox_verify_redis_configuration() {
 
 
 blackbox_database() {
-  "$BLACKBOX_MARIADB_CLI" \
-    --skip-ssl \
-    --host="$BLACKBOX_DB_HOST" \
-    --port="$BLACKBOX_DB_PORT" \
-    --user="$BLACKBOX_DB_USER" \
-    --password="$BLACKBOX_DB_PASSWORD" \
-    --database=benchbase \
-    --default-character-set=utf8mb4 \
-    --init-command="${BLACKBOX_SET_NAMES_SQL:-SET NAMES utf8mb4 COLLATE utf8mb4_bin}" \
-    --batch \
-    --raw \
-    --skip-column-names \
-    "$@"
+  blackbox_backend_database "$@"
 }
 
 
 blackbox_database_query() {
-  blackbox_database --execute "$1"
+  blackbox_backend_database_query "$1"
+}
+
+
+blackbox_compose() {
+  "$BLACKBOX_DOCKER" compose --file "$BLACKBOX_ROOT/docker-compose.yml" \
+    --profile "$BLACKBOX_COMPOSE_PROFILE" "$@"
 }
 
 
@@ -176,56 +199,12 @@ blackbox_backend_contract() {
 
 
 blackbox_capture_schema_metadata() {
-  blackbox_database_query "
-    SELECT 'SETTING', 'server.character_set', @@GLOBAL.character_set_server
-    UNION ALL SELECT 'SETTING', 'server.collation', @@GLOBAL.collation_server
-    UNION ALL SELECT 'SETTING', 'server.time_zone', @@GLOBAL.time_zone
-    UNION ALL SELECT 'SETTING', 'server.sql_mode', @@GLOBAL.sql_mode
-    UNION ALL SELECT 'SETTING', 'server.transaction_isolation', @@GLOBAL.transaction_isolation
-    UNION ALL SELECT 'SETTING', 'server.snapshot_isolation', @@GLOBAL.innodb_snapshot_isolation
-    UNION ALL SELECT 'SETTING', 'session.character_set_client', @@SESSION.character_set_client
-    UNION ALL SELECT 'SETTING', 'session.character_set_connection', @@SESSION.character_set_connection
-    UNION ALL SELECT 'SETTING', 'session.character_set_results', @@SESSION.character_set_results
-    UNION ALL SELECT 'SETTING', 'session.collation_connection', @@SESSION.collation_connection
-    UNION ALL SELECT 'SETTING', 'session.time_zone', @@SESSION.time_zone
-    UNION ALL SELECT 'SETTING', 'session.sql_mode', @@SESSION.sql_mode
-    UNION ALL SELECT 'SETTING', 'session.transaction_isolation', @@SESSION.transaction_isolation
-    UNION ALL SELECT 'SETTING', 'session.snapshot_isolation', @@SESSION.innodb_snapshot_isolation"
-  blackbox_database_query "
-    SELECT 'DATABASE', SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME
-      FROM information_schema.SCHEMATA
-     WHERE SCHEMA_NAME = 'benchbase'"
-  blackbox_database_query "
-    SELECT 'TABLE', CONCAT(TABLE_SCHEMA, '.', TABLE_NAME), ENGINE, TABLE_COLLATION
-      FROM information_schema.TABLES
-     WHERE TABLE_SCHEMA = 'benchbase'
-     ORDER BY TABLE_NAME"
-  blackbox_database_query "
-    SELECT 'COLUMN', CONCAT(TABLE_SCHEMA, '.', TABLE_NAME), COLUMN_NAME,
-           ORDINAL_POSITION, LOWER(DATA_TYPE), IS_NULLABLE,
-           COALESCE(CAST(NUMERIC_PRECISION AS CHAR), '-'),
-           COALESCE(CAST(NUMERIC_SCALE AS CHAR), '-'),
-           COALESCE(CAST(CHARACTER_MAXIMUM_LENGTH AS CHAR), '-'),
-           COALESCE(CAST(DATETIME_PRECISION AS CHAR), '-'),
-           COALESCE(CHARACTER_SET_NAME, '-'), COALESCE(COLLATION_NAME, '-'),
-           COALESCE(NULLIF(EXTRA, ''), '-')
-      FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA = 'benchbase'
-     ORDER BY TABLE_NAME, ORDINAL_POSITION"
-  blackbox_database_query "
-    SELECT 'PRIMARY', CONCAT(TABLE_SCHEMA, '.', TABLE_NAME), COLUMN_NAME,
-           ORDINAL_POSITION
-      FROM information_schema.KEY_COLUMN_USAGE
-     WHERE TABLE_SCHEMA = 'benchbase' AND CONSTRAINT_NAME = 'PRIMARY'
-     ORDER BY TABLE_NAME, ORDINAL_POSITION"
+  blackbox_backend_capture_schema_metadata
 }
 
 
 blackbox_verify_schema_metadata() {
-  blackbox_capture_schema_metadata |
-    python3 "$BLACKBOX_RECORD_TOOL" schema-check \
-      --backend "$BLACKBOX_BACKEND" \
-      --benchmark "$BLACKBOX_BENCHMARK"
+  blackbox_backend_verify_schema
 }
 
 
@@ -253,7 +232,7 @@ blackbox_build_loader_plan() {
 blackbox_capture_loader_observations() {
   local query_document
   query_document=$(python3 "$BLACKBOX_RECORD_TOOL" loader-queries \
-    --benchmark "$BLACKBOX_BENCHMARK") || return 1
+    --backend "$BLACKBOX_BACKEND" --benchmark "$BLACKBOX_BENCHMARK") || return 1
   local encoded_queries
   encoded_queries=$(jq -er '.queries[] | @base64' <<<"$query_document") || {
     blackbox_die "adapter loader query document is malformed"
@@ -351,6 +330,7 @@ blackbox_build_run_manifest() {
   local args=(
     run-manifest
     --run-id "$BLACKBOX_ACTIVE_RUN_ID"
+    --backend "$BLACKBOX_BACKEND"
     --backend-source-id "$BLACKBOX_BACKEND_SOURCE_ID"
     --declared-isolation "$BLACKBOX_DECLARED_ISOLATION"
     --benchmark "$BLACKBOX_BENCHMARK"
@@ -360,6 +340,31 @@ blackbox_build_run_manifest() {
     args+=(--session-id "$session_id")
   done
   python3 "$BLACKBOX_RECORD_TOOL" "${args[@]}"
+}
+
+
+blackbox_build_schema_attestation() {
+  local phase=$1
+  [[ $phase == STARTUP || $phase == FINAL ]] || return 2
+  local tables_file facts_file
+  tables_file=$(mktemp /tmp/blackbox-attestation-tables.XXXXXX) || return 1
+  facts_file=$(mktemp /tmp/blackbox-attestation-facts.XXXXXX) || {
+    rm -f -- "$tables_file"
+    return 1
+  }
+  if ! blackbox_backend_capture_attestation_inputs "$tables_file" "$facts_file"; then
+    rm -f -- "$tables_file" "$facts_file"
+    return 1
+  fi
+  local record_status=0
+  python3 "$BLACKBOX_RECORD_TOOL" schema-attestation \
+    --run-id "$BLACKBOX_ACTIVE_RUN_ID" --phase "$phase" \
+    --backend "$BLACKBOX_BACKEND" \
+    --backend-source-id "$BLACKBOX_BACKEND_SOURCE_ID" \
+    --benchmark "$BLACKBOX_BENCHMARK" \
+    --tables-file "$tables_file" --facts-file "$facts_file" || record_status=$?
+  rm -f -- "$tables_file" "$facts_file"
+  return "$record_status"
 }
 
 
@@ -375,9 +380,7 @@ blackbox_commit_fence() {
 
   local nonce
   nonce=$(blackbox_new_uuid)
-  blackbox_database_query \
-    "START TRANSACTION; INSERT INTO checker_run_fence (run_id, phase, nonce) VALUES ('$BLACKBOX_ACTIVE_RUN_ID', '$phase', '$nonce'); COMMIT;" \
-    >/dev/null
+  blackbox_backend_commit_fence "$BLACKBOX_ACTIVE_RUN_ID" "$phase" "$nonce"
 }
 
 
@@ -385,7 +388,7 @@ blackbox_capture_bootstrap_scan() {
   local output_path=$1
   local query_document
   query_document=$(python3 "$BLACKBOX_RECORD_TOOL" bootstrap-queries \
-    --benchmark "$BLACKBOX_BENCHMARK") || return 1
+    --backend "$BLACKBOX_BACKEND" --benchmark "$BLACKBOX_BENCHMARK") || return 1
   local encoded_queries
   encoded_queries=$(jq -er '.queries[] | @base64' <<<"$query_document") || {
     blackbox_die "adapter bootstrap query document is malformed"
@@ -523,8 +526,7 @@ blackbox_session_has_processes() {
 
 blackbox_active_application_connections() {
   local count
-  count=$(blackbox_database_query \
-    "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER = '$BLACKBOX_DB_USER' AND DB = 'benchbase' AND ID <> CONNECTION_ID()") || return 1
+  count=$(blackbox_backend_active_application_connections) || return 1
   count=${count//[[:space:]]/}
   [[ $count =~ ^[0-9]+$ ]] || {
     blackbox_die "invalid active-connection count: $count"

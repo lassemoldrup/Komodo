@@ -356,42 +356,18 @@ def scan_json_lines(
     return rows, counts
 
 
-def quote_sql_identifier(identifier: str) -> str:
-    if IDENTIFIER.fullmatch(identifier) is None:
-        fail("row_shape", f"SQL identifier is not canonical: {identifier}")
-    return f"`{identifier}`"
-
-
-def bootstrap_select_queries(codec: TpccCodec) -> list[dict[str, str]]:
-    queries: list[dict[str, str]] = []
+def bootstrap_query_plan(codec: TpccCodec) -> list[dict[str, Any]]:
+    queries: list[dict[str, Any]] = []
     for table_name in codec.contract["application_tables"]:
         table = codec.table(table_name)
-        schema_name, _, unqualified_table = table_name.partition(".")
-        row_arguments: list[str] = []
-        for column in table["columns"]:
-            name = column["name"]
-            rendered_column = quote_sql_identifier(name)
-            sql_type = column["sql_type"]
-            if DECIMAL_TYPE.fullmatch(sql_type) is not None or sql_type == "FLOAT":
-                expression = f"CAST({rendered_column} AS CHAR)"
-            elif sql_type == "TIMESTAMP":
-                expression = f"DATE_FORMAT({rendered_column}, '%Y-%m-%dT%H:%i:%sZ')"
-            else:
-                expression = rendered_column
-            row_arguments.extend((f"'{name}'", expression))
-        row_object = "JSON_OBJECT(" + ", ".join(row_arguments) + ")"
-        order = ", ".join(quote_sql_identifier(column) for column in table["key_columns"])
-        sql = (
-            "SELECT JSON_OBJECT('table', '"
-            + table_name
-            + "', 'row', "
-            + row_object
-            + ") FROM "
-            + quote_sql_identifier(schema_name)
-            + "."
-            + quote_sql_identifier(unqualified_table)
-            + " ORDER BY "
-            + order
+        queries.append(
+            {
+                "table": table_name,
+                "columns": [
+                    {"name": column["name"], "sql_type": column["sql_type"]}
+                    for column in table["columns"]
+                ],
+                "order_by": table["key_columns"],
+            }
         )
-        queries.append({"table": table_name, "sql": sql})
     return queries

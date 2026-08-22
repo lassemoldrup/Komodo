@@ -1,0 +1,31 @@
+ARG DEBEZIUM_SERVER_IMAGE=quay.io/debezium/server@sha256:e4a41c33d252d6a358ea18e3e58c680e03d76970ee2edf3b7bd021ce75555296
+ARG JAVA_RUNTIME_IMAGE=docker.io/library/eclipse-temurin@sha256:c984fca94ab42452795a0bee45a35a92318390a673d890b8216e9677ac21aa37
+
+FROM ${DEBEZIUM_SERVER_IMAGE} AS debezium_distribution
+FROM ${JAVA_RUNTIME_IMAGE}
+
+ARG YUGABYTEDB_CONNECTOR_VERSION=dz.2.5.2.yb.2026.1
+ARG YUGABYTEDB_CONNECTOR_SHA256=4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98
+ARG YUGABYTEDB_CONNECTOR_URL=https://github.com/yugabyte/debezium/releases/download/dz.2.5.2.yb.2026.1/yugabytedb-source-connector-dz.2.5.2.yb.2026.1-jar-with-dependencies.jar
+
+COPY --from=debezium_distribution /debezium /debezium
+ADD ${YUGABYTEDB_CONNECTOR_URL} /tmp/yugabytedb-source-connector.jar
+
+RUN set -eux; \
+    echo "${YUGABYTEDB_CONNECTOR_SHA256}  /tmp/yugabytedb-source-connector.jar" \
+      | sha256sum --check --strict; \
+    rm -f /debezium/lib/debezium-connector-postgres-*.jar /debezium/lib/postgresql-*.jar; \
+    mv /tmp/yugabytedb-source-connector.jar \
+      "/debezium/lib/yugabytedb-source-connector-${YUGABYTEDB_CONNECTOR_VERSION}.jar"; \
+    test "$(find /debezium/lib -maxdepth 1 -type f -name 'yugabytedb-source-connector-*.jar' | wc -l)" -eq 1; \
+    test "$(find /debezium/lib -maxdepth 1 -type f -name 'debezium-connector-postgres-*.jar' | wc -l)" -eq 0; \
+    test "$(find /debezium/lib -maxdepth 1 -type f -name 'postgresql-*.jar' | wc -l)" -eq 0; \
+    mkdir -p /debezium/data /debezium/conf; \
+    chmod -R a+rX,u+w /debezium
+
+LABEL org.opencontainers.image.title="YugabyteDB YSQL Debezium Server" \
+      org.opencontainers.image.version="dz.2.5.2.yb.2026.1" \
+      org.opencontainers.image.revision="5c37f3575d4c2f690155d91886746527ab298bd2"
+
+WORKDIR /debezium
+CMD ["/debezium/run.sh"]

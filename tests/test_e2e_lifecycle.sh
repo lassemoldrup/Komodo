@@ -28,7 +28,9 @@ if [[ $1 == compose ]]; then
   exit 0
 fi
 if [[ $1 == inspect ]]; then
-  if [[ $* == *Health* ]]; then
+  if [[ $* == *'.Image'* ]]; then
+    printf 'sha256:%064d\n' 1
+  elif [[ $* == *Health* ]]; then
     echo healthy
   else
     echo running
@@ -37,6 +39,8 @@ if [[ $1 == inspect ]]; then
 fi
 if [[ $1 == logs ]]; then
   echo 'Starting streaming'
+  echo 'connector.class = io.debezium.connector.mariadb.MariaDbConnector'
+  echo 'debezium-server-dist 3.6.1.Final'
   exit 0
 fi
 exit 2
@@ -106,7 +110,7 @@ METADATA
     printf 'PRIMARY\tbenchbase.session_txn\tsession_id\t1\n'
     printf 'PRIMARY\tbenchbase.usertable\tycsb_key\t1\n'
     ;;
-  *"COUNT(*) FROM session_txn"*)
+  *"COUNT(*) FROM "*"session_txn"*)
     cat "$MARKER_ROWS_FILE"
     ;;
   *"COUNT(*) FROM "*"benchbase"*"usertable"*)
@@ -115,16 +119,22 @@ METADATA
   *"COUNT(*) FROM "*"usertable"*)
     echo 0
     ;;
-  *"COUNT(*) FROM checker_run_fence"*)
+  *"COUNT(*) FROM "*"checker_run_fence"*)
     echo 0
     ;;
   *"@@innodb_snapshot_isolation"*)
     echo 1
     ;;
+  *"information_schema.PROCESSLIST"*"USER = 'debezium'"*)
+    echo 1
+    ;;
   *"information_schema.PROCESSLIST"*)
     cat "$ACTIVE_CONNECTIONS_FILE"
     ;;
-  *"SELECT ycsb_key,"*)
+  *"SHOW GRANTS FOR 'app'"*)
+    echo 'GRANT SELECT, INSERT, UPDATE, DELETE ON benchbase.* TO app'
+    ;;
+  *"TO_BASE64"*"usertable"*)
     : # Empty bootstrap state.
     ;;
   *"INSERT INTO checker_run_fence"*)
@@ -182,7 +192,10 @@ if record["kind"] == "run_manifest":
     assert record["application_table_allowlist"] == ["benchbase.usertable"]
     assert record["transaction_marker_table"] == "benchbase.session_txn"
     assert record["result_scope"] == "point_transaction_soww"
-print(record["kind"])
+if record["kind"] == "schema_attestation":
+    print(record["kind"] + ":" + record["phase"])
+else:
+    print(record["kind"])
 ' "$payload")
     echo "publish:$kind" >>"$EVENT_LOG"
     counter=1
@@ -202,7 +215,9 @@ print(record["kind"])
     if [[ $cursor != 3-0 ]] && grep -q '^publish:run_failed$' "$EVENT_LOG"; then
       lifecycle=FINAL
       entry_id=3-0
-    elif [[ $cursor == 0-0 && ${SUPPRESS_START_ACK:-0} != 1 ]] && grep -q '^fence:RUN_START$' "$EVENT_LOG"; then
+    elif [[ $cursor == 0-0 && ${SUPPRESS_START_ACK:-0} != 1 ]] && \
+        grep -q '^publish:schema_attestation:STARTUP$' "$EVENT_LOG" && \
+        grep -q '^fence:RUN_START$' "$EVENT_LOG"; then
       lifecycle=START_FENCE_SEEN
       entry_id=1-0
     elif [[ $cursor == 1-0 && ${EMIT_LIFECYCLE_REGRESSION:-0} == 1 ]]; then
@@ -211,7 +226,9 @@ print(record["kind"])
     elif [[ $cursor == 1-0 ]] && grep -q '^fence:LOAD_FINISHED$' "$EVENT_LOG"; then
       lifecycle=LOAD_FINISHED_SEEN
       entry_id=2-0
-    elif [[ $cursor == 2-0 ]] && { grep -q '^fence:END_FENCE$' "$EVENT_LOG" || grep -q '^publish:run_failed$' "$EVENT_LOG"; }; then
+    elif [[ $cursor == 2-0 ]] && \
+        grep -q '^publish:schema_attestation:FINAL$' "$EVENT_LOG" && \
+        { grep -q '^fence:END_FENCE$' "$EVENT_LOG" || grep -q '^publish:run_failed$' "$EVENT_LOG"; }; then
       lifecycle=FINAL
       entry_id=3-0
     fi
@@ -248,6 +265,9 @@ record = {
 if lifecycle == "FINAL":
     record["reconciliation"] = {
         "evidence_reconciled": not failed,
+        "startup_schema_attested": True,
+        "final_schema_attested": True,
+        "schema_attestation_digest": "0" * 64,
         "bootstrap_manifest_validated": True,
         "end_fence_seen": end_seen,
         "expected_sessions": 1,
@@ -636,6 +656,7 @@ run_case clean 0
 [[ $CASE_STATUS == 0 ]] || fail "clean lifecycle exited $CASE_STATUS: $(cat "$TEST_ROOT/clean/stderr")"
 
 manifest_line=$(line_of 'publish:run_manifest' "$CASE_LOG")
+startup_schema_line=$(line_of 'publish:schema_attestation:STARTUP' "$CASE_LOG")
 start_fence_line=$(line_of 'fence:RUN_START' "$CASE_LOG")
 start_ack_line=$(line_of 'status:START_FENCE_SEEN' "$CASE_LOG")
 loader_line=$(line_of 'phase:loader' "$CASE_LOG")
@@ -644,13 +665,16 @@ load_fence_line=$(line_of 'fence:LOAD_FINISHED' "$CASE_LOG")
 load_ack_line=$(line_of 'status:LOAD_FINISHED_SEEN' "$CASE_LOG")
 workload_line=$(line_of 'phase:workload' "$CASE_LOG")
 end_fence_line=$(line_of 'fence:END_FENCE' "$CASE_LOG")
+final_schema_line=$(line_of 'publish:schema_attestation:FINAL' "$CASE_LOG")
 final_line=$(line_of 'status:FINAL' "$CASE_LOG")
 
-(( manifest_line < start_fence_line )) || fail 'RunManifest was not published before RUN_START'
+(( manifest_line < startup_schema_line && startup_schema_line < start_fence_line )) ||
+  fail 'RunManifest/STARTUP attestation were not published before RUN_START'
 (( start_fence_line < start_ack_line && start_ack_line < loader_line )) || fail 'loader bypassed START acknowledgement'
 (( loader_line < bootstrap_line && bootstrap_line < load_fence_line )) || fail 'bootstrap manifest/fence order is wrong'
 (( load_fence_line < load_ack_line && load_ack_line < workload_line )) || fail 'workload bypassed LOAD acknowledgement'
-(( workload_line < end_fence_line && end_fence_line < final_line )) || fail 'END/final order is wrong'
+(( workload_line < end_fence_line && end_fence_line < final_schema_line && final_schema_line < final_line )) ||
+  fail 'END_FENCE/FINAL attestation/final-result order is wrong'
 [[ $(jq -r '.loader_batch_size' "$CASE_ROOT/loader-validation.json") == 128 ]] ||
   fail 'loader validation did not record the default batch size'
 [[ $(jq -r '.benchmark' "$CASE_ROOT/loader-declaration.json") == ycsb ]] ||

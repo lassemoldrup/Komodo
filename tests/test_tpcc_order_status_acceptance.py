@@ -233,6 +233,9 @@ class TpccOrderStatusAcceptanceTest(unittest.TestCase):
         }
         reconciliation = {
             "evidence_reconciled": True,
+            "startup_schema_attested": True,
+            "final_schema_attested": True,
+            "schema_attestation_digest": "0" * 64,
             "bootstrap_manifest_validated": True,
             "end_fence_seen": True,
             "expected_sessions": 1,

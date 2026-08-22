@@ -2,9 +2,10 @@
 
 CDC harness for monitoring isolation anomalies under Snapshot Isolation.
 
-Debezium captures the **commit order** of transactions and the **values written**
-by each write, into a single ordered Redis stream. The workload client logs its
-own **read events**. The two halves are joined on a per-transaction key.
+Debezium captures committed writes into one Redis stream. A backend's completed
+transaction order is accepted as commit order only after its pinned connector
+and transport contract passes the backend-specific gate. The workload client
+logs its own **read events**; the halves join only on the client-created marker.
 
 Three interchangeable backends, one shared downstream half. Exactly one backend
 runs at a time and all write to the same stream, so the monitor reads one place.
@@ -15,20 +16,20 @@ runs at a time and all write to the same stream, so the monitor reads one place.
    Oracle      --LogMiner-------/
 ```
 
-All three use the **same** client-supplied transaction id, so the monitor never
-branches on backend.
+All backends use the same client marker `(run_id, session_id, txn_id)`.
+Connector IDs and source positions are diagnostic metadata only.
 
-| Backend | Version | Capture latency |
+| Backend | Pinned database/connector | Audited status |
 |---|---|---|
-| MariaDB | 12.3 | ~10 ms |
-| YugabyteDB | latest | ~40 ms |
-| Oracle | 23.26 (26ai) | ~2 s |
+| MariaDB | 12.3 / Debezium 3.6.1 | live-gated |
+| YugabyteDB YSQL | 2025.2.5.2-b5 / dz.2.5.2.yb.2026.1 | Milestone 9 gated |
+| Oracle | exploratory assets only | not admitted |
 
 ## Quick start
 
 ```bash
 make up                  # MariaDB (default); blocks until Debezium is streaming
-make up DB=yugabyte
+make up DB=yugabytedb_ysql
 make up DB=oracle
 
 make txn                 # one write transaction, prints its correlation marker
@@ -592,18 +593,19 @@ resource samples remain under that output root on the artifact volume.
 
 ## Constraints
 
-**All backends** — durability is deliberately disabled (tmpfs datadirs,
-`sync_binlog=0`). This affects crash recovery only, never isolation semantics.
+**Run scope** — every audited run uses a coordinated fresh database, connector
+offset store, Redis stream, client, and monitor epoch. Restart/recovery and
+durability claims remain outside the audited result.
 
 **MariaDB** — clients need `--skip-ssl`; the 11.8+ client requires TLS and the
 listeners here are plaintext.
 
-**YugabyteDB** — all schema must exist before the replication slot is created;
-DDL against a live slot permanently breaks before-image computation and the
-connector then retries forever without failing. `yugabyte/init.sh` enforces the
-order. The slot must be `HYBRID_TIME`, and the tserver runs with
-`cdc_enable_intra_transactional_before_image=true`; without it, touching a row
-again after inserting it in the same transaction stalls the connector.
+**YugabyteDB** — the accepted assets create the complete empty `benchbase`
+schema, set every captured table to `REPLICA IDENTITY FULL`, create one explicit
+publication, and only then create one run-owned `pgoutput` logical slot with
+`yb_lsn_type=SEQUENCE`. Dedicated setup, application, and replication roles
+prevent workload/connector DDL. Both before-image flags are pinned so unavailable
+predecessor evidence fails rather than becoming a fake SQL null.
 
 **Oracle** — needs ARCHIVELOG, force logging, and `SUPPLEMENTAL LOG DATA (ALL)
 COLUMNS` per table (the equivalent of `REPLICA IDENTITY FULL`);
@@ -612,9 +614,10 @@ under RAC each node keeps its own redo thread and commit ordering across threads
 is not guaranteed. Long-running transactions can be dropped silently by
 `log.mining.transaction.retention`.
 
-**Version pins** — MariaDB and Oracle run Debezium 3.6.1. YugabyteDB is pinned
-to Debezium 2.5.2 because Yugabyte publishes only `dz.2.5.2.yb.*` builds of
-their connector; a `dz.3.x.yb.*` tag would collapse the stack to one version.
+**Version pins** — YugabyteDB, Debezium Server, Java, Redis, and the official
+logical connector use immutable image digests/artifact checksums recorded in
+`connector-contract/yugabytedb_ysql/provenance.lock.json`. Upgrades reopen all
+Milestone 9 correctness gates.
 
 ## Database parameters
 
@@ -657,12 +660,14 @@ values (`back_log`, `thread_cache_size`, `max_relay_log_size`,
 | `ysql_yb_enable_replication_commands` | false | true | logical replication slots |
 | `ysql_yb_enable_replica_identity` | false | true | per-table replica identity |
 | `cdc_enable_intra_transactional_before_image` | false | true | before-images for rows written more than once in a transaction |
+| `cdc_send_null_before_image_if_not_exists` | true | false | unavailable predecessor data must fail closed |
 
 Plus `default_transaction_isolation` raised from `read committed` to
 `repeatable read` (= SI) with `ALTER DATABASE`.
 
-Per-table: `REPLICA IDENTITY FULL` (server default for new tables is `CHANGE`),
-and the slot is created with `yb_lsn_type=HYBRID_TIME` (default `SEQUENCE`).
+Per-table: `REPLICA IDENTITY FULL`; one explicit publication; one run-owned
+`pgoutput` slot with `yb_lsn_type=SEQUENCE`; one connector task and one `cdc`
+Redis stream.
 
 **Oracle** (`oracle/startdb.d/`)
 
@@ -681,17 +686,18 @@ system of record.
 ## Layout
 
 ```
-docker-compose.yml                        # profiles: mariadb | yugabyte | oracle
+docker-compose.yml                        # profiles: mariadb | yugabytedb_ysql | oracle
 mariadb/conf.d/cdc.cnf                    # binlog, isolation, durability, throughput
 mariadb/initdb/*.sql                      # accounts + benchmark-neutral controls
 mariadb/initdb/adapters/*.sql             # one selected application schema
-yugabyte/init.sql, init.sh                # schema first, HYBRID_TIME slot last
+yugabytedb_ysql/initdb/, init.sh          # empty schema/publication, SEQUENCE slot last
 oracle/startdb.d/                         # ARCHIVELOG, suppl. logging, user, schema
 debezium/application*.properties          # one per backend
-debezium/Dockerfile.yugabyte              # YB connector on a Java 17 base
+debezium/Dockerfile.yugabytedb-ysql       # checksum-verified connector on pinned Java 17
 scripts/lib.sh                            # backend detection, shared SQL helpers
-scripts/e2e.sh                            # sole MariaDB lifecycle coordinator
-scripts/blackbox_lifecycle.sh             # fences, Redis/status, scan helpers
+scripts/e2e.sh                            # sole backend-neutral lifecycle coordinator
+scripts/backends/                         # physical SQL/Compose/catalog drivers
+scripts/blackbox_lifecycle.sh             # generic fences, Redis/status, scan helpers
 scripts/blackbox_record.py                # manifests and bootstrap digest
 scripts/txn.sh                            # client protocol reference, all backends
 scripts/stream.sh                         # read/follow, handles all envelopes
@@ -699,15 +705,15 @@ scripts/bench.sh, sql.sh, status.sh
 monitor/                                  # C++ CDC reader, assembler, fixtures, tests
 ```
 
-The audited MariaDB path creates the selected adapter's exact initially empty
+The audited path creates the selected adapter's exact initially empty
 application-table roster plus `benchbase.checker_run_fence` and
 `benchbase.session_txn` before CDC starts. `BLACKBOX_BENCHMARK` selects the
-adapter contract and matching init SQL; the default remains `ycsb`. The
-`registers` table remains the exploratory workload table for the other backend
-profiles.
+adapter contract and matching init SQL; the default remains `ycsb`.
 
 ## Credentials
 
 Development defaults, plaintext. MariaDB `root`/`rootpw`, `debezium`/`debezium_pw`,
-`app`/`app_pw`. YugabyteDB `yugabyte`/`yugabyte`. Oracle `sys`/`oraclepw`,
+`app`/`app_pw`. YugabyteDB application
+`blackbox_application`/`blackbox_application_password` and replication
+`blackbox_replication`/`blackbox_replication_password`. Oracle `sys`/`oraclepw`,
 `c##dbzuser`/`dbz`, `sitest`/`sitestpw`.

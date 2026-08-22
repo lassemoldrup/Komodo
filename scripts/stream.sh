@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Read the CDC stream. Backend-agnostic: handles both the MariaDB (Debezium
-# 3.2) and YugabyteDB (Debezium 2.5.2) envelope shapes.
+# Read the raw CDC stream for the admitted connector profiles.
 #
 #   ./scripts/stream.sh              # dump everything so far, readable
 #   ./scripts/stream.sh -f           # follow live (Ctrl-C to stop)
@@ -34,16 +33,10 @@ import json, sys
 RAW = '"$RAW"'
 OPS = {"r": "read", "c": "insert", "u": "update", "d": "delete"}
 
-def unwrap(v):
-    # YugabyteDB wraps every column as {"value": X, "set": true}
-    if isinstance(v, dict) and "value" in v and "set" in v:
-        return v["value"]
-    return v
-
 def row(d):
     if not isinstance(d, dict):
         return d
-    return {k: unwrap(v) for k, v in d.items()}
+    return d
 
 for line in sys.stdin:
     line = line.strip()

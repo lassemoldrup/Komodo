@@ -1,23 +1,23 @@
 name: si-monitoring
 
 # CDC pipeline for Snapshot Isolation anomaly monitoring. Three interchangeable
-# backends, one shared downstream half:
+# backend profiles, one shared downstream half:
 #
 #   MariaDB    --binlog--------------\
-#   YugabyteDB --logical repl (HT)-----+-- Debezium Server --> Redis "cdc" --> C++ monitor
+#   YugabyteDB --one SEQUENCE slot------+-- Debezium Server --> Redis "cdc" --> C++ monitor
 #   Oracle     --LogMiner (commit SCN)/
 #
 # Exactly one backend runs at a time; all write to the same Redis stream, so
 # the monitor reads one place regardless of backend.
 #
 #   make up              # MariaDB   (default)
-#   make up DB=yugabyte  # YugabyteDB
+#   make up DB=yugabytedb_ysql  # YugabyteDB YSQL
 #   make up DB=oracle    # Oracle
 
 services:
   # ---------------------------------------------------------------- shared --
   redis:
-    image: redis:7-alpine
+    image: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
     container_name: cdc-redis
     # appendonly off + no RDB snapshots: the stream is a transient transport,
     # not a system of record. Removes fsync from the hot path.
@@ -90,62 +90,62 @@ services:
     networks: [cdc]
 
   # ------------------------------------------------------------ YugabyteDB --
-  yugabyte:
-    profiles: [yugabyte]
-    image: ${YUGABYTE_IMAGE:-yugabytedb/yugabyte:latest}
-    container_name: cdc-yugabyte
-    # cdc_enable_intra_transactional_before_image: without it, touching a row
-    # again after INSERTing it in the same transaction makes the CDC service
-    # fail to compute a before-image, and the connector then retries forever.
-    # See "Two operational rules" in the README.
+  yugabytedb_ysql:
+    profiles: [yugabytedb_ysql]
+    image: docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb
+    container_name: cdc-yugabytedb-ysql
     command: >
-      bin/yugabyted start --background=false
-      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true,cdc_enable_intra_transactional_before_image=true
+      bin/yugabyted start --background=false --callhome=false
+      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true,cdc_enable_intra_transactional_before_image=true,cdc_send_null_before_image_if_not_exists=false
     ports:
       - "5433:5433"
       - "15433:15433"
     healthcheck:
-      test: ["CMD", "bin/ysqlsh", "-h", "cdc-yugabyte", "-c", "SELECT 1"]
+      test: ["CMD", "bin/ysqlsh", "-h", "yugabytedb_ysql", "-U", "yugabyte", "-d", "yugabyte", "-c", "SELECT 1"]
       interval: 5s
       timeout: 10s
       retries: 40
       start_period: 30s
     networks: [cdc]
 
-  # Init must complete before the connector starts, and ORDER MATTERS:
-  # all schema first, replication slot last. DDL against a table with an
-  # active slot permanently breaks before-images (see README).
-  yugabyte-init:
-    profiles: [yugabyte]
-    image: ${YUGABYTE_IMAGE:-yugabytedb/yugabyte:latest}
-    container_name: cdc-yugabyte-init
+  yugabytedb_ysql_init:
+    profiles: [yugabytedb_ysql]
+    image: docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb
+    container_name: cdc-yugabytedb-ysql-init
     depends_on:
-      yugabyte:
+      yugabytedb_ysql:
         condition: service_healthy
-    entrypoint: ["/bin/bash", "/init/init.sh"]
+    entrypoint: ["/bin/bash", "/blackbox/init.sh"]
     environment:
-      YB_HOST: cdc-yugabyte
-      SLOT_NAME: ${YB_SLOT:-dbz_si}
+      BLACKBOX_YSQL_SLOT_NAME: ${BLACKBOX_YSQL_SLOT_NAME:-blackbox_slot}
+      BLACKBOX_YSQL_PUBLICATION_NAME: ${BLACKBOX_YSQL_PUBLICATION_NAME:-blackbox_publication}
+      BLACKBOX_YSQL_CAPTURE_TABLES: ${BLACKBOX_YSQL_CAPTURE_TABLES:-benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn}
     volumes:
-      - ./yugabyte:/init:ro
+      - ./yugabytedb_ysql/init.sh:/blackbox/init.sh:ro
+      - ./yugabytedb_ysql/initdb/02-common-schema.sql:/blackbox/common-schema.sql:ro
+      - ${BLACKBOX_ADAPTER_SCHEMA_FILE:-./yugabytedb_ysql/initdb/adapters/ycsb.sql}:/blackbox/adapter-schema.sql:ro
     restart: "no"
     networks: [cdc]
 
-  debezium-yb:
-    profiles: [yugabyte]
+  debezium_yugabytedb_ysql:
+    profiles: [yugabytedb_ysql]
     build:
       context: ./debezium
-      dockerfile: Dockerfile.yugabyte
-    image: si-dbz-yb:2.5.2
-    container_name: cdc-debezium-yb
+      dockerfile: Dockerfile.yugabytedb-ysql
+    image: db-monitoring/yugabytedb-ysql:dz.2.5.2.yb.2026.1
+    container_name: cdc-debezium-yugabytedb-ysql
     depends_on:
-      yugabyte-init:
+      yugabytedb_ysql_init:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    environment:
+      DEBEZIUM_SOURCE_SLOT_NAME: ${BLACKBOX_YSQL_SLOT_NAME:-blackbox_slot}
+      DEBEZIUM_SOURCE_PUBLICATION_NAME: ${BLACKBOX_YSQL_PUBLICATION_NAME:-blackbox_publication}
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${BLACKBOX_BACKEND_SOURCE_ID:-yugabytedb_ysql_main}
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${BLACKBOX_YSQL_CAPTURE_TABLES:-benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn}
     volumes:
-      # 2.5.2 reads /debezium/conf; the 3.x MariaDB server reads /debezium/config
-      - ./debezium/application-yugabyte.properties:/debezium/conf/application.properties:ro
+      - ./debezium/application-yugabytedb-ysql.properties:/debezium/conf/application.properties:ro
     tmpfs:
       - /debezium/data:rw,size=64m
     networks: [cdc]

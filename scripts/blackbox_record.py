@@ -24,6 +24,10 @@ from bootstrap_adapter_registry import (  # noqa: E402
     BootstrapAdapterError,
     BootstrapAdapterRegistry,
 )
+from backend_sql_renderer import (  # noqa: E402
+    BackendSqlRendererError,
+    BackendSqlRendererRegistry,
+)
 
 UUID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
@@ -34,6 +38,7 @@ ERROR_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,95}\Z")
 ADAPTER_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 
 BOOTSTRAP_DOMAIN = b"db-monitoring/bootstrap-state-digest\x00"
+SCHEMA_ATTESTATION_DOMAIN = b"db-monitoring/schema-attestation\x00"
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MAX_LOADER_BATCH_SIZE = 2_147_483_647
 LIFECYCLE_ORDER = (
@@ -350,15 +355,36 @@ def normalized_isolation(value: str) -> str:
 
 
 def require_schema_settings(metadata: dict[str, Any], backend: dict[str, Any]) -> None:
-    server = backend["server_defaults"]
-    session = backend["session_requirements"]
+    exact_facts = {
+        item["name"]: item["expected_value"]
+        for item in backend["attestation_fact_contract"]
+        if item["value_rule"] == "exact"
+    }
+    session = {
+        item["name"]: item["expected_value"]
+        for item in backend["session_contract"]["required_observations"]
+    }
+    required_fact_names = {
+        "server_character_set",
+        "server_collation",
+        "server_time_zone",
+        "server_sql_mode",
+        "server_transaction_isolation",
+        "server_snapshot_isolation",
+    }
+    require(
+        required_fact_names <= set(exact_facts),
+        "selected backend does not admit the legacy tabular metadata profile",
+    )
     expected = {
-        "server.character_set": server["character_set"],
-        "server.collation": server["collation"],
-        "server.time_zone": server["time_zone"],
-        "server.sql_mode": server["sql_mode"],
-        "server.transaction_isolation": server["transaction_isolation"],
-        "server.snapshot_isolation": "1" if server["snapshot_isolation"] else "0",
+        "server.character_set": exact_facts["server_character_set"],
+        "server.collation": exact_facts["server_collation"],
+        "server.time_zone": exact_facts["server_time_zone"],
+        "server.sql_mode": exact_facts["server_sql_mode"],
+        "server.transaction_isolation": exact_facts["server_transaction_isolation"],
+        "server.snapshot_isolation": "1"
+        if exact_facts["server_snapshot_isolation"] == "true"
+        else "0",
         "session.character_set_client": session["character_set_client"],
         "session.character_set_connection": session["character_set_connection"],
         "session.character_set_results": session["character_set_results"],
@@ -366,7 +392,9 @@ def require_schema_settings(metadata: dict[str, Any], backend: dict[str, Any]) -
         "session.time_zone": session["time_zone"],
         "session.sql_mode": session["sql_mode"],
         "session.transaction_isolation": session["transaction_isolation"],
-        "session.snapshot_isolation": "1" if session["snapshot_isolation"] else "0",
+        "session.snapshot_isolation": "1"
+        if session["snapshot_isolation"] == "true"
+        else "0",
     }
     actual = dict(metadata["settings"])
     for isolation_key in (
@@ -375,7 +403,7 @@ def require_schema_settings(metadata: dict[str, Any], backend: dict[str, Any]) -
     ):
         if isolation_key in actual:
             actual[isolation_key] = normalized_isolation(actual[isolation_key])
-    require(actual == expected, "MariaDB server/session settings differ from backend contract")
+    require(actual == expected, "server/session settings differ from backend contract")
 
 
 SQL_TYPE_PATTERN = re.compile(
@@ -431,11 +459,19 @@ def validate_schema_metadata(
 ) -> None:
     metadata = parse_schema_metadata(metadata_text)
     require_schema_settings(metadata, backend)
+    exact_facts = {
+        item["name"]: item["expected_value"]
+        for item in backend["attestation_fact_contract"]
+        if item["value_rule"] == "exact"
+    }
     database = metadata["database"]
-    require(database["name"] == "benchbase", "schema metadata names wrong database")
     require(
-        database["character_set"] == backend["database_defaults"]["character_set"]
-        and database["collation"] == backend["database_defaults"]["collation"],
+        database["name"] == backend["physical_namespace"]["database"],
+        "schema metadata names wrong database",
+    )
+    require(
+        database["character_set"] == exact_facts["database_character_set"]
+        and database["collation"] == exact_facts["database_collation"],
         "benchbase database character set/collation differs from backend contract",
     )
 
@@ -446,15 +482,15 @@ def validate_schema_metadata(
         set(metadata["tables"]) == set(expected_by_name),
         "database table roster differs from selected adapter plus common tables",
     )
-    table_requirements = backend["application_table_requirements"]
     for table_name, expected_table in expected_by_name.items():
         actual_table = metadata["tables"][table_name]
         require(
-            actual_table["engine"].lower() == table_requirements["engine"].lower(),
+            actual_table["engine"].lower()
+            == exact_facts["application_table_engine"].lower(),
             f"{table_name}: storage engine mismatch",
         )
         require(
-            actual_table["collation"] == table_requirements["collation"],
+            actual_table["collation"] == exact_facts["application_table_collation"],
             f"{table_name}: table collation mismatch",
         )
         actual_columns = sorted(actual_table["columns"], key=lambda column: column["ordinal"])
@@ -470,8 +506,8 @@ def validate_schema_metadata(
                 actual_column,
                 expected_column,
                 ordinal,
-                table_requirements["character_set"],
-                table_requirements["collation"],
+                exact_facts["application_table_character_set"],
+                exact_facts["application_table_collation"],
                 f"{table_name}.{expected_column['name']}",
             )
         primary_key = [
@@ -675,96 +711,10 @@ def build_independent_loader_plan(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def quote_qualified_table(table: str) -> str:
-    schema, dot, table_name = table.partition(".")
-    require(dot == "." and schema and table_name, f"invalid qualified table: {table}")
-    validate_identifier(schema, "query schema")
-    validate_identifier(table_name, "query table")
-    return f"`{schema}`.`{table_name}`"
-
-
-def quote_column(column: str) -> str:
-    validate_identifier(column, "query column")
-    return f"`{column}`"
-
-
-def contiguous_relationship_sql(relationship: dict[str, Any]) -> str:
-    parent_table = quote_qualified_table(relationship["parent_table"])
-    child_table = quote_qualified_table(relationship["child_table"])
-    parent_keys = relationship["parent_key_columns"]
-    child_keys = relationship["child_parent_columns"]
-    join = " AND ".join(
-        f"p.{quote_column(parent)} = c.{quote_column(child)}"
-        for parent, child in zip(parent_keys, child_keys, strict=True)
-    )
-    selected_keys = ", ".join(f"p.{quote_column(column)}" for column in parent_keys)
-    grouped_keys = ", ".join(
-        [*(f"p.{quote_column(column)}" for column in parent_keys),
-         f"p.{quote_column(relationship['expected_count_column'])}"]
-    )
-    sequence = f"c.{quote_column(relationship['child_sequence_column'])}"
-    expected = f"p.{quote_column(relationship['expected_count_column'])}"
-    return (
-        "SELECT COUNT(*) FROM ("
-        f"SELECT {selected_keys}, {expected} AS expected_count, "
-        f"COUNT({sequence}) AS line_count, "
-        f"COUNT(DISTINCT {sequence}) AS distinct_line_count, "
-        f"MIN({sequence}) AS minimum_sequence, MAX({sequence}) AS maximum_sequence "
-        f"FROM {parent_table} AS p LEFT JOIN {child_table} AS c ON {join} "
-        f"GROUP BY {grouped_keys}"
-        ") AS grouped_rows WHERE "
-        f"expected_count < {relationship['minimum_count']} OR "
-        f"expected_count > {relationship['maximum_count']} OR "
-        "line_count <> expected_count OR distinct_line_count <> expected_count OR "
-        f"COALESCE(minimum_sequence, 0) <> {relationship['first_sequence_value']} OR "
-        f"COALESCE(maximum_sequence, 0) <> "
-        f"({relationship['first_sequence_value']} + "
-        f"(expected_count - 1) * {relationship['sequence_step']})"
-    )
-
-
 def build_loader_queries(args: argparse.Namespace) -> dict[str, Any]:
     adapter = select_adapter(args.benchmark)
-    queries: list[dict[str, Any]] = []
-    for table in adapter["application_tables"]:
-        queries.append(
-            {
-                "observation": "count",
-                "table": table,
-                "sql": f"SELECT COUNT(*) FROM {quote_qualified_table(table)}",
-            }
-        )
-    for cardinality in adapter["loader"]["cardinalities"]:
-        if cardinality["kind"] != "sum_column":
-            continue
-        queries.append(
-            {
-                "observation": "sum_column",
-                "table": cardinality["table"],
-                "source_table": cardinality["source_table"],
-                "source_column": cardinality["source_column"],
-                "sql": (
-                    f"SELECT COALESCE(SUM({quote_column(cardinality['source_column'])}), 0) "
-                    f"FROM {quote_qualified_table(cardinality['source_table'])}"
-                ),
-            }
-        )
-    for index, relationship in enumerate(adapter["loader"]["relationships"]):
-        require(
-            relationship["kind"] == "contiguous_child_sequence",
-            "unsupported loader relationship",
-        )
-        queries.append(
-            {
-                "observation": "relationship_violations",
-                "relationship_index": index,
-                "kind": relationship["kind"],
-                "parent_table": relationship["parent_table"],
-                "child_table": relationship["child_table"],
-                "sql": contiguous_relationship_sql(relationship),
-            }
-        )
-    return {"benchmark": adapter["benchmark"], "queries": queries}
+    queries = backend_sql_renderer_registry().require(args.backend).loader_queries(adapter)
+    return {"backend": args.backend, "benchmark": adapter["benchmark"], "queries": queries}
 
 
 def parse_loader_observations(text: str) -> dict[str, Any]:
@@ -939,13 +889,30 @@ def bootstrap_adapter_registry() -> BootstrapAdapterRegistry:
     return BootstrapAdapterRegistry.discover(ROOT / "protocol" / "tools" / "bootstrap_adapters")
 
 
+def backend_sql_renderer_registry() -> BackendSqlRendererRegistry:
+    return BackendSqlRendererRegistry.discover(
+        ROOT / "protocol" / "tools" / "backend_sql_renderers"
+    )
+
+
 def build_bootstrap_queries(args: argparse.Namespace) -> dict[str, Any]:
     adapter_contract = select_adapter(args.benchmark)
     require(
         adapter_contract["runtime_capabilities"]["bootstrap_scan"],
         f"adapter {args.benchmark} bootstrap scanner is not implemented",
     )
-    return bootstrap_adapter_registry().require(args.benchmark).build_queries(adapter_contract)
+    logical_plan = bootstrap_adapter_registry().require(args.benchmark).build_queries(
+        adapter_contract
+    )
+    queries = backend_sql_renderer_registry().require(args.backend).bootstrap_queries(
+        adapter_contract, logical_plan
+    )
+    return {
+        "backend": args.backend,
+        "benchmark": logical_plan["benchmark"],
+        "format": logical_plan["format"],
+        "queries": queries,
+    }
 
 
 def dump_record(record: dict[str, Any]) -> None:
@@ -955,6 +922,7 @@ def dump_record(record: dict[str, Any]) -> None:
 def build_run_manifest(args: argparse.Namespace) -> dict[str, Any]:
     run_id = validate_uuid(args.run_id)
     adapter = select_adapter(args.benchmark)
+    backend = select_backend(args.backend)
     readiness = adapter_runtime_readiness(adapter)
     require(
         readiness["end_to_end_ready"],
@@ -965,6 +933,10 @@ def build_run_manifest(args: argparse.Namespace) -> dict[str, Any]:
         args.declared_isolation in adapter["declared_isolations"],
         f"declared isolation is unsupported by adapter {args.benchmark}",
     )
+    require(
+        args.declared_isolation in backend["session_contract"]["declared_isolations"],
+        f"declared isolation is unsupported by backend {args.backend}",
+    )
     require(1 <= len(args.backend_source_id) <= 256, "backend_source_id length is outside 1..256")
     sessions = [validate_session_id(value) for value in args.session_id]
     require(sessions, "at least one expected session is required")
@@ -973,7 +945,7 @@ def build_run_manifest(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "kind": "run_manifest",
         "run_id": run_id,
-        "backend": "mariadb",
+        "backend": backend["backend"],
         "backend_source_id": args.backend_source_id,
         "declared_isolation": args.declared_isolation,
         "benchmark": adapter["benchmark"],
@@ -983,6 +955,113 @@ def build_run_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "control_table_allowlist": ["benchbase.checker_run_fence"],
         "result_scope": "point_transaction_soww",
     }
+
+
+def normalized_attestation_tables(adapter: dict[str, Any]) -> list[dict[str, Any]]:
+    tables = adapter["tables"] + common_table_contracts()
+    return sorted(
+        [
+            {
+                "canonical_table_name": table["name"],
+                "primary_key_columns": table["key_columns"],
+                "columns": [
+                    {
+                        "name": column["name"],
+                        "logical_sql_type": column["sql_type"],
+                        "nullable": column["nullable"],
+                        **({"generated": True} if "generated" in column else {}),
+                    }
+                    for column in table["columns"]
+                ],
+            }
+            for table in tables
+        ],
+        key=lambda table: table["canonical_table_name"],
+    )
+
+
+def canonical_attestation_digest(record: dict[str, Any]) -> str:
+    body = {
+        "backend": record["backend"],
+        "backend_source_id": record["backend_source_id"],
+        "tables": record["tables"],
+        "backend_facts": record["backend_facts"],
+    }
+    canonical = json.dumps(
+        body, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8", "strict")
+    return hashlib.sha256(SCHEMA_ATTESTATION_DOMAIN + canonical).hexdigest()
+
+
+def load_json_file(path: str, label: str) -> Any:
+    try:
+        return json.loads(
+            Path(path).read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RecordError(f"cannot read {label}: {error}") from error
+
+
+def validate_backend_facts(
+    facts: Any, backend: dict[str, Any], label: str = "backend facts"
+) -> list[dict[str, str]]:
+    require(isinstance(facts, list), f"{label} must be an array")
+    rules = backend["attestation_fact_contract"]
+    require(
+        len(facts) == len(rules),
+        f"{label} count differs from backend contract",
+    )
+    result: list[dict[str, str]] = []
+    for index, (fact, rule) in enumerate(zip(facts, rules, strict=True)):
+        require(
+            isinstance(fact, dict) and set(fact) == {"name", "canonical_value"},
+            f"{label}[{index}] has wrong fields",
+        )
+        require(fact["name"] == rule["name"], f"{label}[{index}] name/order differs")
+        value = fact["canonical_value"]
+        require(isinstance(value, str) and len(value) <= 4096, f"{label}[{index}] value is invalid")
+        value_rule = rule["value_rule"]
+        if value_rule == "exact":
+            require(value == rule["expected_value"], f"{label} {fact['name']} differs")
+        elif value_rule == "sha256":
+            require(re.fullmatch(r"[0-9a-f]{64}", value) is not None, f"{label} {fact['name']} is not SHA-256")
+        elif value_rule == "canonical_identifier":
+            require(CANONICAL_IDENTIFIER_PATTERN.fullmatch(value) is not None, f"{label} {fact['name']} is not canonical")
+        elif value_rule == "positive_integer":
+            require(value.isdigit() and int(value) > 0 and str(int(value)) == value, f"{label} {fact['name']} is not a positive integer")
+        else:  # pragma: no cover - schema owns the enumeration
+            raise RecordError(f"unsupported backend fact rule: {value_rule}")
+        result.append({"name": fact["name"], "canonical_value": value})
+    return result
+
+
+def build_schema_attestation(args: argparse.Namespace) -> dict[str, Any]:
+    backend = select_backend(args.backend)
+    adapter = select_adapter(args.benchmark)
+    tables = load_json_file(args.tables_file, "normalized attestation tables")
+    expected_tables = normalized_attestation_tables(adapter)
+    require(tables == expected_tables, "normalized attestation tables differ from adapter contract")
+    facts = validate_backend_facts(
+        load_json_file(args.facts_file, "backend attestation facts"), backend
+    )
+    record = {
+        "kind": "schema_attestation",
+        "run_id": validate_uuid(args.run_id),
+        "phase": args.phase,
+        "backend": backend["backend"],
+        "backend_source_id": args.backend_source_id,
+        "tables": tables,
+        "backend_facts": facts,
+    }
+    require(
+        1 <= len(args.backend_source_id) <= 256,
+        "backend_source_id length is outside 1..256",
+    )
+    record["canonical_attestation_digest"] = canonical_attestation_digest(record)
+    validate_document(
+        document_validator("schema-attestation.schema.json"), record, "SchemaAttestation"
+    )
+    return record
 
 
 def build_bootstrap_manifest(args: argparse.Namespace) -> dict[str, Any]:
@@ -1158,6 +1237,10 @@ def inspect_backend_contract(args: argparse.Namespace) -> dict[str, Any]:
     return select_backend(args.backend)
 
 
+def inspect_attestation_tables(args: argparse.Namespace) -> list[dict[str, Any]]:
+    return normalized_attestation_tables(select_adapter(args.benchmark))
+
+
 def check_schema_contract(args: argparse.Namespace) -> None:
     adapter = select_adapter(args.benchmark)
     backend = select_backend(args.backend)
@@ -1199,6 +1282,15 @@ def validate_final_verdict(record: dict[str, Any], expected_sessions: int) -> No
         return
     reconciliation = record["reconciliation"]
     require(reconciliation["evidence_reconciled"], "final verdict has unreconciled evidence")
+    require(
+        reconciliation["startup_schema_attested"]
+        and reconciliation["final_schema_attested"]
+        and re.fullmatch(
+            r"[0-9a-f]{64}", reconciliation["schema_attestation_digest"]
+        )
+        is not None,
+        "final verdict lacks matching schema attestations",
+    )
     require(
         reconciliation["bootstrap_manifest_validated"],
         "final verdict lacks validated bootstrap state",
@@ -1313,6 +1405,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     manifest = subparsers.add_parser("run-manifest", help="emit a RunManifest")
     manifest.add_argument("--run-id", required=True)
+    manifest.add_argument("--backend", default="mariadb")
     manifest.add_argument("--backend-source-id", required=True)
     manifest.add_argument(
         "--declared-isolation", choices=("READ_COMMITTED", "REPEATABLE_READ"), required=True
@@ -1320,6 +1413,17 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--benchmark", default="ycsb")
     manifest.add_argument("--session-id", action="append", default=[])
     manifest.add_argument("--application-table", action="append", default=[])
+
+    attestation = subparsers.add_parser(
+        "schema-attestation", help="validate and emit a SchemaAttestation"
+    )
+    attestation.add_argument("--run-id", required=True)
+    attestation.add_argument("--phase", choices=("STARTUP", "FINAL"), required=True)
+    attestation.add_argument("--backend", required=True)
+    attestation.add_argument("--backend-source-id", required=True)
+    attestation.add_argument("--benchmark", required=True)
+    attestation.add_argument("--tables-file", required=True)
+    attestation.add_argument("--facts-file", required=True)
 
     bootstrap = subparsers.add_parser("bootstrap-manifest", help="emit a BootstrapManifest")
     bootstrap.add_argument("--run-id", required=True)
@@ -1335,6 +1439,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bootstrap-queries", help="emit adapter-owned canonical scan queries"
     )
     bootstrap_queries.add_argument("--benchmark", required=True)
+    bootstrap_queries.add_argument("--backend", default="mariadb")
 
     bootstrap_reconcile = subparsers.add_parser(
         "bootstrap-reconcile",
@@ -1364,6 +1469,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backend.add_argument("--backend", default="mariadb")
 
+    attestation_tables = subparsers.add_parser(
+        "attestation-tables", help="emit normalized benchmark/control table descriptions"
+    )
+    attestation_tables.add_argument("--benchmark", required=True)
+
     schema_check = subparsers.add_parser(
         "schema-check", help="validate server/session/database/table metadata"
     )
@@ -1379,6 +1489,7 @@ def build_parser() -> argparse.ArgumentParser:
         "loader-queries", help="emit adapter-owned independent SQL validation queries"
     )
     loader_queries.add_argument("--benchmark", required=True)
+    loader_queries.add_argument("--backend", default="mariadb")
 
     loader_check = subparsers.add_parser(
         "loader-check", help="validate independent SQL loader observations"
@@ -1438,6 +1549,8 @@ def main() -> int:
     try:
         if args.command == "run-manifest":
             dump_record(build_run_manifest(args))
+        elif args.command == "schema-attestation":
+            dump_record(build_schema_attestation(args))
         elif args.command == "bootstrap-manifest":
             dump_record(build_bootstrap_manifest(args))
         elif args.command == "bootstrap-queries":
@@ -1450,6 +1563,8 @@ def main() -> int:
             dump_record(inspect_adapter_readiness(args))
         elif args.command == "backend-contract":
             dump_record(inspect_backend_contract(args))
+        elif args.command == "attestation-tables":
+            dump_record(inspect_attestation_tables(args))
         elif args.command == "schema-check":
             check_schema_contract(args)
         elif args.command == "loader-plan":
@@ -1471,6 +1586,7 @@ def main() -> int:
         OSError,
         RecordError,
         BootstrapAdapterError,
+        BackendSqlRendererError,
         UnicodeError,
         json.JSONDecodeError,
     ) as error:

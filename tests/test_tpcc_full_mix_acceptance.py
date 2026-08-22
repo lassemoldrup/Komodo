@@ -100,7 +100,9 @@ class FullMixAcceptanceTest(unittest.TestCase):
         cdc += self.fence(prefix)
         per_type = {}
         for client in clients: per_type[client["txn_type"]] = per_type.get(client["txn_type"], 0) + 1
-        reconciliation = {"evidence_reconciled": True, "bootstrap_manifest_validated": True,
+        reconciliation = {"evidence_reconciled": True,
+            "startup_schema_attested": True, "final_schema_attested": True,
+            "schema_attestation_digest": "0" * 64, "bootstrap_manifest_validated": True,
             "end_fence_seen": True, "expected_sessions": 4, "completed_sessions": 4,
             "accepted_client_transactions": len(clients), "joined_workload_transactions": len(clients),
             "bootstrap_cdc_transactions": 1, "bootstrap_checker_transactions": 1,

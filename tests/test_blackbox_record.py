@@ -34,13 +34,20 @@ class BlackboxRecordTest(unittest.TestCase):
     def schema_metadata(benchmark: str) -> str:
         backend = json.loads((ROOT / "protocol/backends/mariadb.json").read_text())
         adapter = json.loads((ROOT / f"protocol/adapters/{benchmark}.json").read_text())
-        server = backend["server_defaults"]
-        session = backend["session_requirements"]
+        facts = {
+            item["name"]: item["expected_value"]
+            for item in backend["attestation_fact_contract"]
+            if item["value_rule"] == "exact"
+        }
+        session = {
+            item["name"]: item["expected_value"]
+            for item in backend["session_contract"]["required_observations"]
+        }
         settings = {
-            "server.character_set": server["character_set"],
-            "server.collation": server["collation"],
-            "server.time_zone": server["time_zone"],
-            "server.sql_mode": server["sql_mode"],
+            "server.character_set": facts["server_character_set"],
+            "server.collation": facts["server_collation"],
+            "server.time_zone": facts["server_time_zone"],
+            "server.sql_mode": facts["server_sql_mode"],
             "server.transaction_isolation": "REPEATABLE-READ",
             "server.snapshot_isolation": "1",
             "session.character_set_client": session["character_set_client"],
@@ -264,9 +271,87 @@ class BlackboxRecordTest(unittest.TestCase):
     def test_backend_contract_exposes_pinned_mariadb_session(self) -> None:
         result = self.run_tool("backend-contract", "--backend", "mariadb")
         contract = json.loads(result.stdout)
-        self.assertEqual(contract["server_defaults"]["character_set"], "utf8mb4")
-        self.assertEqual(contract["server_defaults"]["collation"], "utf8mb4_bin")
-        self.assertEqual(contract["session_requirements"]["time_zone"], "+00:00")
+        facts = {
+            item["name"]: item["expected_value"]
+            for item in contract["attestation_fact_contract"]
+            if item["value_rule"] == "exact"
+        }
+        self.assertEqual(facts["server_character_set"], "utf8mb4")
+        self.assertEqual(facts["server_collation"], "utf8mb4_bin")
+        self.assertIn(
+            {"name": "time_zone", "expected_value": "+00:00"},
+            contract["session_contract"]["required_observations"],
+        )
+
+    def test_schema_attestation_builder_validates_registry_tables_facts_and_digest(self) -> None:
+        example = json.loads(
+            (ROOT / "protocol/examples/schema-attestation-startup.json").read_text()
+        )
+        with tempfile.TemporaryDirectory(prefix="schema-attestation-test-") as temporary:
+            root = Path(temporary)
+            tables = root / "tables.json"
+            facts = root / "facts.json"
+            tables.write_text(json.dumps(example["tables"]), encoding="utf-8")
+            facts.write_text(json.dumps(example["backend_facts"]), encoding="utf-8")
+            result = self.run_tool(
+                "schema-attestation",
+                "--run-id",
+                RUN_ID,
+                "--phase",
+                "STARTUP",
+                "--backend",
+                "mariadb",
+                "--backend-source-id",
+                "mariadb-main",
+                "--benchmark",
+                "ycsb",
+                "--tables-file",
+                str(tables),
+                "--facts-file",
+                str(facts),
+            )
+            self.assertEqual(json.loads(result.stdout), example)
+
+            mutated = json.loads(facts.read_text())
+            mutated[0]["canonical_value"] = "other"
+            facts.write_text(json.dumps(mutated), encoding="utf-8")
+            failed = self.run_tool(
+                "schema-attestation",
+                "--run-id",
+                RUN_ID,
+                "--phase",
+                "STARTUP",
+                "--backend",
+                "mariadb",
+                "--backend-source-id",
+                "mariadb-main",
+                "--benchmark",
+                "ycsb",
+                "--tables-file",
+                str(tables),
+                "--facts-file",
+                str(facts),
+                expected_status=2,
+            )
+            self.assertIn("database_name differs", failed.stderr)
+
+    def test_run_manifest_selects_yugabyte_without_a_generic_backend_enum(self) -> None:
+        result = self.run_tool(
+            "run-manifest",
+            "--run-id",
+            RUN_ID,
+            "--backend",
+            "yugabytedb_ysql",
+            "--backend-source-id",
+            "yugabytedb-ysql-main",
+            "--declared-isolation",
+            "REPEATABLE_READ",
+            "--benchmark",
+            "ycsb",
+            "--session-id",
+            "ycsb/worker/1",
+        )
+        self.assertEqual(json.loads(result.stdout)["backend"], "yugabytedb_ysql")
 
     def test_schema_check_accepts_ycsb_and_tpcc_contracts(self) -> None:
         for benchmark in ("ycsb", "tpcc"):

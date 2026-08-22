@@ -182,7 +182,9 @@ class TpccDeliveryAcceptanceTest(unittest.TestCase):
                *self.transaction(102, "b", s1, 3, 1, []),
                *self.transaction(103, "c", s2, 1, None, self.app_rows(p2[0], 4, 2)),
                *self.fence(104)]
-        reconciliation = {"evidence_reconciled": True, "bootstrap_manifest_validated": True,
+        reconciliation = {"evidence_reconciled": True,
+            "startup_schema_attested": True, "final_schema_attested": True,
+            "schema_attestation_digest": "0" * 64, "bootstrap_manifest_validated": True,
             "end_fence_seen": True, "expected_sessions": 2, "completed_sessions": 2,
             "accepted_client_transactions": 3, "joined_workload_transactions": 3,
             "bootstrap_cdc_transactions": 1, "bootstrap_checker_transactions": 1,

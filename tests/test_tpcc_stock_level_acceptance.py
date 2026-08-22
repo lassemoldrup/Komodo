@@ -101,7 +101,9 @@ class StockLevelAcceptanceTest(unittest.TestCase):
             "terminal_aborted_transactions": 0}
         records = [copy.deepcopy(self.manifest), copy.deepcopy(self.bootstrap), *clients, done]
         cdc = [*self.marker_transaction(101, 1, None), *self.marker_transaction(102, 2, 1), *self.fence()]
-        reconciliation = {"evidence_reconciled": True, "bootstrap_manifest_validated": True,
+        reconciliation = {"evidence_reconciled": True,
+            "startup_schema_attested": True, "final_schema_attested": True,
+            "schema_attestation_digest": "0" * 64, "bootstrap_manifest_validated": True,
             "end_fence_seen": True, "expected_sessions": 1, "completed_sessions": 1,
             "accepted_client_transactions": 2, "joined_workload_transactions": 2,
             "bootstrap_cdc_transactions": 1, "bootstrap_checker_transactions": 1,

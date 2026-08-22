@@ -3,7 +3,7 @@
 #
 #   ./scripts/txn.sh                                  # default workload body
 #   ./scripts/txn.sh "UPDATE usertable SET field1='x' WHERE ycsb_key=2"
-#   DB=yugabyte ./scripts/txn.sh "UPDATE registers SET val=9 WHERE id=2"
+#   DB=yugabytedb_ysql ./scripts/txn.sh "UPDATE usertable SET field1='x' WHERE ycsb_key=2"
 #   SESSION=sess7 TXN_ID=42 ./scripts/txn.sh
 #
 # One protocol for every backend: the client mints (session_id, txn_id) and
@@ -18,9 +18,12 @@ if (( $# > 0 )); then
 elif [[ $DB == mariadb ]]; then
   BODY="INSERT INTO usertable (ycsb_key, field1) VALUES (1, 'a')
     ON DUPLICATE KEY UPDATE field1 = IF(field1 = 'a', 'b', 'a');"
+elif [[ $DB == yugabytedb_ysql ]]; then
+  BODY="INSERT INTO usertable (ycsb_key, field1) VALUES (1, 'a')
+    ON CONFLICT (ycsb_key) DO UPDATE SET field1 = EXCLUDED.field1;"
 else
-  BODY="UPDATE registers SET val = val + 1 WHERE id = 1;
-UPDATE registers SET val = val - 1 WHERE id = 2;"
+  BODY="UPDATE sitest.registers SET val = val + 1 WHERE id = 1;
+UPDATE sitest.registers SET val = val - 1 WHERE id = 2;"
 fi
 
 SESSION="${SESSION:-sess1}"
@@ -33,7 +36,7 @@ TMP=$(mktemp /tmp/_txn.XXXXXX)
 trap 'rm -f "$TMP"' EXIT
 
 case "$DB" in
-  yugabyte)
+  yugabytedb_ysql)
     cat > "$TMP" <<SQL
 BEGIN;
 ${BODY}

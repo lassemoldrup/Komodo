@@ -31,19 +31,23 @@ ORASQL
   echo "=== Session markers ==="
   db_query "select session_id || ' -> ' || txn_id from sitest.session_txn order by session_id;"
   DBZ=cdc-debezium-oracle
-elif [ "$DB" = "yugabyte" ]; then
-  echo "=== Replication slot (must be HYBRID_TIME) ==="
+elif [ "$DB" = "yugabytedb_ysql" ]; then
+  echo "=== Replication slot (must be pgoutput / SEQUENCE / active) ==="
   db_query "SELECT slot_name || '  ' || plugin || '  ' || yb_lsn_type || '  active=' || active FROM pg_replication_slots"
+  echo "=== Publication membership ==="
+  db_query "SELECT pubname || ' -> ' || schemaname || '.' || tablename FROM pg_publication_tables ORDER BY pubname, schemaname, tablename"
   echo
   echo "=== Replica identity (must be f = FULL) ==="
-  db_query "SELECT relname || '=' || relreplident::text FROM pg_class WHERE relname IN ('registers','session_txn')"
+  db_query "SELECT relname || '=' || relreplident::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='benchbase' ORDER BY relname"
   echo
   echo "=== Effective isolation (want repeatable read = SI) ==="
   db_query "SHOW default_transaction_isolation;"
+  echo "=== Tablet count ==="
+  db_query "SELECT COUNT(*) FROM yb_local_tablets;"
   echo
   echo "=== Session markers (latest txn per session) ==="
   db_query "SELECT session_id || ' -> ' || txn_id FROM session_txn WHERE txn_id <> 0 ORDER BY session_id LIMIT 10"
-  DBZ=cdc-debezium-yb
+  DBZ=cdc-debezium-yugabytedb-ysql
 else
   echo "=== Isolation ==="
   db_query "SELECT CONCAT(@@innodb_snapshot_isolation, ' / ', @@transaction_isolation)"
@@ -66,6 +70,8 @@ else
   echo "streaming: NO"
 fi
 echo "error lines: $(docker logs "$DBZ" 2>&1 | grep -c 'ERROR' || true)"
+echo "image: $(docker inspect --format '{{.Image}}' "$DBZ" 2>/dev/null || echo unavailable)"
+echo "connector identity: $(docker logs "$DBZ" 2>&1 | grep -m1 'connector.class =\|Detected YugabyteDB version' || echo unavailable)"
 
 echo
 echo "=== Redis stream ==="

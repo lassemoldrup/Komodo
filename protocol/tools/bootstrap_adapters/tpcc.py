@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from bootstrap_adapter_registry import BootstrapAdapterError
-from tpcc_codec import CodecError, TpccCodec, bootstrap_select_queries, scan_json_lines
+from tpcc_codec import CodecError, TpccCodec, bootstrap_query_plan, scan_json_lines
 
 
 class TpccBootstrapAdapter:
@@ -18,7 +18,7 @@ class TpccBootstrapAdapter:
             return {
                 "benchmark": self.benchmark,
                 "format": "tpcc_jsonl",
-                "queries": bootstrap_select_queries(TpccCodec(contract)),
+                "queries": bootstrap_query_plan(TpccCodec(contract)),
             }
         except CodecError as error:
             raise BootstrapAdapterError(f"TPC-C query codec failed: {error.code}: {error}") from error

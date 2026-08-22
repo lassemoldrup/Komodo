@@ -20,23 +20,17 @@ class YcsbBootstrapAdapter:
 
     def build_queries(self, contract: dict[str, Any]) -> dict[str, Any]:
         table = contract["application_tables"][0]
-        _, _, unqualified_table = table.partition(".")
-        fields = ", ".join(
-            f"IF(field{index} IS NULL, 'N', "
-            f"CONCAT('P', REPLACE(REPLACE(TO_BASE64(CONVERT(field{index} USING binary)), "
-            "CHAR(10), ''), CHAR(13), '')))"
-            for index in range(1, 11)
-        )
         return {
             "benchmark": self.benchmark,
             "format": "ycsb_tsv",
             "queries": [
                 {
                     "table": table,
-                    "sql": (
-                        f"SELECT ycsb_key, {fields} FROM `{unqualified_table}` "
-                        "ORDER BY ycsb_key"
-                    ),
+                    "columns": [
+                        {"name": column["name"], "sql_type": column["sql_type"]}
+                        for column in contract["tables"][0]["columns"]
+                    ],
+                    "order_by": contract["tables"][0]["key_columns"],
                 }
             ],
         }

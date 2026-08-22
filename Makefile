@@ -1,4 +1,4 @@
-# Backend selection: DB=mariadb (default) | yugabyte | oracle
+# Backend selection: DB=mariadb (default) | yugabytedb_ysql | oracle
 DB ?= mariadb
 COMPOSE = docker compose --profile $(DB)
 MONITOR_BUILD_DIR ?= /tmp/db-monitoring-blackbox-monitor-build
@@ -10,13 +10,13 @@ PERFORMANCE_OUTPUT_ROOT ?=
 MONITOR_PERFORMANCE_CORPUS_DIR ?= /media/newhd/yifan/db-monitoring-builds/blackbox-performance/measurements/final-120s-20260819T143836Z/trials/repetition-01/06-assembly_join_check
 MONITOR_PERFORMANCE_OUTPUT_ROOT ?=
 
-.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live performance-smoke performance-measure monitor-performance-measure
+.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live test-yugabytedb-ysql-connector-contract performance-smoke performance-measure monitor-performance-measure
 
 ## Start the stack for $(DB)
 up:
 	$(COMPOSE) up -d --build
 	@echo "waiting for Debezium to reach streaming ..."
-	@if [ "$(DB)" = "yugabyte" ]; then C=cdc-debezium-yb; \
+	@if [ "$(DB)" = "yugabytedb_ysql" ]; then C=cdc-debezium-yugabytedb-ysql; \
 	 elif [ "$(DB)" = "oracle" ]; then C=cdc-debezium-oracle; \
 	 else C=cdc-debezium; fi; \
 	  until docker logs $$C 2>&1 | grep -q 'Starting streaming'; do sleep 2; done
@@ -84,9 +84,13 @@ test-lifecycle: test-monitor
 	bash -n scripts/*.sh tests/*.sh
 	python3 -m unittest discover -s tests -p 'test_*.py' -v
 	./tests/test_live_lock.sh
+	bash ./tests/test_backend_driver_contract.sh
 	./tests/test_e2e_lifecycle.sh
 	./tests/test_blackbox_performance_harness.sh
 	./tests/test_blackbox_monitor_performance_harness.sh
+
+test-yugabytedb-ysql-connector-contract:
+	python3 -m unittest -v tests.test_yugabytedb_ysql_connector_contract
 
 ## Destructive integration against the pinned MariaDB/Debezium/Redis stack
 test-lifecycle-live: test-monitor

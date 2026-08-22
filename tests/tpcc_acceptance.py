@@ -275,6 +275,11 @@ def validate_audited_status_and_metrics(
     )
     require(
         reconciliation["evidence_reconciled"] is True
+        and reconciliation["startup_schema_attested"] is True
+        and reconciliation["final_schema_attested"] is True
+        and isinstance(reconciliation["schema_attestation_digest"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", reconciliation["schema_attestation_digest"])
+        is not None
         and reconciliation["bootstrap_manifest_validated"] is True
         and reconciliation["end_fence_seen"] is True
         and reconciliation["expected_sessions"] == config["terminals"]

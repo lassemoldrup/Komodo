@@ -137,11 +137,15 @@ class MariaDbSchemaAssetTest(unittest.TestCase):
                 continue
             key, value = (part.strip() for part in line.split("=", maxsplit=1))
             settings[key] = value
-        server = self.backend_contract["server_defaults"]
-        self.assertEqual(settings["character_set_server"], server["character_set"])
-        self.assertEqual(settings["collation_server"], server["collation"])
-        self.assertEqual(settings["default_time_zone"], server["time_zone"])
-        self.assertEqual(settings["sql_mode"], server["sql_mode"])
+        facts = {
+            item["name"]: item["expected_value"]
+            for item in self.backend_contract["attestation_fact_contract"]
+            if item["value_rule"] == "exact"
+        }
+        self.assertEqual(settings["character_set_server"], facts["server_character_set"])
+        self.assertEqual(settings["collation_server"], facts["server_collation"])
+        self.assertEqual(settings["default_time_zone"], facts["server_time_zone"])
+        self.assertEqual(settings["sql_mode"], facts["server_sql_mode"])
         self.assertEqual(settings["transaction_isolation"], "REPEATABLE-READ")
         self.assertEqual(settings["innodb_snapshot_isolation"], "ON")
 

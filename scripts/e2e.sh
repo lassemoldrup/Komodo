@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sound MariaDB black-box lifecycle coordinator.
+# Sound backend-neutral black-box lifecycle coordinator.
 #
 # The built one-run monitor is the default. Tests may inject a controlled
 # command to drive the same acknowledgement gates; this script never
@@ -53,6 +53,7 @@ PHASE_QUIESCENCE_PROVEN=0
 BOOTSTRAP_SCAN_FILE=
 END_FENCE_COMMITTED=0
 MONITOR_EXIT_STATUS=0
+STARTUP_SCHEMA_ATTESTATION=
 
 
 write_provenance_file() {
@@ -99,7 +100,6 @@ trap cleanup_owned_processes EXIT
 require_configuration() {
   blackbox_require_command "$BLACKBOX_DOCKER"
   blackbox_require_command "$BLACKBOX_REDIS_CLI"
-  blackbox_require_command "$BLACKBOX_MARIADB_CLI"
   blackbox_require_command python3
   blackbox_require_command jq
   blackbox_require_command base64
@@ -109,16 +109,8 @@ require_configuration() {
 
   BLACKBOX_ADAPTER_CONTRACT=$(blackbox_adapter_contract) || return 1
   BLACKBOX_BACKEND_CONTRACT=$(blackbox_backend_contract) || return 1
-  BLACKBOX_SET_NAMES_SQL=$(jq -er '.session_requirements.set_names' \
-    <<<"$BLACKBOX_BACKEND_CONTRACT") || {
-    blackbox_die "backend contract lacks a valid session SET NAMES statement"
-    return 1
-  }
-  BLACKBOX_ADAPTER_SCHEMA_FILE="$ROOT/mariadb/initdb/adapters/${BLACKBOX_BENCHMARK}.sql"
-  if [[ ! -f $BLACKBOX_ADAPTER_SCHEMA_FILE ]]; then
-    blackbox_die "selected adapter schema file is missing: $BLACKBOX_ADAPTER_SCHEMA_FILE"
-    return 1
-  fi
+  export BLACKBOX_BACKEND_CONTRACT
+  blackbox_backend_require_commands || return 1
 
   : "${BLACKBOX_LOADER_COMMAND:?set BLACKBOX_LOADER_COMMAND to the non-DDL BenchBase loader command}"
   : "${BLACKBOX_WORKLOAD_COMMAND:?set BLACKBOX_WORKLOAD_COMMAND to the BenchBase workload command}"
@@ -221,6 +213,7 @@ require_configuration() {
   # the UUID here makes semantic run reuse unavailable by construction.
   BLACKBOX_ACTIVE_RUN_ID=$(blackbox_new_uuid)
   export BLACKBOX_ACTIVE_RUN_ID
+  blackbox_backend_prepare_run || return 1
   export BLACKBOX_REDIS_HOST BLACKBOX_REDIS_PORT BLACKBOX_DB_HOST BLACKBOX_DB_PORT
   export BLACKBOX_BACKEND BLACKBOX_BENCHMARK BLACKBOX_BACKEND_SOURCE_ID
   export BLACKBOX_DECLARED_ISOLATION BLACKBOX_SET_NAMES_SQL
@@ -345,7 +338,7 @@ require_configuration() {
 
 
 compose() {
-  "$BLACKBOX_DOCKER" compose --file "$ROOT/docker-compose.yml" --profile mariadb "$@"
+  blackbox_compose "$@"
 }
 
 
@@ -373,13 +366,12 @@ wait_for_healthy_container() {
 wait_for_cdc_streaming() {
   local deadline=$(( $(date +%s) + BLACKBOX_STACK_TIMEOUT_SECONDS ))
   while (( $(date +%s) <= deadline )); do
-    local logs
-    logs=$("$BLACKBOX_DOCKER" logs cdc-debezium 2>&1 || true)
-    if [[ $(grep -c 'Starting streaming' <<<"$logs") -gt 0 ]]; then
+    if blackbox_backend_wait_for_connector_progress; then
       return 0
     fi
     local state
-    state=$("$BLACKBOX_DOCKER" inspect --format '{{.State.Status}}' cdc-debezium 2>/dev/null || true)
+    state=$("$BLACKBOX_DOCKER" inspect --format '{{.State.Status}}' \
+      "$BLACKBOX_CONNECTOR_CONTAINER" 2>/dev/null || true)
     if [[ $state == exited || $state == dead ]]; then
       blackbox_die "Debezium exited before streaming"
       return 1
@@ -404,10 +396,9 @@ verify_fresh_schema() {
   }
   local application_tables=()
   mapfile -t application_tables <<<"$application_table_lines"
-  local qualified_table table application_rows
+  local qualified_table application_rows
   for qualified_table in "${application_tables[@]}"; do
-    table=${qualified_table#benchbase.}
-    application_rows=$(blackbox_database_query "SELECT COUNT(*) FROM \`$table\`") || return 1
+    application_rows=$(blackbox_backend_count_table "$qualified_table") || return 1
     application_rows=${application_rows//[[:space:]]/}
     if [[ $application_rows != 0 ]]; then
       blackbox_die "fresh-stack enforcement found rows in $qualified_table"
@@ -416,8 +407,8 @@ verify_fresh_schema() {
   done
 
   local fence_rows marker_rows
-  fence_rows=$(blackbox_database_query "SELECT COUNT(*) FROM checker_run_fence")
-  marker_rows=$(blackbox_database_query "SELECT COUNT(*) FROM session_txn")
+  fence_rows=$(blackbox_backend_count_table "benchbase.checker_run_fence")
+  marker_rows=$(blackbox_backend_count_table "benchbase.session_txn")
   fence_rows=${fence_rows//[[:space:]]/}
   marker_rows=${marker_rows//[[:space:]]/}
   if [[ $fence_rows != 0 || $marker_rows != 0 ]]; then
@@ -436,11 +427,11 @@ verify_fresh_schema() {
 
 
 start_fresh_database_and_schema() {
-  blackbox_log "phase database/schema: recreating Redis and MariaDB"
-  compose down --volumes --remove-orphans
-  compose up --detach --force-recreate redis mariadb
+  blackbox_log "phase database/schema: recreating Redis and $BLACKBOX_BACKEND"
+  blackbox_backend_teardown
+  blackbox_backend_start_database_schema
   wait_for_healthy_container cdc-redis
-  wait_for_healthy_container cdc-mariadb
+  wait_for_healthy_container "$BLACKBOX_DATABASE_CONTAINER"
   verify_fresh_schema
   if [[ -n $BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES ]]; then
     blackbox_verify_redis_configuration "$BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES"
@@ -450,7 +441,7 @@ start_fresh_database_and_schema() {
 
 start_cdc() {
   blackbox_log "phase CDC: starting Debezium after the empty schema exists"
-  compose up --detach --no-deps --force-recreate debezium
+  blackbox_backend_start_connector
   wait_for_cdc_streaming
 }
 
@@ -704,6 +695,11 @@ close_failed_run() {
       return 0
     fi
   fi
+  if ! publish_final_schema_attestation; then
+    stop_monitor_without_fence SCHEMA_ATTESTATION_MISSING \
+      "$diagnostic; FINAL schema attestation could not be published"
+    return 0
+  fi
   wait_for_failed_final || true
 }
 
@@ -721,9 +717,16 @@ close_coordinator_failure_after_quiescence_check() {
 
 
 publish_manifest_and_start_fence() {
-  local manifest
+  local manifest startup_attestation
   manifest=$(blackbox_build_run_manifest)
   blackbox_publish_record "$(blackbox_client_stream)" "$manifest" >/dev/null
+  startup_attestation=$(blackbox_build_schema_attestation STARTUP) || {
+    blackbox_die "STARTUP schema/capture attestation failed"
+    return 1
+  }
+  blackbox_publish_record "$(blackbox_client_stream)" "$startup_attestation" \
+    >/dev/null || return 1
+  STARTUP_SCHEMA_ATTESTATION=$startup_attestation
   if ! blackbox_commit_fence RUN_START; then
     close_failed_run COMMIT_OUTCOME_AMBIGUOUS \
       "RUN_START commit did not complete with a known outcome; END_FENCE is forbidden" 0
@@ -735,6 +738,24 @@ publish_manifest_and_start_fence() {
       "monitor did not acknowledge RUN_START"
     return 1
   fi
+}
+
+
+publish_final_schema_attestation() {
+  local final_attestation
+  final_attestation=$(blackbox_build_schema_attestation FINAL) || return 1
+  if ! jq -en --argjson startup "$STARTUP_SCHEMA_ATTESTATION" \
+      --argjson final "$final_attestation" '
+        $startup.tables == $final.tables and
+        $startup.backend_facts == $final.backend_facts and
+        $startup.canonical_attestation_digest ==
+          $final.canonical_attestation_digest
+      ' >/dev/null; then
+    blackbox_publish_run_failed SCHEMA_ATTESTATION_DRIFT \
+      "STARTUP and FINAL schema/capture attestations differ" || true
+  fi
+  blackbox_publish_record "$(blackbox_client_stream)" "$final_attestation" \
+    >/dev/null
 }
 
 
@@ -755,7 +776,7 @@ run_loader_and_close_bootstrap() {
   fi
 
   local marker_rows
-  marker_rows=$(blackbox_database_query "SELECT COUNT(*) FROM session_txn") || {
+  marker_rows=$(blackbox_backend_count_table "benchbase.session_txn") || {
     close_failed_run INTERNAL_ERROR "could not verify marker state after loader quiescence" 1
     return 1
   }
@@ -862,6 +883,11 @@ run_workload_and_close() {
     return 1
   fi
   END_FENCE_COMMITTED=1
+  if ! publish_final_schema_attestation; then
+    close_failed_run SCHEMA_ATTESTATION_MISSING \
+      "FINAL schema/capture attestation failed" 0
+    return 1
+  fi
   if [[ $BLACKBOX_PROCESSING_MODE == join-only ]]; then
     blackbox_log "waiting for completed join-only measurement"
     wait_for_owned_monitor_exit || return 1
