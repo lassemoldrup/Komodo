@@ -14,6 +14,9 @@
   "diagnostics": [],
   "reconciliation": {
     "evidence_reconciled": true,
+    "startup_schema_attested": true,
+    "final_schema_attested": true,
+    "schema_attestation_digest": "dd3580ca7f1c748503b494af84069f0181cd83de55075e525f65a0e3b0f26661",
     "bootstrap_manifest_validated": true,
     "end_fence_seen": true,
     "expected_sessions": 2,

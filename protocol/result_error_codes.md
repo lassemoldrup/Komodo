@@ -45,6 +45,12 @@ FINAL
 | `UNEXPECTED_TABLE` | CDC contains a table outside the application/control allowlists. |
 | `DDL_OBSERVED` | DDL occurred after run start. |
 | `EXTERNAL_WRITER_OBSERVED` | An identifiable non-workload writer modified modeled data. |
+| `SCHEMA_ATTESTATION_MISSING` | STARTUP or FINAL schema/capture attestation is absent at its required lifecycle boundary. |
+| `SCHEMA_ATTESTATION_DUPLICATE` | More than one attestation exists for one phase. |
+| `SCHEMA_ATTESTATION_MALFORMED` | An attestation has an invalid outer shape, normalized table description, fact value, or digest. |
+| `SCHEMA_ATTESTATION_MISMATCH` | An attestation disagrees with the selected run/backend/benchmark contract. |
+| `SCHEMA_ATTESTATION_DRIFT` | Valid STARTUP and FINAL normalized schema/capture evidence differs. |
+| `BACKEND_FACT_MISMATCH` | Backend facts are missing, extra, reordered, or violate their registered value rules. |
 
 ### Client evidence
 
@@ -74,7 +80,7 @@ FINAL
 | `CDC_RECORD_MALFORMED` | A Debezium envelope cannot be decoded or validated. |
 | `CDC_BEGIN_MISSING` | A row/end appears without a legal transaction begin. |
 | `CDC_END_MISSING` | A transaction never receives its required end record. |
-| `CDC_TRANSACTION_ID_MISMATCH` | Debezium metadata key/envelope or row `transaction.id` values disagree for one opaque structural transaction. |
+| `CDC_TRANSACTION_ID_MISMATCH` | The key and envelope copies of an opaque ID disagree within the same BEGIN or END record. Cross-record ID differences are expected diagnostics. |
 | `CDC_EVENT_ORDINAL_INVALID` | Event ordinals repeat, regress, or contain a gap. |
 | `CDC_EVENT_COUNT_MISMATCH` | Observed rows disagree with `END.event_count` or table counts. |
 | `CDC_DUPLICATE_CONFLICT` | A stable CDC identity is replayed with different content. |

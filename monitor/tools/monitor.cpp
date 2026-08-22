@@ -680,6 +680,10 @@ joinerMetricsJson(const blackbox::TransactionJoinerMetrics &metrics) {
   }
   return Json{
       {"evidence_reconciled", reconciliation->evidence_reconciled},
+      {"startup_schema_attested", reconciliation->startup_schema_attested},
+      {"final_schema_attested", reconciliation->final_schema_attested},
+      {"schema_attestation_digest",
+       reconciliation->schema_attestation_digest},
       {"bootstrap_manifest_validated",
        reconciliation->bootstrap_manifest_validated},
       {"end_fence_seen", reconciliation->end_fence_seen},
@@ -1030,6 +1034,9 @@ private:
                          {"code", code},
                          {"message", boundedMessage(std::move(message))}}})},
       {"reconciliation", Json{{"evidence_reconciled", false},
+                              {"startup_schema_attested", false},
+                              {"final_schema_attested", false},
+                              {"schema_attestation_digest", ""},
                               {"bootstrap_manifest_validated", false},
                               {"end_fence_seen", false},
                               {"expected_sessions", expected_sessions},
@@ -1282,7 +1289,9 @@ int run(const Options &options) {
     assembler_storage.emplace(DebeziumAssemblerConfig{
         .run_id = manifest.run_id,
         .backend_source_id = manifest.backend_source_id,
-        .debezium_version = "3.6.1.Final",
+        .debezium_version = std::string(
+            blackbox::BackendAdapterRegistry::require(manifest.backend)
+                .connectorVersion()),
         .backend_adapter =
             &blackbox::BackendAdapterRegistry::require(manifest.backend),
         .benchmark_adapter =

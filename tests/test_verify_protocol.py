@@ -221,15 +221,90 @@ class ProtocolArtifactAlignmentTest(unittest.TestCase):
 
     def test_mariadb_backend_contract_freezes_session_and_schema_defaults(self) -> None:
         contract = self.backends["mariadb"]
-        self.assertEqual(contract["server_defaults"]["sql_mode"], VERIFY_PROTOCOL.MARIADB_SQL_MODE)
+        facts = {
+            item["name"]: item["expected_value"]
+            for item in contract["attestation_fact_contract"]
+            if item["value_rule"] == "exact"
+        }
+        self.assertEqual(facts["server_sql_mode"], VERIFY_PROTOCOL.MARIADB_SQL_MODE)
         self.assertEqual(
-            contract["session_requirements"]["set_names"],
+            contract["session_contract"]["configuration_statements"][0],
             "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
         )
         self.assertEqual(
-            contract["application_table_requirements"]["char_read_semantics"],
+            contract["normalized_capabilities"]["char_read_semantics"],
             "pad_to_declared_length",
         )
+
+    def test_yugabyte_backend_and_run_manifest_use_the_generic_registry_name(self) -> None:
+        contract = self.backends["yugabytedb_ysql"]
+        self.assertEqual(contract["accepted_database_types"], ["POSTGRES"])
+        self.assertEqual(contract["connector_contract"]["source_version"], "dz.2.5.2.yb.2026.1")
+        manifest = self.example("run-manifest.json")
+        manifest["backend"] = "yugabytedb_ysql"
+        manifest["backend_source_id"] = "yugabytedb-ysql-main"
+        VERIFY_PROTOCOL.verify_record_schema(self.validator, manifest, "Yugabyte RunManifest")
+
+    def test_synthetic_third_backend_contract_and_attestation_need_no_schema_switch(self) -> None:
+        synthetic = copy.deepcopy(self.backends["mariadb"])
+        synthetic["backend"] = "synthetic_backend"
+        synthetic["accepted_database_types"] = ["POSTGRES"]
+        backend_validator = VERIFY_PROTOCOL.schema_validator(
+            self.schemas, "backend-contract.schema.json"
+        )
+        VERIFY_PROTOCOL.verify_document_schema(
+            backend_validator, synthetic, "synthetic backend contract"
+        )
+        attestation = self.example("schema-attestation-startup.json")
+        attestation["backend"] = "synthetic_backend"
+        attestation["backend_source_id"] = "synthetic-main"
+        attestation["canonical_attestation_digest"] = (
+            VERIFY_PROTOCOL.schema_attestation_digest(attestation)
+        )
+        VERIFY_PROTOCOL.validate_schema_attestation(
+            attestation, synthetic, self.contracts["ycsb"], "synthetic attestation"
+        )
+
+    def test_attestation_rejects_cross_backend_facts_drift_and_mutable_identity(self) -> None:
+        startup = self.example("schema-attestation-startup.json")
+        final = self.example("schema-attestation-final.json")
+        VERIFY_PROTOCOL.validate_schema_attestation(
+            startup, self.backends["mariadb"], self.contracts["ycsb"], "startup"
+        )
+        self.assertEqual(startup["canonical_attestation_digest"], final["canonical_attestation_digest"])
+
+        substituted = copy.deepcopy(startup)
+        substituted["backend_facts"][0]["canonical_value"] = "other_database"
+        substituted["canonical_attestation_digest"] = VERIFY_PROTOCOL.schema_attestation_digest(substituted)
+        with self.assertRaisesRegex(VERIFY_PROTOCOL.VerificationError, "fact database_name differs"):
+            VERIFY_PROTOCOL.validate_schema_attestation(
+                substituted, self.backends["mariadb"], self.contracts["ycsb"], "substituted"
+            )
+
+        mutable = copy.deepcopy(startup)
+        image_fact = next(
+            item for item in mutable["backend_facts"] if item["name"] == "database_image_digest"
+        )
+        image_fact["canonical_value"] = "latest"
+        mutable["canonical_attestation_digest"] = VERIFY_PROTOCOL.schema_attestation_digest(mutable)
+        with self.assertRaisesRegex(VERIFY_PROTOCOL.VerificationError, "not SHA-256"):
+            VERIFY_PROTOCOL.validate_schema_attestation(
+                mutable, self.backends["mariadb"], self.contracts["ycsb"], "mutable"
+            )
+
+        drifted = copy.deepcopy(final)
+        drifted["tables"][2]["columns"][0]["nullable"] = True
+        drifted["canonical_attestation_digest"] = VERIFY_PROTOCOL.schema_attestation_digest(drifted)
+        with self.assertRaisesRegex(VERIFY_PROTOCOL.VerificationError, "table roster/schema"):
+            VERIFY_PROTOCOL.validate_schema_attestation(
+                drifted, self.backends["mariadb"], self.contracts["ycsb"], "drifted"
+            )
+
+    def test_client_correlation_rejects_backend_cdc_identifiers(self) -> None:
+        client = self.example("client-txn.json")
+        client["correlation_id"]["lsn"] = 123
+        with self.assertRaisesRegex(VERIFY_PROTOCOL.VerificationError, "schema validation failed"):
+            VERIFY_PROTOCOL.verify_record_schema(self.validator, client, "client")
 
     def test_golden_key_encoder_rejects_noncanonical_identifiers(self) -> None:
         with self.assertRaisesRegex(

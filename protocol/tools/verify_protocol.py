@@ -36,11 +36,13 @@ EXAMPLE_ROOT = PROTOCOL_ROOT / "examples"
 GOLDEN_ROOT = PROTOCOL_ROOT / "golden"
 ADAPTER_ROOT = PROTOCOL_ROOT / "adapters"
 BACKEND_ROOT = PROTOCOL_ROOT / "backends"
+BACKEND_EXAMPLE_ROOT = EXAMPLE_ROOT / "backends"
 
 READ_DOMAIN = b"db-monitoring/read-digest\x00"
 BOOTSTRAP_DOMAIN = b"db-monitoring/bootstrap-state-digest\x00"
 CORRELATION_SEED_DOMAIN = b"db-monitoring/session-marker-seed\x00"
 CORRELATION_STEP_DOMAIN = b"db-monitoring/session-marker-step\x00"
+SCHEMA_ATTESTATION_DOMAIN = b"db-monitoring/schema-attestation\x00"
 
 PRESENT = 0x01
 ABSENT = 0x02
@@ -244,6 +246,19 @@ def lp(value: bytes) -> bytes:
 
 def sha256_hex(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def schema_attestation_digest(attestation: dict[str, Any]) -> str:
+    body = {
+        "backend": attestation["backend"],
+        "backend_source_id": attestation["backend_source_id"],
+        "tables": attestation["tables"],
+        "backend_facts": attestation["backend_facts"],
+    }
+    canonical = json.dumps(
+        body, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8", "strict")
+    return sha256_hex(SCHEMA_ATTESTATION_DOMAIN + canonical)
 
 
 def canonical_base64(value: bytes) -> str:
@@ -828,56 +843,180 @@ def load_backend_contracts(
         backend = contract["backend"]
         require(backend not in contracts, f"duplicate backend contract: {backend}")
         require(path.stem == backend, f"backend filename does not match name: {path.name}")
+        observation_names = [
+            item["name"] for item in contract["session_contract"]["required_observations"]
+        ]
+        require(
+            len(observation_names) == len(set(observation_names)),
+            f"{path.name}: duplicate session observation",
+        )
+        fact_names = [item["name"] for item in contract["attestation_fact_contract"]]
+        require(
+            len(fact_names) == len(set(fact_names)),
+            f"{path.name}: duplicate attestation fact",
+        )
+        require(
+            contract["physical_namespace"]["database"] == "benchbase"
+            and contract["physical_namespace"]["schema"] == "benchbase",
+            f"{path.name}: physical namespace cannot preserve canonical table bytes",
+        )
         contracts[backend] = contract
-    require("mariadb" in contracts, "MariaDB backend contract is missing")
+    require(
+        "mariadb" in contracts and "yugabytedb_ysql" in contracts,
+        "required backend contract is missing",
+    )
 
     mariadb = contracts["mariadb"]
-    server = mariadb["server_defaults"]
-    session = mariadb["session_requirements"]
-    database = mariadb["database_defaults"]
-    tables = mariadb["application_table_requirements"]
     require(
-        server
-        == {
-            "character_set": "utf8mb4",
-            "collation": "utf8mb4_bin",
-            "time_zone": "+00:00",
-            "sql_mode": MARIADB_SQL_MODE,
-            "transaction_isolation": "REPEATABLE_READ",
-            "snapshot_isolation": True,
-        },
-        "MariaDB server-default contract differs from the accepted settings",
+        mariadb["accepted_database_types"] == ["MARIADB"]
+        and mariadb["session_contract"]["configuration_statements"][0]
+        == "SET NAMES utf8mb4 COLLATE utf8mb4_bin"
+        and any(
+            item == {"name": "sql_mode", "expected_value": MARIADB_SQL_MODE}
+            for item in mariadb["session_contract"]["required_observations"]
+        )
+        and mariadb["normalized_capabilities"]["connector_startup_schema_evidence"]
+        == "required",
+        "MariaDB backend contract differs from the accepted normalized settings",
     )
+
+    yugabyte = contracts["yugabytedb_ysql"]
+    yugabyte_facts = {
+        item["name"]: item for item in yugabyte["attestation_fact_contract"]
+    }
     require(
-        session
+        yugabyte["accepted_database_types"] == ["POSTGRES"]
+        and yugabyte["physical_namespace"]
+        == {"database": "benchbase", "schema": "benchbase", "search_path": "benchbase"}
+        and yugabyte["normalized_capabilities"]["connector_startup_schema_evidence"]
+        == "not_available"
+        and yugabyte["connector_contract"]
         == {
-            "set_names": "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
-            "character_set_client": "utf8mb4",
-            "character_set_connection": "utf8mb4",
-            "character_set_results": "utf8mb4",
-            "collation_connection": "utf8mb4_bin",
-            "time_zone": "+00:00",
-            "sql_mode": MARIADB_SQL_MODE,
-            "transaction_isolation": "REPEATABLE_READ",
-            "snapshot_isolation": True,
-        },
-        "MariaDB session contract differs from the accepted settings",
-    )
-    require(
-        database == {"character_set": "utf8mb4", "collation": "utf8mb4_bin"},
-        "MariaDB database-default contract differs from the accepted settings",
-    )
-    require(
-        tables
-        == {
-            "engine": "InnoDB",
-            "character_set": "utf8mb4",
-            "collation": "utf8mb4_bin",
-            "char_read_semantics": "pad_to_declared_length",
-        },
-        "MariaDB application-table contract differs from the accepted settings",
+            "connector_class": "io.debezium.connector.postgresql.YugabyteDBConnector",
+            "source_connector": "postgresql",
+            "source_version": "dz.2.5.2.yb.2026.1",
+            "envelope_profile": "yugabytedb_pgoutput_2_5_2",
+            "transaction_metadata": True,
+            "tasks": 1,
+            "redis_stream": "cdc",
+        }
+        and yugabyte_facts["slot_plugin"]["expected_value"] == "pgoutput"
+        and yugabyte_facts["slot_lsn_type"]["expected_value"] == "SEQUENCE"
+        and yugabyte_facts["streaming_mode"]["expected_value"] == "default"
+        and yugabyte_facts["connector_sha256"]["expected_value"]
+        == "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98",
+        "YugabyteDB backend contract differs from the pinned Milestone 9 settings",
     )
     return contracts
+
+
+def normalized_attestation_tables(adapter: dict[str, Any]) -> list[dict[str, Any]]:
+    result = [
+        {
+            "canonical_table_name": table["name"],
+            "primary_key_columns": table["key_columns"],
+            "columns": [
+                {
+                    "name": column["name"],
+                    "logical_sql_type": column["sql_type"],
+                    "nullable": column["nullable"],
+                    **({"generated": True} if "generated" in column else {}),
+                }
+                for column in table["columns"]
+            ],
+        }
+        for table in adapter["tables"]
+    ]
+    result.extend(
+        [
+            {
+                "canonical_table_name": "benchbase.checker_run_fence",
+                "primary_key_columns": ["run_id", "phase"],
+                "columns": [
+                    {"name": "run_id", "logical_sql_type": "CHAR(36)", "nullable": False},
+                    {"name": "phase", "logical_sql_type": "VARCHAR(32)", "nullable": False},
+                    {"name": "nonce", "logical_sql_type": "CHAR(36)", "nullable": False},
+                ],
+            },
+            {
+                "canonical_table_name": "benchbase.session_txn",
+                "primary_key_columns": ["session_id"],
+                "columns": [
+                    {"name": "session_id", "logical_sql_type": "VARCHAR(64)", "nullable": False},
+                    {"name": "txn_id", "logical_sql_type": "BIGINT", "nullable": False},
+                ],
+            },
+        ]
+    )
+    return sorted(result, key=lambda item: item["canonical_table_name"])
+
+
+def validate_schema_attestation(
+    attestation: dict[str, Any],
+    backend: dict[str, Any],
+    adapter: dict[str, Any],
+    label: str,
+) -> None:
+    require(attestation["backend"] == backend["backend"], f"{label}: backend differs")
+    tables = attestation["tables"]
+    table_names = [item["canonical_table_name"] for item in tables]
+    require(table_names == sorted(set(table_names)), f"{label}: tables are not unique/sorted")
+    require(
+        tables == normalized_attestation_tables(adapter),
+        f"{label}: normalized table roster/schema differs from benchmark contract",
+    )
+    facts = attestation["backend_facts"]
+    fact_names = [item["name"] for item in facts]
+    rules = backend["attestation_fact_contract"]
+    require(
+        fact_names == [item["name"] for item in rules],
+        f"{label}: backend facts are missing, extra, or reordered",
+    )
+    for fact, rule in zip(facts, rules, strict=True):
+        value = fact["canonical_value"]
+        if rule["value_rule"] == "exact":
+            require(value == rule["expected_value"], f"{label}: fact {fact['name']} differs")
+        elif rule["value_rule"] == "sha256":
+            require(re.fullmatch(r"[0-9a-f]{64}", value) is not None, f"{label}: fact {fact['name']} is not SHA-256")
+        elif rule["value_rule"] == "canonical_identifier":
+            require(CANONICAL_IDENTIFIER.fullmatch(value) is not None, f"{label}: fact {fact['name']} is not a canonical identifier")
+        elif rule["value_rule"] == "positive_integer":
+            require(value.isdigit() and int(value) > 0 and str(int(value)) == value, f"{label}: fact {fact['name']} is not a canonical positive integer")
+        else:  # pragma: no cover - schema owns the enumeration
+            raise VerificationError(f"{label}: unknown backend fact rule")
+    require(
+        attestation["canonical_attestation_digest"] == schema_attestation_digest(attestation),
+        f"{label}: canonical attestation digest differs",
+    )
+
+
+def verify_backend_attestation_examples(
+    backends: dict[str, dict[str, Any]],
+    adapters: dict[str, dict[str, Any]],
+    schemas: list[dict[str, Any]],
+) -> int:
+    validator = schema_validator(schemas, "schema-attestation.schema.json")
+    count = 0
+    covered_backends: set[str] = set()
+    paths = sorted(BACKEND_EXAMPLE_ROOT.glob("*.json")) + sorted(
+        EXAMPLE_ROOT.glob("schema-attestation-*.json")
+    )
+    for path in paths:
+        document = load_json(path)
+        label = f"backends/{path.name}" if path.parent == BACKEND_EXAMPLE_ROOT else path.name
+        verify_document_schema(validator, document, label)
+        backend = backends.get(document["backend"])
+        require(backend is not None, f"{label}: unregistered backend")
+        validate_schema_attestation(
+            document, backend, adapters["ycsb"], label
+        )
+        covered_backends.add(document["backend"])
+        count += 1
+    require(
+        covered_backends == {"mariadb", "yugabytedb_ysql"},
+        "backend attestation examples do not cover both registered backends",
+    )
+    return count
 
 
 def verify_tpcc_executable_vectors(
@@ -1406,6 +1545,13 @@ def verify_final_verdict(status: dict[str, Any], expected_sessions: int) -> None
     reconciliation = status["reconciliation"]
     require(reconciliation["evidence_reconciled"], "final verdict lacks reconciliation")
     require(
+        reconciliation["startup_schema_attested"]
+        and reconciliation["final_schema_attested"]
+        and re.fullmatch(r"[0-9a-f]{64}", reconciliation["schema_attestation_digest"])
+        is not None,
+        "final verdict lacks matching schema attestations",
+    )
+    require(
         reconciliation["bootstrap_manifest_validated"],
         "final verdict lacks validated bootstrap state",
     )
@@ -1476,13 +1622,17 @@ def verify_final_verdict(status: dict[str, Any], expected_sessions: int) -> None
 def verify_cross_record_semantics(
     records: dict[str, list[dict[str, Any]]],
     contracts: dict[str, dict[str, Any]] | None = None,
+    backends: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     contracts = contracts or load_adapter_contracts()
+    backends = backends or load_backend_contracts()
     manifests = records["run_manifest"]
     require(len(manifests) == 1, "examples require exactly one RunManifest")
     manifest = manifests[0]
     require(manifest["benchmark"] in contracts, "RunManifest names unknown adapter")
+    require(manifest["backend"] in backends, "RunManifest names unknown backend")
     adapter = contracts[manifest["benchmark"]]
+    backend = backends[manifest["backend"]]
     require(
         manifest["declared_isolation"] in adapter["declared_isolations"],
         "RunManifest isolation is unsupported by adapter",
@@ -1495,6 +1645,31 @@ def verify_cross_record_semantics(
         "RunManifest table roster differs from adapter contract",
     )
     run_id = manifest["run_id"]
+
+    attestations = records["schema_attestation"]
+    require(len(attestations) == 2, "examples require STARTUP and FINAL SchemaAttestation")
+    require(
+        [item["phase"] for item in attestations] == ["FINAL", "STARTUP"]
+        or [item["phase"] for item in attestations] == ["STARTUP", "FINAL"],
+        "SchemaAttestation phases differ",
+    )
+    attestations_by_phase = {item["phase"]: item for item in attestations}
+    for phase, attestation in attestations_by_phase.items():
+        require(attestation["run_id"] == run_id, f"{phase} SchemaAttestation run mismatch")
+        require(attestation["backend"] == manifest["backend"], f"{phase} SchemaAttestation backend mismatch")
+        require(
+            attestation["backend_source_id"] == manifest["backend_source_id"],
+            f"{phase} SchemaAttestation source mismatch",
+        )
+        validate_schema_attestation(attestation, backend, adapter, f"{phase} SchemaAttestation")
+    startup = attestations_by_phase["STARTUP"]
+    final = attestations_by_phase["FINAL"]
+    require(startup["tables"] == final["tables"], "startup/final table attestation drift")
+    require(startup["backend_facts"] == final["backend_facts"], "startup/final backend fact drift")
+    require(
+        startup["canonical_attestation_digest"] == final["canonical_attestation_digest"],
+        "startup/final attestation digest drift",
+    )
     application_tables = set(manifest["application_table_allowlist"])
     control_tables = set(manifest["control_table_allowlist"])
     marker_table = manifest["transaction_marker_table"]
@@ -1664,14 +1839,17 @@ def main() -> int:
         verify_tpcc_client_fixture(contracts, schemas)
         records = verify_schemas_and_examples()
         adapter_example_count = verify_adapter_record_examples(contracts, schemas)
+        backend_example_count = verify_backend_attestation_examples(
+            backends, contracts, schemas
+        )
         verify_golden_vectors()
-        verify_cross_record_semantics(records, contracts)
+        verify_cross_record_semantics(records, contracts, backends)
     except VerificationError as error:
         print(f"protocol verification failed: {error}", file=sys.stderr)
         return 1
     print(
         "protocol verification passed: "
-        f"{sum(len(records) for records in records.values()) + adapter_example_count} examples, "
+        f"{sum(len(records) for records in records.values()) + adapter_example_count + backend_example_count} examples, "
         f"{len(list(SCHEMA_ROOT.glob('*.schema.json')))} schemas, "
         f"{len(contracts)} adapter contracts, "
         f"{len(backends)} backend contracts"

@@ -122,6 +122,7 @@ class RunController::Impl final {
 public:
   Impl(RunManifest manifest, RunControllerConfig config)
       : manifest_(std::move(manifest)), config_(std::move(config)),
+        backend_adapter_(BackendAdapterRegistry::require(manifest_.backend)),
         benchmark_adapter_(validatedBenchmarkAdapter(manifest_)),
         record_parser_(config_.record_parser_limits),
         client_parser_(manifest_.run_id, manifest_.expected_session_ids,
@@ -164,6 +165,14 @@ public:
         (void)record_parser_.parseRunManifest(payload);
         invalidate(MonitorErrorCode::RunManifestDuplicate,
                    "RunManifest is duplicated after run admission");
+        break;
+      case ProtocolRecordKind::SchemaAttestation:
+        try {
+          acceptSchemaAttestation(record_parser_.parseSchemaAttestation(payload));
+        } catch (const MonitorError &error) {
+          throw MonitorError(MonitorErrorCode::SchemaAttestationMalformed,
+                             error.what());
+        }
         break;
       case ProtocolRecordKind::BootstrapManifest:
         acceptBootstrapManifest(record_parser_.parseBootstrapManifest(payload));
@@ -251,7 +260,7 @@ public:
   }
 
   void onInputIdle() {
-    if (!terminal_ && endFenceObserved()) {
+    if (!terminal_ && endFenceObserved() && final_schema_attestation_.has_value()) {
       auditAndFinalize();
     }
   }
@@ -263,6 +272,11 @@ public:
     if (!endFenceObserved()) {
       invalidate(MonitorErrorCode::FenceMissing,
                  "monitor timed out before END_FENCE");
+    }
+    if (!startup_schema_attestation_.has_value() ||
+        !final_schema_attestation_.has_value()) {
+      invalidate(MonitorErrorCode::SchemaAttestationMissing,
+                 "monitor timed out before both schema attestations arrived");
     }
     addMissingClosureDiagnostics();
     invalid_ = true;
@@ -422,6 +436,57 @@ private:
         !component(stream_id.substr(separator + 1U))) {
       throw std::invalid_argument(std::string(label) + " stream ID is invalid");
     }
+  }
+
+  void acceptSchemaAttestation(SchemaAttestation attestation) {
+    if (attestation.run_id != manifest_.run_id ||
+        attestation.backend != manifest_.backend ||
+        attestation.backend_source_id != manifest_.backend_source_id) {
+      invalidate(MonitorErrorCode::SchemaAttestationMismatch,
+                 "SchemaAttestation identity differs from RunManifest");
+      return;
+    }
+    try {
+      backend_adapter_.validateSchemaAttestation(attestation,
+                                                 benchmark_adapter_);
+    } catch (const MonitorError &error) {
+      invalidate(error.code(), error.what());
+      return;
+    }
+    if (attestation.phase == SchemaAttestationPhase::Startup) {
+      if (startup_schema_attestation_.has_value()) {
+        invalidate(MonitorErrorCode::SchemaAttestationDuplicate,
+                   "STARTUP SchemaAttestation is duplicated");
+        return;
+      }
+      if (lifecycle_state_ != LifecycleState::Starting) {
+        invalidate(MonitorErrorCode::SchemaAttestationMismatch,
+                   "STARTUP SchemaAttestation arrived after run admission");
+        return;
+      }
+      startup_schema_attestation_ = std::move(attestation);
+      return;
+    }
+    if (final_schema_attestation_.has_value()) {
+      invalidate(MonitorErrorCode::SchemaAttestationDuplicate,
+                 "FINAL SchemaAttestation is duplicated");
+      return;
+    }
+    if (!startup_schema_attestation_.has_value() || !endFenceObserved()) {
+      invalidate(MonitorErrorCode::SchemaAttestationMismatch,
+                 "FINAL SchemaAttestation arrived before STARTUP/END_FENCE");
+      return;
+    }
+    const auto &startup = *startup_schema_attestation_;
+    if (attestation.tables != startup.tables ||
+        attestation.backend_facts != startup.backend_facts ||
+        attestation.canonical_attestation_digest !=
+            startup.canonical_attestation_digest) {
+      invalidate(MonitorErrorCode::SchemaAttestationDrift,
+                 "STARTUP and FINAL schema/capture attestations differ");
+      return;
+    }
+    final_schema_attestation_ = std::move(attestation);
   }
 
   void acceptBootstrapManifest(BootstrapManifest manifest) {
@@ -589,8 +654,10 @@ private:
     submitBootstrapIfReady();
     recordFirstViolation();
     const auto lifecycle = joiner_.lifecycle();
-    if (lifecycle == JoinLifecycle::Bootstrap &&
-        lifecycle_state_ == LifecycleState::Starting) {
+    if ((lifecycle == JoinLifecycle::Bootstrap ||
+         lifecycle == JoinLifecycle::Workload) &&
+        lifecycle_state_ == LifecycleState::Starting &&
+        startup_schema_attestation_.has_value()) {
       queueStatus(LifecycleState::StartFenceSeen);
       queueStatus(LifecycleState::Bootstrap);
     }
@@ -643,6 +710,11 @@ private:
   }
 
   void addMissingClosureDiagnostics() {
+    if (!startup_schema_attestation_.has_value() ||
+        !final_schema_attestation_.has_value()) {
+      invalidate(MonitorErrorCode::SchemaAttestationMissing,
+                 "STARTUP or FINAL SchemaAttestation is missing at closure");
+    }
     if (!bootstrap_manifest_.has_value() ||
         !joiner_.metrics().bootstrap_state_validated) {
       invalidate(MonitorErrorCode::BootstrapManifestMissing,
@@ -697,6 +769,14 @@ private:
 
     const auto expected_sessions = counter(sessions_.size());
     const auto completed_sessions = counter(audited_completed_sessions);
+    const bool schema_attestations_match =
+        startup_schema_attestation_.has_value() &&
+        final_schema_attestation_.has_value() &&
+        startup_schema_attestation_->tables == final_schema_attestation_->tables &&
+        startup_schema_attestation_->backend_facts ==
+            final_schema_attestation_->backend_facts &&
+        startup_schema_attestation_->canonical_attestation_digest ==
+            final_schema_attestation_->canonical_attestation_digest;
     bool exact = false;
     if (config_.processing_mode == ProcessingMode::Audited) {
       const auto expected_checker_transactions =
@@ -704,7 +784,8 @@ private:
           metrics.checker.bootstrap_transactions +
           metrics.checker.phase_anchor_transactions;
       exact =
-          endFenceObserved() && metrics.end_fence_processed &&
+          schema_attestations_match && endFenceObserved() &&
+          metrics.end_fence_processed &&
           metrics.bootstrap_state_validated &&
           completed_sessions == expected_sessions &&
           publishedTransactionTotal() == metrics.accepted_client_transactions &&
@@ -726,7 +807,8 @@ private:
           assembled_cdc_transactions_ == metrics.accepted_cdc_transactions;
     } else {
       exact =
-          endFenceObserved() && metrics.end_fence_processed &&
+          schema_attestations_match && endFenceObserved() &&
+          metrics.end_fence_processed &&
           metrics.bootstrap_state_validated &&
           completed_sessions == expected_sessions &&
           publishedTransactionTotal() == metrics.accepted_client_transactions &&
@@ -771,6 +853,12 @@ private:
 
     final_reconciliation_ = ReconciliationSummary{
         .evidence_reconciled = exact && !invalid_,
+        .startup_schema_attested = startup_schema_attestation_.has_value(),
+        .final_schema_attested = final_schema_attestation_.has_value(),
+        .schema_attestation_digest =
+            startup_schema_attestation_.has_value()
+                ? startup_schema_attestation_->canonical_attestation_digest
+                : std::string{},
         .bootstrap_manifest_validated = metrics.bootstrap_state_validated,
         .end_fence_seen = endFenceObserved(),
         .expected_sessions = expected_sessions,
@@ -906,6 +994,11 @@ private:
       const auto &reconciliation = *final_reconciliation_;
       status["reconciliation"] = Json{
           {"evidence_reconciled", reconciliation.evidence_reconciled},
+          {"startup_schema_attested",
+           reconciliation.startup_schema_attested},
+          {"final_schema_attested", reconciliation.final_schema_attested},
+          {"schema_attestation_digest",
+           reconciliation.schema_attestation_digest},
           {"bootstrap_manifest_validated",
            reconciliation.bootstrap_manifest_validated},
           {"end_fence_seen", reconciliation.end_fence_seen},
@@ -948,12 +1041,15 @@ private:
 
   RunManifest manifest_;
   RunControllerConfig config_;
+  const BackendAdapter &backend_adapter_;
   const BenchmarkAdapter &benchmark_adapter_;
   ProtocolRecordParser record_parser_;
   ClientTxnParser client_parser_;
   TransactionJoiner joiner_;
   std::unordered_map<std::string, SessionLedger> sessions_;
   std::optional<BootstrapManifest> bootstrap_manifest_;
+  std::optional<SchemaAttestation> startup_schema_attestation_;
+  std::optional<SchemaAttestation> final_schema_attestation_;
   std::vector<RunDiagnostic> diagnostics_;
   std::vector<std::string> pending_statuses_;
   std::optional<ReconciliationSummary> final_reconciliation_;

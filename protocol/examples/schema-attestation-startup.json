@@ -1,0 +1,68 @@
+{
+  "kind": "schema_attestation",
+  "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "phase": "STARTUP",
+  "backend": "mariadb",
+  "backend_source_id": "mariadb-main",
+  "tables": [
+    {
+      "canonical_table_name": "benchbase.checker_run_fence",
+      "primary_key_columns": ["run_id", "phase"],
+      "columns": [
+        {"name": "run_id", "logical_sql_type": "CHAR(36)", "nullable": false},
+        {"name": "phase", "logical_sql_type": "VARCHAR(32)", "nullable": false},
+        {"name": "nonce", "logical_sql_type": "CHAR(36)", "nullable": false}
+      ]
+    },
+    {
+      "canonical_table_name": "benchbase.session_txn",
+      "primary_key_columns": ["session_id"],
+      "columns": [
+        {"name": "session_id", "logical_sql_type": "VARCHAR(64)", "nullable": false},
+        {"name": "txn_id", "logical_sql_type": "BIGINT", "nullable": false}
+      ]
+    },
+    {
+      "canonical_table_name": "benchbase.usertable",
+      "primary_key_columns": ["ycsb_key"],
+      "columns": [
+        {"name": "ycsb_key", "logical_sql_type": "INT", "nullable": false},
+        {"name": "field1", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field2", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field3", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field4", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field5", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field6", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field7", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field8", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field9", "logical_sql_type": "VARCHAR(100)", "nullable": true},
+        {"name": "field10", "logical_sql_type": "VARCHAR(100)", "nullable": true}
+      ]
+    }
+  ],
+  "backend_facts": [
+    {"name": "database_name", "canonical_value": "benchbase"},
+    {"name": "schema_name", "canonical_value": "benchbase"},
+    {"name": "database_character_set", "canonical_value": "utf8mb4"},
+    {"name": "database_collation", "canonical_value": "utf8mb4_bin"},
+    {"name": "application_table_engine", "canonical_value": "InnoDB"},
+    {"name": "application_table_character_set", "canonical_value": "utf8mb4"},
+    {"name": "application_table_collation", "canonical_value": "utf8mb4_bin"},
+    {"name": "server_character_set", "canonical_value": "utf8mb4"},
+    {"name": "server_collation", "canonical_value": "utf8mb4_bin"},
+    {"name": "server_time_zone", "canonical_value": "+00:00"},
+    {"name": "server_sql_mode", "canonical_value": "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH"},
+    {"name": "server_transaction_isolation", "canonical_value": "REPEATABLE_READ"},
+    {"name": "server_snapshot_isolation", "canonical_value": "true"},
+    {"name": "connector_class", "canonical_value": "io.debezium.connector.mariadb.MariaDbConnector"},
+    {"name": "connector_source", "canonical_value": "mariadb"},
+    {"name": "connector_version", "canonical_value": "3.6.1.Final"},
+    {"name": "connector_tasks", "canonical_value": "1"},
+    {"name": "redis_stream", "canonical_value": "cdc"},
+    {"name": "database_image_digest", "canonical_value": "1111111111111111111111111111111111111111111111111111111111111111"},
+    {"name": "capture_table_roster_sha256", "canonical_value": "2222222222222222222222222222222222222222222222222222222222222222"},
+    {"name": "table_definition_sha256", "canonical_value": "3333333333333333333333333333333333333333333333333333333333333333"},
+    {"name": "dedicated_privileges_sha256", "canonical_value": "4444444444444444444444444444444444444444444444444444444444444444"}
+  ],
+  "canonical_attestation_digest": "dd3580ca7f1c748503b494af84069f0181cd83de55075e525f65a0e3b0f26661"
+}

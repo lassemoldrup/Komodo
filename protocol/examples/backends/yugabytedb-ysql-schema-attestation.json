@@ -1,0 +1,233 @@
+{
+  "kind": "schema_attestation",
+  "run_id": "00112233-4455-6677-8899-aabbccddeeff",
+  "phase": "STARTUP",
+  "backend": "yugabytedb_ysql",
+  "backend_source_id": "yugabytedb-ysql-main",
+  "tables": [
+    {
+      "canonical_table_name": "benchbase.checker_run_fence",
+      "primary_key_columns": [
+        "run_id",
+        "phase"
+      ],
+      "columns": [
+        {
+          "name": "run_id",
+          "logical_sql_type": "CHAR(36)",
+          "nullable": false
+        },
+        {
+          "name": "phase",
+          "logical_sql_type": "VARCHAR(32)",
+          "nullable": false
+        },
+        {
+          "name": "nonce",
+          "logical_sql_type": "CHAR(36)",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "canonical_table_name": "benchbase.session_txn",
+      "primary_key_columns": [
+        "session_id"
+      ],
+      "columns": [
+        {
+          "name": "session_id",
+          "logical_sql_type": "VARCHAR(64)",
+          "nullable": false
+        },
+        {
+          "name": "txn_id",
+          "logical_sql_type": "BIGINT",
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "canonical_table_name": "benchbase.usertable",
+      "primary_key_columns": [
+        "ycsb_key"
+      ],
+      "columns": [
+        {
+          "name": "ycsb_key",
+          "logical_sql_type": "INT",
+          "nullable": false
+        },
+        {
+          "name": "field1",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field2",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field3",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field4",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field5",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field6",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field7",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field8",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field9",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        },
+        {
+          "name": "field10",
+          "logical_sql_type": "VARCHAR(100)",
+          "nullable": true
+        }
+      ]
+    }
+  ],
+  "backend_facts": [
+    {
+      "name": "database_name",
+      "canonical_value": "benchbase"
+    },
+    {
+      "name": "schema_name",
+      "canonical_value": "benchbase"
+    },
+    {
+      "name": "server_version",
+      "canonical_value": "2025.2.5.2-b5"
+    },
+    {
+      "name": "server_build_hash",
+      "canonical_value": "84b2d0064618859f160408c0ce1cb33985581943"
+    },
+    {
+      "name": "client_encoding",
+      "canonical_value": "UTF8"
+    },
+    {
+      "name": "time_zone",
+      "canonical_value": "UTC"
+    },
+    {
+      "name": "search_path",
+      "canonical_value": "benchbase"
+    },
+    {
+      "name": "default_transaction_isolation",
+      "canonical_value": "repeatable read"
+    },
+    {
+      "name": "yb_read_from_followers",
+      "canonical_value": "false"
+    },
+    {
+      "name": "publication_name",
+      "canonical_value": "blackbox_publication"
+    },
+    {
+      "name": "slot_name",
+      "canonical_value": "blackbox_slot"
+    },
+    {
+      "name": "slot_database",
+      "canonical_value": "benchbase"
+    },
+    {
+      "name": "slot_plugin",
+      "canonical_value": "pgoutput"
+    },
+    {
+      "name": "slot_lsn_type",
+      "canonical_value": "SEQUENCE"
+    },
+    {
+      "name": "slot_active_consumers",
+      "canonical_value": "1"
+    },
+    {
+      "name": "streaming_mode",
+      "canonical_value": "default"
+    },
+    {
+      "name": "connector_class",
+      "canonical_value": "io.debezium.connector.postgresql.YugabyteDBConnector"
+    },
+    {
+      "name": "connector_source",
+      "canonical_value": "postgresql"
+    },
+    {
+      "name": "connector_version",
+      "canonical_value": "dz.2.5.2.yb.2026.1"
+    },
+    {
+      "name": "connector_sha256",
+      "canonical_value": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"
+    },
+    {
+      "name": "connector_tasks",
+      "canonical_value": "1"
+    },
+    {
+      "name": "redis_stream",
+      "canonical_value": "cdc"
+    },
+    {
+      "name": "cdc_enable_intra_transactional_before_image",
+      "canonical_value": "true"
+    },
+    {
+      "name": "cdc_send_null_before_image_if_not_exists",
+      "canonical_value": "false"
+    },
+    {
+      "name": "database_image_digest",
+      "canonical_value": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "name": "publication_membership_sha256",
+      "canonical_value": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    {
+      "name": "replica_identity_full_tables_sha256",
+      "canonical_value": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
+      "name": "table_oid_type_typmod_sha256",
+      "canonical_value": "8888888888888888888888888888888888888888888888888888888888888888"
+    },
+    {
+      "name": "dedicated_privileges_sha256",
+      "canonical_value": "9999999999999999999999999999999999999999999999999999999999999999"
+    }
+  ],
+  "canonical_attestation_digest": "2aa592d21b73c79a29337d4e85d5f54c4c0f1381e8cb5d2e7c163266cdbbce2d"
+}

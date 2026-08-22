@@ -30,6 +30,7 @@ using Json = nlohmann::json;
 constexpr std::uint64_t max_json_integer = 9007199254740991ULL;
 constexpr char marker_seed_domain[] = "db-monitoring/session-marker-seed";
 constexpr char marker_step_domain[] = "db-monitoring/session-marker-step";
+constexpr char schema_attestation_domain[] = "db-monitoring/schema-attestation";
 
 [[noreturn]] void malformed(const std::string &message) {
   throw MonitorError(MonitorErrorCode::ClientRecordMalformed, message);
@@ -347,7 +348,7 @@ translateFailures(const std::string_view label,
   validateIntegralNumberLexemes(payload);
   return detail::parseStrictJson(
       payload, detail::StrictJsonLimits{
-                   .max_depth = 4U,
+                   .max_depth = 8U,
                    .max_events = limits.max_payload_bytes + 1U,
                    .max_string_bytes = limits.max_payload_bytes,
                    .max_object_members = 16U,
@@ -454,6 +455,12 @@ parseStringArray(const Json &value, const std::string_view label,
       "UNEXPECTED_TABLE",
       "DDL_OBSERVED",
       "EXTERNAL_WRITER_OBSERVED",
+      "SCHEMA_ATTESTATION_MISSING",
+      "SCHEMA_ATTESTATION_DUPLICATE",
+      "SCHEMA_ATTESTATION_MALFORMED",
+      "SCHEMA_ATTESTATION_MISMATCH",
+      "SCHEMA_ATTESTATION_DRIFT",
+      "BACKEND_FACT_MISMATCH",
       "CLIENT_RECORD_MALFORMED",
       "CLIENT_READ_COUNT_MISMATCH",
       "CLIENT_READ_DIGEST_MISMATCH",
@@ -554,6 +561,23 @@ private:
   std::unique_ptr<EVP_MD_CTX, void (*)(EVP_MD_CTX *)> context_;
 };
 
+[[nodiscard]] std::string digestHex(const void *prefix,
+                                    const std::size_t prefix_size,
+                                    const std::string_view body) {
+  DigestContext digest;
+  digest.update(prefix, prefix_size);
+  digest.update(body.data(), body.size());
+  const auto bytes = digest.finish();
+  constexpr std::array<char, 16> hex = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+  std::string result(bytes.size() * 2U, '0');
+  for (std::size_t index = 0; index < bytes.size(); ++index) {
+    result[index * 2U] = hex[bytes[index] >> 4U];
+    result[index * 2U + 1U] = hex[bytes[index] & 0x0fU];
+  }
+  return result;
+}
+
 void updateU32(DigestContext &digest, const std::uint32_t value) {
   const std::array<unsigned char, 4> encoded = {
       static_cast<unsigned char>((value >> 24U) & 0xffU),
@@ -624,6 +648,9 @@ ProtocolRecordParser::kind(const std::string_view payload) const {
     if (value == "run_manifest") {
       return ProtocolRecordKind::RunManifest;
     }
+    if (value == "schema_attestation") {
+      return ProtocolRecordKind::SchemaAttestation;
+    }
     if (value == "bootstrap_manifest") {
       return ProtocolRecordKind::BootstrapManifest;
     }
@@ -659,8 +686,8 @@ ProtocolRecordParser::parseRunManifest(const std::string_view payload) const {
                                 "RunManifest.run_id");
     auto backend = stringValue(member(record, "backend", "RunManifest"),
                                "RunManifest.backend");
-    if (backend != "mariadb") {
-      malformed("RunManifest.backend is unsupported");
+    if (!isProtocolName(backend)) {
+      malformed("RunManifest.backend is not a bounded protocol name");
     }
     auto backend_source_id =
         stringValue(member(record, "backend_source_id", "RunManifest"),
@@ -727,6 +754,197 @@ ProtocolRecordParser::parseRunManifest(const std::string_view payload) const {
         .transaction_marker_table = std::move(marker_table),
         .control_table_allowlist = std::move(control_tables),
         .result_scope = std::move(result_scope),
+    };
+  });
+}
+
+SchemaAttestation ProtocolRecordParser::parseSchemaAttestation(
+    const std::string_view payload) const {
+  return translateFailures("SchemaAttestation", [&] {
+    const Json record = parseDocument(payload, limits_);
+    requireExactKeys(record,
+                     {"kind", "run_id", "phase", "backend",
+                      "backend_source_id", "tables", "backend_facts",
+                      "canonical_attestation_digest"},
+                     "SchemaAttestation");
+    if (stringValue(member(record, "kind", "SchemaAttestation"),
+                    "SchemaAttestation.kind") != "schema_attestation") {
+      malformed("SchemaAttestation.kind is not schema_attestation");
+    }
+    auto run_id = validatedUuid(member(record, "run_id", "SchemaAttestation"),
+                                "SchemaAttestation.run_id");
+    const auto phase_text = stringValue(
+        member(record, "phase", "SchemaAttestation"),
+        "SchemaAttestation.phase");
+    SchemaAttestationPhase phase;
+    if (phase_text == "STARTUP") {
+      phase = SchemaAttestationPhase::Startup;
+    } else if (phase_text == "FINAL") {
+      phase = SchemaAttestationPhase::Final;
+    } else {
+      malformed("SchemaAttestation.phase is invalid");
+    }
+    auto backend = stringValue(member(record, "backend", "SchemaAttestation"),
+                               "SchemaAttestation.backend");
+    if (!isProtocolName(backend)) {
+      malformed("SchemaAttestation.backend is not a bounded protocol name");
+    }
+    auto backend_source_id = stringValue(
+        member(record, "backend_source_id", "SchemaAttestation"),
+        "SchemaAttestation.backend_source_id");
+    const auto source_length = utf8CodePoints(backend_source_id);
+    if (source_length == 0U || source_length > 256U) {
+      malformed("SchemaAttestation.backend_source_id length is outside 1..256");
+    }
+
+    const auto &table_values = record.at("tables");
+    if (!table_values.is_array() || table_values.size() < 3U) {
+      malformed("SchemaAttestation.tables is not a complete table roster");
+    }
+    if (table_values.size() > limits_.max_table_entries) {
+      throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                         "SchemaAttestation table roster exceeds its limit");
+    }
+    std::vector<ProtocolSchemaTable> tables;
+    tables.reserve(table_values.size());
+    std::string previous_table;
+    for (const auto &table_value : table_values) {
+      requireExactKeys(table_value,
+                       {"canonical_table_name", "primary_key_columns",
+                        "columns"},
+                       "SchemaAttestation table");
+      auto table_name = validatedTable(
+          member(table_value, "canonical_table_name", "SchemaAttestation table"),
+          "SchemaAttestation table.canonical_table_name");
+      if (!previous_table.empty() && table_name <= previous_table) {
+        malformed("SchemaAttestation tables are duplicated or not sorted");
+      }
+      previous_table = table_name;
+      auto primary_keys = parseStringArray(
+          member(table_value, "primary_key_columns", "SchemaAttestation table"),
+          "SchemaAttestation table.primary_key_columns", limits_.max_table_entries,
+          isCanonicalIdentifier);
+      const auto &column_values = table_value.at("columns");
+      if (!column_values.is_array() || column_values.empty()) {
+        malformed("SchemaAttestation table.columns is empty or malformed");
+      }
+      if (column_values.size() > limits_.max_table_entries) {
+        throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                           "SchemaAttestation column roster exceeds its limit");
+      }
+      std::vector<ProtocolSchemaColumn> columns;
+      columns.reserve(column_values.size());
+      std::unordered_set<std::string> column_names;
+      for (const auto &column_value : column_values) {
+        requireObject(column_value, "SchemaAttestation column");
+        if (column_value.size() == 3U) {
+          requireExactKeys(column_value,
+                           {"name", "logical_sql_type", "nullable"},
+                           "SchemaAttestation column");
+        } else {
+          requireExactKeys(column_value,
+                           {"name", "logical_sql_type", "nullable", "generated"},
+                           "SchemaAttestation column");
+        }
+        auto name = stringValue(
+            member(column_value, "name", "SchemaAttestation column"),
+            "SchemaAttestation column.name");
+        if (!isCanonicalIdentifier(name) || !column_names.insert(name).second) {
+          malformed("SchemaAttestation column name is invalid or duplicated");
+        }
+        auto logical_type = stringValue(
+            member(column_value, "logical_sql_type", "SchemaAttestation column"),
+            "SchemaAttestation column.logical_sql_type");
+        const auto logical_length = utf8CodePoints(logical_type);
+        if (logical_length == 0U || logical_length > 128U) {
+          malformed("SchemaAttestation logical SQL type length is invalid");
+        }
+        const auto &nullable_value = column_value.at("nullable");
+        if (!nullable_value.is_boolean()) {
+          malformed("SchemaAttestation column.nullable is not boolean");
+        }
+        bool generated = false;
+        if (const auto found = column_value.find("generated");
+            found != column_value.end()) {
+          if (!found->is_boolean()) {
+            malformed("SchemaAttestation column.generated is not boolean");
+          }
+          generated = found->get<bool>();
+          if (!generated) {
+            malformed("SchemaAttestation column.generated may only be present as true");
+          }
+        }
+        columns.push_back(ProtocolSchemaColumn{
+            .name = std::move(name),
+            .logical_sql_type = std::move(logical_type),
+            .nullable = nullable_value.get<bool>(),
+            .generated = generated,
+        });
+      }
+      for (const auto &primary_key : primary_keys) {
+        if (!column_names.contains(primary_key)) {
+          malformed("SchemaAttestation primary key names an unknown column");
+        }
+      }
+      tables.push_back(ProtocolSchemaTable{
+          .canonical_table_name = std::move(table_name),
+          .primary_key_columns = std::move(primary_keys),
+          .columns = std::move(columns),
+      });
+    }
+
+    const auto &fact_values = record.at("backend_facts");
+    if (!fact_values.is_array() || fact_values.empty()) {
+      malformed("SchemaAttestation.backend_facts is empty or malformed");
+    }
+    if (fact_values.size() > limits_.max_table_entries) {
+      throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                         "SchemaAttestation backend fact roster exceeds its limit");
+    }
+    std::vector<ProtocolBackendFact> facts;
+    facts.reserve(fact_values.size());
+    std::unordered_set<std::string> fact_names;
+    for (const auto &fact_value : fact_values) {
+      requireExactKeys(fact_value, {"name", "canonical_value"},
+                       "SchemaAttestation backend fact");
+      auto name = stringValue(
+          member(fact_value, "name", "SchemaAttestation backend fact"),
+          "SchemaAttestation backend fact.name");
+      if (!isCanonicalIdentifier(name) || !fact_names.insert(name).second) {
+        malformed("SchemaAttestation backend fact name is invalid or duplicated");
+      }
+      auto value = stringValue(
+          member(fact_value, "canonical_value", "SchemaAttestation backend fact"),
+          "SchemaAttestation backend fact.canonical_value");
+      if (utf8CodePoints(value) > 4096U) {
+        malformed("SchemaAttestation backend fact value is oversized");
+      }
+      facts.push_back(ProtocolBackendFact{.name = std::move(name),
+                                          .canonical_value = std::move(value)});
+    }
+    auto attestation_digest = validatedDigest(
+        member(record, "canonical_attestation_digest", "SchemaAttestation"),
+        "SchemaAttestation.canonical_attestation_digest");
+    const Json digest_body = {
+        {"backend", backend},
+        {"backend_source_id", backend_source_id},
+        {"tables", table_values},
+        {"backend_facts", fact_values},
+    };
+    const auto expected_digest = digestHex(
+        schema_attestation_domain, sizeof(schema_attestation_domain),
+        digest_body.dump(-1, ' ', false, Json::error_handler_t::strict));
+    if (attestation_digest != expected_digest) {
+      malformed("SchemaAttestation canonical digest differs");
+    }
+    return SchemaAttestation{
+        .run_id = std::move(run_id),
+        .phase = phase,
+        .backend = std::move(backend),
+        .backend_source_id = std::move(backend_source_id),
+        .tables = std::move(tables),
+        .backend_facts = std::move(facts),
+        .canonical_attestation_digest = std::move(attestation_digest),
     };
   });
 }
@@ -980,10 +1198,47 @@ std::string computeRollingSessionMarkerDigest(
   return sessionMarkerDigestHex(digest);
 }
 
+std::string
+computeSchemaAttestationDigest(const SchemaAttestation &attestation) {
+  Json tables = Json::array();
+  for (const auto &table : attestation.tables) {
+    Json columns = Json::array();
+    for (const auto &column : table.columns) {
+      Json encoded{{"name", column.name},
+                   {"logical_sql_type", column.logical_sql_type},
+                   {"nullable", column.nullable}};
+      if (column.generated) {
+        encoded["generated"] = true;
+      }
+      columns.push_back(std::move(encoded));
+    }
+    tables.push_back(Json{
+        {"canonical_table_name", table.canonical_table_name},
+        {"primary_key_columns", table.primary_key_columns},
+        {"columns", std::move(columns)},
+    });
+  }
+  Json facts = Json::array();
+  for (const auto &fact : attestation.backend_facts) {
+    facts.push_back(
+        Json{{"name", fact.name}, {"canonical_value", fact.canonical_value}});
+  }
+  const Json body = {
+      {"backend", attestation.backend},
+      {"backend_source_id", attestation.backend_source_id},
+      {"tables", std::move(tables)},
+      {"backend_facts", std::move(facts)},
+  };
+  return digestHex(schema_attestation_domain, sizeof(schema_attestation_domain),
+                   body.dump(-1, ' ', false, Json::error_handler_t::strict));
+}
+
 std::string_view toString(const ProtocolRecordKind kind) noexcept {
   switch (kind) {
   case ProtocolRecordKind::RunManifest:
     return "run_manifest";
+  case ProtocolRecordKind::SchemaAttestation:
+    return "schema_attestation";
   case ProtocolRecordKind::BootstrapManifest:
     return "bootstrap_manifest";
   case ProtocolRecordKind::ClientTxn:
@@ -992,6 +1247,16 @@ std::string_view toString(const ProtocolRecordKind kind) noexcept {
     return "session_done";
   case ProtocolRecordKind::RunFailed:
     return "run_failed";
+  }
+  std::abort();
+}
+
+std::string_view toString(const SchemaAttestationPhase phase) noexcept {
+  switch (phase) {
+  case SchemaAttestationPhase::Startup:
+    return "STARTUP";
+  case SchemaAttestationPhase::Final:
+    return "FINAL";
   }
   std::abort();
 }

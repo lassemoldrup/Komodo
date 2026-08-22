@@ -1,32 +1,69 @@
 {
   "backend": "mariadb",
-  "server_defaults": {
-    "character_set": "utf8mb4",
-    "collation": "utf8mb4_bin",
-    "time_zone": "+00:00",
-    "sql_mode": "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH",
-    "transaction_isolation": "REPEATABLE_READ",
-    "snapshot_isolation": true
+  "accepted_database_types": ["MARIADB"],
+  "physical_namespace": {
+    "database": "benchbase",
+    "schema": "benchbase",
+    "search_path": null
   },
-  "session_requirements": {
-    "set_names": "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
-    "character_set_client": "utf8mb4",
-    "character_set_connection": "utf8mb4",
-    "character_set_results": "utf8mb4",
-    "collation_connection": "utf8mb4_bin",
-    "time_zone": "+00:00",
-    "sql_mode": "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH",
-    "transaction_isolation": "REPEATABLE_READ",
-    "snapshot_isolation": true
+  "session_contract": {
+    "declared_isolations": ["REPEATABLE_READ"],
+    "configure_in_autocommit": true,
+    "configuration_statements": [
+      "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
+      "SET SESSION time_zone='+00:00'",
+      "SET SESSION sql_mode='STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH'"
+    ],
+    "required_observations": [
+      {"name": "character_set_client", "expected_value": "utf8mb4"},
+      {"name": "character_set_connection", "expected_value": "utf8mb4"},
+      {"name": "character_set_results", "expected_value": "utf8mb4"},
+      {"name": "collation_connection", "expected_value": "utf8mb4_bin"},
+      {"name": "time_zone", "expected_value": "+00:00"},
+      {"name": "sql_mode", "expected_value": "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH"},
+      {"name": "transaction_isolation", "expected_value": "REPEATABLE_READ"},
+      {"name": "snapshot_isolation", "expected_value": "true"}
+    ]
   },
-  "database_defaults": {
-    "character_set": "utf8mb4",
-    "collation": "utf8mb4_bin"
-  },
-  "application_table_requirements": {
-    "engine": "InnoDB",
-    "character_set": "utf8mb4",
-    "collation": "utf8mb4_bin",
+  "normalized_capabilities": {
+    "transaction_framing": "contiguous_begin_rows_end",
+    "commit_order": "single_stream_completed_transaction_order",
+    "full_before_after_images": true,
+    "marker_last": true,
+    "connector_startup_schema_evidence": "required",
     "char_read_semantics": "pad_to_declared_length"
-  }
+  },
+  "connector_contract": {
+    "connector_class": "io.debezium.connector.mariadb.MariaDbConnector",
+    "source_connector": "mariadb",
+    "source_version": "3.6.1.Final",
+    "envelope_profile": "mariadb_debezium_3_6_1",
+    "transaction_metadata": true,
+    "tasks": 1,
+    "redis_stream": "cdc"
+  },
+  "attestation_fact_contract": [
+    {"name": "database_name", "value_rule": "exact", "expected_value": "benchbase"},
+    {"name": "schema_name", "value_rule": "exact", "expected_value": "benchbase"},
+    {"name": "database_character_set", "value_rule": "exact", "expected_value": "utf8mb4"},
+    {"name": "database_collation", "value_rule": "exact", "expected_value": "utf8mb4_bin"},
+    {"name": "application_table_engine", "value_rule": "exact", "expected_value": "InnoDB"},
+    {"name": "application_table_character_set", "value_rule": "exact", "expected_value": "utf8mb4"},
+    {"name": "application_table_collation", "value_rule": "exact", "expected_value": "utf8mb4_bin"},
+    {"name": "server_character_set", "value_rule": "exact", "expected_value": "utf8mb4"},
+    {"name": "server_collation", "value_rule": "exact", "expected_value": "utf8mb4_bin"},
+    {"name": "server_time_zone", "value_rule": "exact", "expected_value": "+00:00"},
+    {"name": "server_sql_mode", "value_rule": "exact", "expected_value": "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,PAD_CHAR_TO_FULL_LENGTH"},
+    {"name": "server_transaction_isolation", "value_rule": "exact", "expected_value": "REPEATABLE_READ"},
+    {"name": "server_snapshot_isolation", "value_rule": "exact", "expected_value": "true"},
+    {"name": "connector_class", "value_rule": "exact", "expected_value": "io.debezium.connector.mariadb.MariaDbConnector"},
+    {"name": "connector_source", "value_rule": "exact", "expected_value": "mariadb"},
+    {"name": "connector_version", "value_rule": "exact", "expected_value": "3.6.1.Final"},
+    {"name": "connector_tasks", "value_rule": "exact", "expected_value": "1"},
+    {"name": "redis_stream", "value_rule": "exact", "expected_value": "cdc"},
+    {"name": "database_image_digest", "value_rule": "sha256"},
+    {"name": "capture_table_roster_sha256", "value_rule": "sha256"},
+    {"name": "table_definition_sha256", "value_rule": "sha256"},
+    {"name": "dedicated_privileges_sha256", "value_rule": "sha256"}
+  ]
 }

@@ -4,10 +4,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #ifndef BLACKBOX_PROTOCOL_BACKEND_DIR
 #error "BLACKBOX_PROTOCOL_BACKEND_DIR must name the protocol backend directory"
@@ -16,13 +18,15 @@
 namespace {
 
 using blackbox::BackendAdapterRegistry;
+using blackbox::BackendAdapterCatalog;
+using blackbox::BackendFactValueRule;
 using blackbox::MonitorError;
 using blackbox::MonitorErrorCode;
 using Json = nlohmann::json;
 
-[[nodiscard]] Json loadBackendContract() {
-  const auto path =
-      std::filesystem::path(BLACKBOX_PROTOCOL_BACKEND_DIR) / "mariadb.json";
+[[nodiscard]] Json loadBackendContract(const std::string_view backend) {
+  const auto path = std::filesystem::path(BLACKBOX_PROTOCOL_BACKEND_DIR) /
+                    (std::string(backend) + ".json");
   std::ifstream input(path, std::ios::binary);
   if (!input.good()) {
     throw std::runtime_error("cannot open shared backend contract: " +
@@ -33,80 +37,64 @@ using Json = nlohmann::json;
   return result;
 }
 
-void checkSharedMariaDbContract() {
-  const auto contract = loadBackendContract();
-  const auto &adapter = BackendAdapterRegistry::require("mariadb");
+[[nodiscard]] std::string_view ruleName(const BackendFactValueRule rule) {
+  switch (rule) {
+  case BackendFactValueRule::Exact:
+    return "exact";
+  case BackendFactValueRule::Sha256:
+    return "sha256";
+  case BackendFactValueRule::CanonicalIdentifier:
+    return "canonical_identifier";
+  case BackendFactValueRule::PositiveInteger:
+    return "positive_integer";
+  }
+  std::abort();
+}
+
+void checkSharedContract(const std::string_view backend) {
+  const auto contract = loadBackendContract(backend);
+  const auto &adapter = BackendAdapterRegistry::require(backend);
   BLACKBOX_CHECK(contract.at("backend").get<std::string>() == adapter.name());
+  BLACKBOX_CHECK(contract.at("connector_contract").at("source_version") ==
+                 adapter.connectorVersion());
 
-  const auto server = adapter.serverDefaults();
-  const auto &expected_server = contract.at("server_defaults");
-  BLACKBOX_CHECK(server.character_set ==
-                 expected_server.at("character_set").get<std::string>());
-  BLACKBOX_CHECK(server.collation ==
-                 expected_server.at("collation").get<std::string>());
-  BLACKBOX_CHECK(server.time_zone ==
-                 expected_server.at("time_zone").get<std::string>());
-  BLACKBOX_CHECK(server.sql_mode ==
-                 expected_server.at("sql_mode").get<std::string>());
-  BLACKBOX_CHECK(
-      server.transaction_isolation ==
-      expected_server.at("transaction_isolation").get<std::string>());
-  BLACKBOX_CHECK(server.snapshot_isolation ==
-                 expected_server.at("snapshot_isolation").get<bool>());
+  const auto capabilities = adapter.normalizedCapabilities();
+  const auto &expected_capabilities = contract.at("normalized_capabilities");
+  BLACKBOX_CHECK(capabilities.connector_startup_schema_evidence ==
+                 (expected_capabilities.at("connector_startup_schema_evidence") ==
+                  "required"));
+  BLACKBOX_CHECK(capabilities.full_before_after_images ==
+                 expected_capabilities.at("full_before_after_images").get<bool>());
+  BLACKBOX_CHECK(capabilities.marker_last ==
+                 expected_capabilities.at("marker_last").get<bool>());
+  BLACKBOX_CHECK(capabilities.transaction_framing ==
+                 expected_capabilities.at("transaction_framing").get<std::string>());
+  BLACKBOX_CHECK(capabilities.commit_order ==
+                 expected_capabilities.at("commit_order").get<std::string>());
 
-  const auto session = adapter.sessionRequirements();
-  const auto &expected_session = contract.at("session_requirements");
-  BLACKBOX_CHECK(session.set_names ==
-                 expected_session.at("set_names").get<std::string>());
-  BLACKBOX_CHECK(
-      session.character_set_client ==
-      expected_session.at("character_set_client").get<std::string>());
-  BLACKBOX_CHECK(
-      session.character_set_connection ==
-      expected_session.at("character_set_connection").get<std::string>());
-  BLACKBOX_CHECK(
-      session.character_set_results ==
-      expected_session.at("character_set_results").get<std::string>());
-  BLACKBOX_CHECK(
-      session.collation_connection ==
-      expected_session.at("collation_connection").get<std::string>());
-  BLACKBOX_CHECK(session.time_zone ==
-                 expected_session.at("time_zone").get<std::string>());
-  BLACKBOX_CHECK(session.sql_mode ==
-                 expected_session.at("sql_mode").get<std::string>());
-  BLACKBOX_CHECK(
-      session.transaction_isolation ==
-      expected_session.at("transaction_isolation").get<std::string>());
-  BLACKBOX_CHECK(session.snapshot_isolation ==
-                 expected_session.at("snapshot_isolation").get<bool>());
-
-  const auto database = adapter.databaseDefaults();
-  const auto &expected_database = contract.at("database_defaults");
-  BLACKBOX_CHECK(database.character_set ==
-                 expected_database.at("character_set").get<std::string>());
-  BLACKBOX_CHECK(database.collation ==
-                 expected_database.at("collation").get<std::string>());
-
-  const auto application = adapter.applicationTableRequirements();
-  const auto &expected_application =
-      contract.at("application_table_requirements");
-  BLACKBOX_CHECK(application.engine ==
-                 expected_application.at("engine").get<std::string>());
-  BLACKBOX_CHECK(application.character_set ==
-                 expected_application.at("character_set").get<std::string>());
-  BLACKBOX_CHECK(application.collation ==
-                 expected_application.at("collation").get<std::string>());
-  BLACKBOX_CHECK(
-      application.char_read_semantics ==
-      expected_application.at("char_read_semantics").get<std::string>());
+  const auto rules = adapter.attestationFactContract();
+  const auto &expected_rules = contract.at("attestation_fact_contract");
+  BLACKBOX_CHECK(rules.size() == expected_rules.size());
+  for (std::size_t index = 0; index < rules.size(); ++index) {
+    BLACKBOX_CHECK(rules[index].name ==
+                   expected_rules.at(index).at("name").get<std::string>());
+    BLACKBOX_CHECK(ruleName(rules[index].value_rule) ==
+                   expected_rules.at(index).at("value_rule").get<std::string>());
+    if (rules[index].value_rule == BackendFactValueRule::Exact) {
+      BLACKBOX_CHECK(
+          rules[index].expected_value ==
+          expected_rules.at(index).at("expected_value").get<std::string>());
+    }
+  }
 }
 
 void checkRegistry() {
   BLACKBOX_CHECK(
       blackbox::toString(MonitorErrorCode::SessionContractMismatch) ==
       "SESSION_CONTRACT_MISMATCH");
-  BLACKBOX_CHECK(BackendAdapterRegistry::adapters().size() == 1U);
+  BLACKBOX_CHECK(BackendAdapterRegistry::adapters().size() == 2U);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("mariadb") != nullptr);
+  BLACKBOX_CHECK(BackendAdapterRegistry::find("yugabytedb_ysql") != nullptr);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("unknown") == nullptr);
   try {
     (void)BackendAdapterRegistry::require("unknown");
@@ -116,10 +104,88 @@ void checkRegistry() {
   }
 }
 
+void checkCatalogOnlySchemaCapability() {
+  auto decoder = BackendAdapterRegistry::require("yugabytedb_ysql")
+                     .createCdcStartupSchemaDecoder({});
+  BLACKBOX_REQUIRE(decoder != nullptr);
+  BLACKBOX_CHECK(decoder->sawRecord());
+  BLACKBOX_CHECK(decoder->complete());
+  try {
+    (void)decoder->accept(Json::object(), Json::object());
+    BLACKBOX_CHECK(false);
+  } catch (const blackbox::AdapterSchemaError &) {
+  }
+}
+
+class SyntheticBackendAdapter final : public blackbox::BackendAdapter {
+public:
+  explicit SyntheticBackendAdapter(const blackbox::BackendAdapter &delegate)
+      : delegate_(delegate) {}
+
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "synthetic_backend";
+  }
+  [[nodiscard]] std::string_view connectorVersion() const noexcept override {
+    return delegate_.connectorVersion();
+  }
+  [[nodiscard]] blackbox::BackendServerDefaults
+  serverDefaults() const noexcept override {
+    return delegate_.serverDefaults();
+  }
+  [[nodiscard]] blackbox::BackendSessionRequirements
+  sessionRequirements() const noexcept override {
+    return delegate_.sessionRequirements();
+  }
+  [[nodiscard]] blackbox::BackendDatabaseDefaults
+  databaseDefaults() const noexcept override {
+    return delegate_.databaseDefaults();
+  }
+  [[nodiscard]] blackbox::ApplicationTableRequirements
+  applicationTableRequirements() const noexcept override {
+    return delegate_.applicationTableRequirements();
+  }
+  [[nodiscard]] blackbox::BackendNormalizedCapabilities
+  normalizedCapabilities() const noexcept override {
+    return delegate_.normalizedCapabilities();
+  }
+  [[nodiscard]] std::span<const blackbox::BackendFactRule>
+  attestationFactContract() const noexcept override {
+    return delegate_.attestationFactContract();
+  }
+  [[nodiscard]] std::unique_ptr<blackbox::CdcStartupSchemaDecoder>
+  createCdcStartupSchemaDecoder(blackbox::CdcStartupSchemaConfig) const override {
+    throw std::runtime_error("injected synthetic decoder failure");
+  }
+
+private:
+  const blackbox::BackendAdapter &delegate_;
+};
+
+void checkSyntheticCatalogSelectionAndFailurePropagation() {
+  const auto &mariadb = BackendAdapterRegistry::require("mariadb");
+  SyntheticBackendAdapter synthetic(mariadb);
+  const std::array<const blackbox::BackendAdapter *, 2> adapters = {
+      &mariadb, &synthetic};
+  const BackendAdapterCatalog catalog(adapters);
+  BLACKBOX_CHECK(catalog.require("synthetic_backend").name() ==
+                 "synthetic_backend");
+  try {
+    (void)catalog.require("synthetic_backend")
+        .createCdcStartupSchemaDecoder({});
+    BLACKBOX_CHECK(false);
+  } catch (const std::runtime_error &error) {
+    BLACKBOX_CHECK(std::string_view(error.what()).find("injected") !=
+                   std::string_view::npos);
+  }
+}
+
 } // namespace
 
 int runBackendAdapterTests() {
-  checkSharedMariaDbContract();
+  checkSharedContract("mariadb");
+  checkSharedContract("yugabytedb_ysql");
   checkRegistry();
+  checkCatalogOnlySchemaCapability();
+  checkSyntheticCatalogSelectionAndFailurePropagation();
   return 0;
 }

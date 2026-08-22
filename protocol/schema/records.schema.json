@@ -3,6 +3,7 @@
   "$id": "https://db-monitoring.local/schema/records.schema.json",
   "oneOf": [
     { "$ref": "run-manifest.schema.json" },
+    { "$ref": "schema-attestation.schema.json" },
     { "$ref": "bootstrap-manifest.schema.json" },
     { "$ref": "client-txn.schema.json" },
     { "$ref": "session-done.schema.json" },

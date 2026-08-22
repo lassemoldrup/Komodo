@@ -1,0 +1,74 @@
+{
+  "backend": "yugabytedb_ysql",
+  "accepted_database_types": ["POSTGRES"],
+  "physical_namespace": {
+    "database": "benchbase",
+    "schema": "benchbase",
+    "search_path": "benchbase"
+  },
+  "session_contract": {
+    "declared_isolations": ["REPEATABLE_READ"],
+    "configure_in_autocommit": true,
+    "configuration_statements": [
+      "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+      "SET TIME ZONE 'UTC'",
+      "SET search_path TO benchbase",
+      "SET yb_read_from_followers = false"
+    ],
+    "required_observations": [
+      {"name": "client_encoding", "expected_value": "UTF8"},
+      {"name": "time_zone", "expected_value": "UTC"},
+      {"name": "search_path", "expected_value": "benchbase"},
+      {"name": "transaction_isolation", "expected_value": "repeatable read"},
+      {"name": "yb_read_from_followers", "expected_value": "false"}
+    ]
+  },
+  "normalized_capabilities": {
+    "transaction_framing": "contiguous_begin_rows_end",
+    "commit_order": "single_stream_completed_transaction_order",
+    "full_before_after_images": true,
+    "marker_last": true,
+    "connector_startup_schema_evidence": "not_available",
+    "char_read_semantics": "pad_to_declared_length"
+  },
+  "connector_contract": {
+    "connector_class": "io.debezium.connector.postgresql.YugabyteDBConnector",
+    "source_connector": "postgresql",
+    "source_version": "dz.2.5.2.yb.2026.1",
+    "envelope_profile": "yugabytedb_pgoutput_2_5_2",
+    "transaction_metadata": true,
+    "tasks": 1,
+    "redis_stream": "cdc"
+  },
+  "attestation_fact_contract": [
+    {"name": "database_name", "value_rule": "exact", "expected_value": "benchbase"},
+    {"name": "schema_name", "value_rule": "exact", "expected_value": "benchbase"},
+    {"name": "server_version", "value_rule": "exact", "expected_value": "2025.2.5.2-b5"},
+    {"name": "server_build_hash", "value_rule": "exact", "expected_value": "84b2d0064618859f160408c0ce1cb33985581943"},
+    {"name": "client_encoding", "value_rule": "exact", "expected_value": "UTF8"},
+    {"name": "time_zone", "value_rule": "exact", "expected_value": "UTC"},
+    {"name": "search_path", "value_rule": "exact", "expected_value": "benchbase"},
+    {"name": "default_transaction_isolation", "value_rule": "exact", "expected_value": "repeatable read"},
+    {"name": "yb_read_from_followers", "value_rule": "exact", "expected_value": "false"},
+    {"name": "publication_name", "value_rule": "canonical_identifier"},
+    {"name": "slot_name", "value_rule": "canonical_identifier"},
+    {"name": "slot_database", "value_rule": "exact", "expected_value": "benchbase"},
+    {"name": "slot_plugin", "value_rule": "exact", "expected_value": "pgoutput"},
+    {"name": "slot_lsn_type", "value_rule": "exact", "expected_value": "SEQUENCE"},
+    {"name": "slot_active_consumers", "value_rule": "exact", "expected_value": "1"},
+    {"name": "streaming_mode", "value_rule": "exact", "expected_value": "default"},
+    {"name": "connector_class", "value_rule": "exact", "expected_value": "io.debezium.connector.postgresql.YugabyteDBConnector"},
+    {"name": "connector_source", "value_rule": "exact", "expected_value": "postgresql"},
+    {"name": "connector_version", "value_rule": "exact", "expected_value": "dz.2.5.2.yb.2026.1"},
+    {"name": "connector_sha256", "value_rule": "exact", "expected_value": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"},
+    {"name": "connector_tasks", "value_rule": "exact", "expected_value": "1"},
+    {"name": "redis_stream", "value_rule": "exact", "expected_value": "cdc"},
+    {"name": "cdc_enable_intra_transactional_before_image", "value_rule": "exact", "expected_value": "true"},
+    {"name": "cdc_send_null_before_image_if_not_exists", "value_rule": "exact", "expected_value": "false"},
+    {"name": "database_image_digest", "value_rule": "sha256"},
+    {"name": "publication_membership_sha256", "value_rule": "sha256"},
+    {"name": "replica_identity_full_tables_sha256", "value_rule": "sha256"},
+    {"name": "table_oid_type_typmod_sha256", "value_rule": "sha256"},
+    {"name": "dedicated_privileges_sha256", "value_rule": "sha256"}
+  ]
+}

@@ -42,6 +42,9 @@ struct RunDiagnostic {
 
 struct ReconciliationSummary {
   bool evidence_reconciled = false;
+  bool startup_schema_attested = false;
+  bool final_schema_attested = false;
+  std::string schema_attestation_digest;
   bool bootstrap_manifest_validated = false;
   bool end_fence_seen = false;
   std::uint64_t expected_sessions = 0;

@@ -15,10 +15,52 @@ namespace blackbox {
 
 enum class ProtocolRecordKind {
   RunManifest,
+  SchemaAttestation,
   BootstrapManifest,
   ClientTxn,
   SessionDone,
   RunFailed,
+};
+
+enum class SchemaAttestationPhase {
+  Startup,
+  Final,
+};
+
+struct ProtocolSchemaColumn {
+  std::string name;
+  std::string logical_sql_type;
+  bool nullable = false;
+  bool generated = false;
+
+  bool operator==(const ProtocolSchemaColumn &) const = default;
+};
+
+struct ProtocolSchemaTable {
+  std::string canonical_table_name;
+  std::vector<std::string> primary_key_columns;
+  std::vector<ProtocolSchemaColumn> columns;
+
+  bool operator==(const ProtocolSchemaTable &) const = default;
+};
+
+struct ProtocolBackendFact {
+  std::string name;
+  std::string canonical_value;
+
+  bool operator==(const ProtocolBackendFact &) const = default;
+};
+
+struct SchemaAttestation {
+  std::string run_id;
+  SchemaAttestationPhase phase = SchemaAttestationPhase::Startup;
+  std::string backend;
+  std::string backend_source_id;
+  std::vector<ProtocolSchemaTable> tables;
+  std::vector<ProtocolBackendFact> backend_facts;
+  std::string canonical_attestation_digest;
+
+  bool operator==(const SchemaAttestation &) const = default;
 };
 
 struct RunManifest {
@@ -99,6 +141,8 @@ public:
 
   [[nodiscard]] ProtocolRecordKind kind(std::string_view payload) const;
   [[nodiscard]] RunManifest parseRunManifest(std::string_view payload) const;
+  [[nodiscard]] SchemaAttestation
+  parseSchemaAttestation(std::string_view payload) const;
   [[nodiscard]] BootstrapManifest
   parseBootstrapManifest(std::string_view payload) const;
   [[nodiscard]] SessionDone parseSessionDone(std::string_view payload) const;
@@ -123,6 +167,10 @@ computeRollingSessionMarkerDigest(std::string_view run_id,
                                   std::string_view session_id,
                                   std::span<const SessionMarkerEntry> entries);
 
+[[nodiscard]] std::string
+computeSchemaAttestationDigest(const SchemaAttestation &attestation);
+
 [[nodiscard]] std::string_view toString(ProtocolRecordKind kind) noexcept;
+[[nodiscard]] std::string_view toString(SchemaAttestationPhase phase) noexcept;
 
 } // namespace blackbox

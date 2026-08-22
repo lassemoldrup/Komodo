@@ -1,5 +1,6 @@
 #include "blackbox/run_controller.h"
 
+#include "blackbox/backend_adapter.h"
 #include "blackbox/canonical_tpcc_codec.h"
 #include "blackbox/canonical_ycsb_codec.h"
 #include "blackbox/client_txn.h"
@@ -44,6 +45,8 @@ using blackbox::RunController;
 using blackbox::RunFencePhase;
 using blackbox::RunManifest;
 using blackbox::RunScopedCorrelationId;
+using blackbox::SchemaAttestation;
+using blackbox::SchemaAttestationPhase;
 using blackbox::SessionMarkerEntry;
 using Json = nlohmann::json;
 
@@ -372,12 +375,143 @@ donePayload(const std::uint64_t count,
       .dump();
 }
 
+[[nodiscard]] std::string attestationPayload(
+    const std::string_view benchmark, const SchemaAttestationPhase phase,
+    const std::string_view attestation_run_id = run_id,
+    const bool drift = false) {
+  const auto &benchmark_adapter =
+      blackbox::BenchmarkAdapterRegistry::require(benchmark);
+  const auto &backend_adapter =
+      blackbox::BackendAdapterRegistry::require("mariadb");
+  SchemaAttestation attestation{
+      .run_id = std::string(attestation_run_id),
+      .phase = phase,
+      .backend = "mariadb",
+      .backend_source_id = "mariadb-main",
+      .tables = {},
+      .backend_facts = {},
+      .canonical_attestation_digest = {},
+  };
+  for (const auto &table : benchmark_adapter.tables()) {
+    blackbox::ProtocolSchemaTable encoded{
+        .canonical_table_name = std::string(table.name),
+        .primary_key_columns = {},
+        .columns = {},
+    };
+    for (const auto key : table.primary_key) {
+      encoded.primary_key_columns.emplace_back(key);
+    }
+    for (const auto &column : table.columns) {
+      encoded.columns.push_back(blackbox::ProtocolSchemaColumn{
+          .name = std::string(column.name),
+          .logical_sql_type = std::string(column.sql_type),
+          .nullable = column.nullable,
+          .generated = column.generated.has_value(),
+      });
+    }
+    attestation.tables.push_back(std::move(encoded));
+  }
+  attestation.tables.push_back(blackbox::ProtocolSchemaTable{
+      .canonical_table_name = "benchbase.checker_run_fence",
+      .primary_key_columns = {"run_id", "phase"},
+      .columns = {
+          {.name = "run_id", .logical_sql_type = "CHAR(36)"},
+          {.name = "phase", .logical_sql_type = "VARCHAR(32)"},
+          {.name = "nonce", .logical_sql_type = "CHAR(36)"},
+      },
+  });
+  attestation.tables.push_back(blackbox::ProtocolSchemaTable{
+      .canonical_table_name = "benchbase.session_txn",
+      .primary_key_columns = {"session_id"},
+      .columns = {
+          {.name = "session_id", .logical_sql_type = "VARCHAR(64)"},
+          {.name = "txn_id", .logical_sql_type = "BIGINT"},
+      },
+  });
+  std::sort(attestation.tables.begin(), attestation.tables.end(),
+            [](const auto &left, const auto &right) {
+              return left.canonical_table_name < right.canonical_table_name;
+            });
+  std::size_t dynamic_index = 0U;
+  for (const auto &rule : backend_adapter.attestationFactContract()) {
+    std::string value;
+    switch (rule.value_rule) {
+    case blackbox::BackendFactValueRule::Exact:
+      value = std::string(rule.expected_value);
+      break;
+    case blackbox::BackendFactValueRule::Sha256:
+      value = std::string(64U, static_cast<char>('1' + dynamic_index++));
+      break;
+    case blackbox::BackendFactValueRule::CanonicalIdentifier:
+      value = "test_identifier";
+      break;
+    case blackbox::BackendFactValueRule::PositiveInteger:
+      value = "1";
+      break;
+    }
+    attestation.backend_facts.push_back(
+        {.name = std::string(rule.name), .canonical_value = std::move(value)});
+  }
+  if (drift) {
+    attestation.backend_facts.back().canonical_value = std::string(64U, 'f');
+  }
+  attestation.canonical_attestation_digest =
+      blackbox::computeSchemaAttestationDigest(attestation);
+
+  Json tables = Json::array();
+  for (const auto &table : attestation.tables) {
+    Json columns = Json::array();
+    for (const auto &column : table.columns) {
+      Json encoded{{"name", column.name},
+                   {"logical_sql_type", column.logical_sql_type},
+                   {"nullable", column.nullable}};
+      if (column.generated) {
+        encoded["generated"] = true;
+      }
+      columns.push_back(std::move(encoded));
+    }
+    tables.push_back(Json{{"canonical_table_name", table.canonical_table_name},
+                          {"primary_key_columns", table.primary_key_columns},
+                          {"columns", std::move(columns)}});
+  }
+  Json facts = Json::array();
+  for (const auto &fact : attestation.backend_facts) {
+    facts.push_back(
+        Json{{"name", fact.name}, {"canonical_value", fact.canonical_value}});
+  }
+  return Json{
+      {"kind", "schema_attestation"},
+      {"run_id", attestation.run_id},
+      {"phase", blackbox::toString(attestation.phase)},
+      {"backend", attestation.backend},
+      {"backend_source_id", attestation.backend_source_id},
+      {"tables", std::move(tables)},
+      {"backend_facts", std::move(facts)},
+      {"canonical_attestation_digest",
+       attestation.canonical_attestation_digest},
+  }
+      .dump();
+}
+
+void idle(RunController &controller,
+          const std::string_view benchmark = "ycsb",
+          const std::string_view attestation_run_id = run_id) {
+  if (controller.endFenceObserved() && !controller.terminal()) {
+    controller.acceptClientPayload(
+        attestationPayload(benchmark, SchemaAttestationPhase::Final,
+                           attestation_run_id));
+  }
+  controller.onInputIdle();
+}
+
 void discardStatuses(RunController &controller) {
   (void)controller.takePendingStatuses();
 }
 
 void openWorkload(RunController &controller) {
   discardStatuses(controller);
+  controller.acceptClientPayload(
+      attestationPayload("ycsb", SchemaAttestationPhase::Startup));
   controller.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
   controller.acceptClientPayload(bootstrapPayload());
   controller.acceptCdcTransaction(control(1U, RunFencePhase::LoadFinished));
@@ -387,6 +521,8 @@ void openWorkload(RunController &controller) {
 
 void openTpccWorkload(RunController &controller) {
   discardStatuses(controller);
+  controller.acceptClientPayload(
+      attestationPayload("tpcc", SchemaAttestationPhase::Startup));
   controller.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
   controller.acceptClientPayload(tpccBootstrapPayload());
   controller.acceptCdcTransaction(control(1U, RunFencePhase::LoadFinished));
@@ -421,17 +557,20 @@ void testCleanPassRequiresDoneEndAndIdle() {
   controller.acceptClientPayload(clientPayload(1U));
   controller.acceptCdcTransaction(workload(2U, 1U));
   controller.acceptClientPayload(donePayload(1U));
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(!controller.terminal());
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
   BLACKBOX_CHECK(!controller.terminal());
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
   BLACKBOX_CHECK(controller.endFenceProcessed());
   BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
   const auto &reconciliation = *controller.finalReconciliation();
   BLACKBOX_CHECK(reconciliation.evidence_reconciled);
+  BLACKBOX_CHECK(reconciliation.startup_schema_attested);
+  BLACKBOX_CHECK(reconciliation.final_schema_attested);
+  BLACKBOX_CHECK(!reconciliation.schema_attestation_digest.empty());
   BLACKBOX_CHECK(reconciliation.completed_sessions == 1U);
   BLACKBOX_CHECK(reconciliation.accepted_client_transactions == 1U);
   BLACKBOX_CHECK(reconciliation.joined_workload_transactions == 1U);
@@ -445,16 +584,60 @@ void testCleanPassRequiresDoneEndAndIdle() {
   const auto final = Json::parse(statuses.back());
   BLACKBOX_CHECK(final.at("outcome") == "PASS");
   BLACKBOX_CHECK(final.at("pending_cdc_slots") == 0U);
-  controller.onInputIdle();
+  idle(controller);
   controller.forceTimeoutFinal();
   BLACKBOX_CHECK(controller.takePendingStatuses().empty());
+}
+
+void testSchemaAttestationGatesAndDrift() {
+  {
+    RunController controller(manifest());
+    discardStatuses(controller);
+    controller.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
+    BLACKBOX_CHECK(controller.takePendingStatuses().empty());
+    controller.acceptClientPayload(
+        attestationPayload("ycsb", SchemaAttestationPhase::Startup));
+    const auto statuses = controller.takePendingStatuses();
+    BLACKBOX_CHECK(statuses.size() == 2U);
+    BLACKBOX_CHECK(Json::parse(statuses.front()).at("lifecycle_state") ==
+                   "START_FENCE_SEEN");
+  }
+  {
+    RunController controller(manifest());
+    const auto startup =
+        attestationPayload("ycsb", SchemaAttestationPhase::Startup);
+    controller.acceptClientPayload(startup);
+    controller.acceptClientPayload(startup);
+    BLACKBOX_CHECK(hasDiagnostic(controller, "SCHEMA_ATTESTATION_DUPLICATE"));
+  }
+  {
+    RunController controller(manifest());
+    openWorkload(controller);
+    controller.acceptClientPayload(donePayload(0U));
+    controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
+    controller.acceptClientPayload(attestationPayload(
+        "ycsb", SchemaAttestationPhase::Final, run_id, true));
+    BLACKBOX_CHECK(hasDiagnostic(controller, "SCHEMA_ATTESTATION_DRIFT"));
+    controller.forceTimeoutFinal();
+    BLACKBOX_CHECK(controller.terminal());
+    BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
+  }
+  {
+    RunController controller(manifest());
+    openWorkload(controller);
+    controller.acceptClientPayload(donePayload(0U));
+    controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
+    controller.forceTimeoutFinal();
+    BLACKBOX_CHECK(controller.terminal());
+    BLACKBOX_CHECK(hasDiagnostic(controller, "SCHEMA_ATTESTATION_MISSING"));
+  }
 }
 
 void testEndWithoutDoneIsInvalid() {
   RunController controller(manifest());
   openWorkload(controller);
   controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
   BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISSING"));
@@ -466,7 +649,7 @@ void testOtherwiseCleanRunWithoutEndFenceIsInvalid() {
   controller.acceptClientPayload(clientPayload(1U));
   controller.acceptCdcTransaction(workload(2U, 1U));
   controller.acceptClientPayload(donePayload(1U));
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(!controller.terminal());
 
   controller.forceTimeoutFinal();
@@ -509,7 +692,7 @@ void testTimeoutAndDuplicateControlRecordsAreInvalid() {
     controller.acceptClientPayload(bootstrapPayload());
     controller.acceptClientPayload(donePayload(0U));
     controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller);
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
     BLACKBOX_CHECK(hasDiagnostic(controller, "BOOTSTRAP_STATE_MISMATCH"));
   }
@@ -526,7 +709,7 @@ void testTimeoutAndDuplicateControlRecordsAreInvalid() {
             .dump());
     controller.acceptClientPayload(donePayload(0U));
     controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller);
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
     BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
     BLACKBOX_CHECK(controller.finalReconciliation()->ambiguous_attempts == 1U);
@@ -536,6 +719,8 @@ void testTimeoutAndDuplicateControlRecordsAreInvalid() {
 void testIncorrectInitialBootstrapManifestPreventsRelease() {
   RunController controller(manifest());
   discardStatuses(controller);
+  controller.acceptClientPayload(
+      attestationPayload("ycsb", SchemaAttestationPhase::Startup));
   controller.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
   controller.acceptCdcTransaction(control(1U, RunFencePhase::LoadFinished));
 
@@ -561,7 +746,7 @@ void testIncorrectInitialBootstrapManifestPreventsRelease() {
 
   controller.acceptClientPayload(donePayload(1U));
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
 
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
@@ -592,7 +777,7 @@ void testMissingClientDoesNotProcessEndFence() {
   controller.acceptCdcTransaction(workload(2U, 1U));
   controller.acceptClientPayload(donePayload(0U));
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
   BLACKBOX_CHECK(!controller.endFenceProcessed());
   BLACKBOX_CHECK(hasDiagnostic(controller, "CLIENT_HALF_MISSING"));
@@ -607,7 +792,7 @@ void testMissingCdcIsInvalidAfterOrderedEnd() {
   controller.acceptClientPayload(clientPayload(1U));
   controller.acceptClientPayload(donePayload(1U));
   controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
   BLACKBOX_CHECK(controller.endFenceProcessed());
   BLACKBOX_CHECK(hasDiagnostic(controller, "CDC_HALF_MISSING"));
@@ -624,7 +809,7 @@ void testSessionDoneMismatchAndPostDoneClientAreInvalid() {
     controller.acceptCdcTransaction(workload(2U, 1U));
     controller.acceptClientPayload(donePayload(1U, std::string(64U, '0')));
     controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller);
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
     BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISMATCH"));
   }
@@ -634,7 +819,7 @@ void testSessionDoneMismatchAndPostDoneClientAreInvalid() {
     controller.acceptClientPayload(donePayload(0U));
     controller.acceptClientPayload(clientPayload(1U));
     controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller);
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
     BLACKBOX_CHECK(hasDiagnostic(controller, "CLIENT_RECORD_AFTER_DONE"));
   }
@@ -651,7 +836,7 @@ void testStoppedAdmissionDoesNotInventCdcOrderFailure() {
   // false dense-sequence error inside the joiner.
   controller.acceptCdcTransaction(workload(2U, 1U));
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
 
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
@@ -667,7 +852,7 @@ void testSessionDoneRequiresFeasibleFinalAttemptHistory() {
     controller.acceptClientPayload(
         donePayloadForProgress(0U, 1U, 0U, 0U, 1U, 1U, {}));
     controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller);
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
     BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISMATCH"));
   }
@@ -680,7 +865,7 @@ void testSessionDoneRequiresFeasibleFinalAttemptHistory() {
         1U, 2U, 1U, 0U, 1U, 1U,
         {SessionMarkerEntry{.session_seq = 1U, .txn_id = 1U}}));
     controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller);
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
     BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISMATCH"));
   }
@@ -693,7 +878,7 @@ void testSessionDoneRequiresFeasibleFinalAttemptHistory() {
         3U, 3U, 1U, 2U, 2U, 0U,
         {SessionMarkerEntry{.session_seq = 1U, .txn_id = 2U}}));
     controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller);
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
     BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISMATCH"));
   }
@@ -706,7 +891,7 @@ void testSessionDoneRequiresFeasibleFinalAttemptHistory() {
         3U, 4U, 1U, 2U, 3U, 1U,
         {SessionMarkerEntry{.session_seq = 1U, .txn_id = 2U}}));
     controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller);
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
   }
 }
@@ -732,7 +917,7 @@ void testViolationThenOperationalInvalidityPreservesObservation() {
   controller.noteExternalFailure("OPERATIONAL", "RESOURCE_EXHAUSTED",
                                  "injected post-violation invalidity");
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
   BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
   BLACKBOX_CHECK(!controller.finalReconciliation()->evidence_reconciled);
@@ -770,7 +955,7 @@ void testJoinLimitAfterViolationPreservesObservation() {
   BLACKBOX_CHECK(hasDiagnostic(controller, "JOIN_BUFFER_LIMIT_EXCEEDED"));
   controller.acceptClientPayload(donePayload(2U));
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
 
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
@@ -798,7 +983,7 @@ void testCleanViolationFinalizesAsViolation() {
   controller.acceptCdcTransaction(workload(2U, 1U));
   controller.acceptClientPayload(donePayload(1U));
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Violation);
   BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
   BLACKBOX_CHECK(controller.finalReconciliation()->evidence_reconciled);
@@ -834,7 +1019,7 @@ void testFirstViolationOwnsReservedDiagnosticSlotImmediately() {
   controller.noteExternalFailure("OPERATIONAL", "RESOURCE_EXHAUSTED",
                                  "diagnostic ledger is deliberately full");
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
   BLACKBOX_REQUIRE(controller.diagnostics().size() == 1U);
   BLACKBOX_CHECK(controller.diagnostics().front().code == "VIOLATION_OBSERVED");
@@ -859,7 +1044,7 @@ void testJoinOnlyReconcilesWouldBeViolationWithoutVerdict() {
   controller.acceptCdcTransaction(workload(2U, 1U));
   controller.acceptClientPayload(donePayload(1U));
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
 
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.processingMode() == ProcessingMode::JoinOnly);
@@ -902,7 +1087,7 @@ void testJoinOnlyFailureHasNoAuditedOutcome() {
   RunController controller(manifest(), config);
   openWorkload(controller);
   controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller);
 
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(!controller.finalOutcome().has_value());
@@ -1005,7 +1190,7 @@ void testTpccControllerUsesGenericJoinAndReconciliation() {
       1U, 2U, 1U, 0U, 1U, 1U,
       {SessionMarkerEntry{.session_seq = 1U, .txn_id = 2U}}));
   controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller, "tpcc");
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
   BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
@@ -1029,6 +1214,7 @@ void testCapturedPaymentRetryReconciliation() {
   BLACKBOX_REQUIRE(found != client_fixture.at("semantic_transactions").end());
   BLACKBOX_CHECK(found->at("cdc_transaction") == "payment_shape");
   auto client = found->at("client_txn");
+  const auto run = client.at("run_id").get<std::string>();
   BLACKBOX_CHECK(client.at("read_count") == 3U);
   BLACKBOX_CHECK(client.at("reads")[0].at("source") == "local");
   BLACKBOX_CHECK(client.at("reads")[1].at("source") == "local");
@@ -1042,6 +1228,8 @@ void testCapturedPaymentRetryReconciliation() {
   RunController controller(blackbox::ProtocolRecordParser{}.parseRunManifest(
       client_fixture.at("run_manifest").dump()));
   discardStatuses(controller);
+  controller.acceptClientPayload(
+      attestationPayload("tpcc", SchemaAttestationPhase::Startup, run));
   controller.acceptCdcTransaction(std::move(transactions[0]));
   controller.acceptCdcTransaction(std::move(transactions[1]));
   controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
@@ -1050,7 +1238,6 @@ void testCapturedPaymentRetryReconciliation() {
   controller.acceptClientPayload(client.dump());
   controller.acceptCdcTransaction(std::move(transactions[3]));
 
-  const auto run = client.at("run_id").get<std::string>();
   const auto session = client.at("session_id").get<std::string>();
   const std::array marker_entries = {
       SessionMarkerEntry{.session_seq = 1U, .txn_id = 2U}};
@@ -1073,7 +1260,7 @@ void testCapturedPaymentRetryReconciliation() {
            marker_entries)}}.dump());
   transactions[11].cdc_seq = 4U;
   controller.acceptCdcTransaction(std::move(transactions[11]));
-  controller.onInputIdle();
+  idle(controller, "tpcc", run);
 
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
@@ -1104,6 +1291,7 @@ void testCapturedDeliveryRetryReconciliation() {
   BLACKBOX_REQUIRE(found != client_fixture.at("semantic_transactions").end());
   BLACKBOX_CHECK(found->at("cdc_transaction") == "delivery_shape");
   auto client = found->at("client_txn");
+  const auto run = client.at("run_id").get<std::string>();
   BLACKBOX_CHECK(client.at("read_count") == 2U);
   BLACKBOX_CHECK(client.at("reads")[0].at("source") == "snapshot");
   BLACKBOX_CHECK(client.at("reads")[1].at("source") == "snapshot");
@@ -1118,6 +1306,8 @@ void testCapturedDeliveryRetryReconciliation() {
   RunController controller(blackbox::ProtocolRecordParser{}.parseRunManifest(
       client_fixture.at("run_manifest").dump()));
   discardStatuses(controller);
+  controller.acceptClientPayload(
+      attestationPayload("tpcc", SchemaAttestationPhase::Startup, run));
   controller.acceptCdcTransaction(std::move(transactions[0]));
   controller.acceptCdcTransaction(std::move(transactions[1]));
   controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
@@ -1126,7 +1316,6 @@ void testCapturedDeliveryRetryReconciliation() {
   controller.acceptCdcTransaction(std::move(transactions[5]));
   controller.acceptClientPayload(client.dump());
 
-  const auto run = client.at("run_id").get<std::string>();
   const auto session = client.at("session_id").get<std::string>();
   const std::array marker_entries = {
       SessionMarkerEntry{.session_seq = 1U, .txn_id = 2U}};
@@ -1149,7 +1338,7 @@ void testCapturedDeliveryRetryReconciliation() {
            marker_entries)}}.dump());
   transactions[11].cdc_seq = 4U;
   controller.acceptCdcTransaction(std::move(transactions[11]));
-  controller.onInputIdle();
+  idle(controller, "tpcc", run);
 
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
@@ -1177,7 +1366,7 @@ void testDeliveryEmptyAndTerminalFailureAlgebra() {
     controller.acceptCdcTransaction(workload(2U, 1U));
     controller.acceptClientPayload(donePayload(1U));
     controller.acceptCdcTransaction(control(3U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller, "tpcc");
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
     BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
     BLACKBOX_CHECK(
@@ -1193,7 +1382,7 @@ void testDeliveryEmptyAndTerminalFailureAlgebra() {
     controller.acceptClientPayload(
         donePayloadForProgress(1U, 1U, 0U, 1U, 1U, 0U, {}));
     controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller, "tpcc");
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
     BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
     BLACKBOX_CHECK(
@@ -1218,7 +1407,7 @@ void testDeliveryEmptyAndTerminalFailureAlgebra() {
     controller.acceptClientPayload(
         donePayloadForProgress(1U, 1U, 0U, 1U, 1U, 0U, {}));
     controller.acceptCdcTransaction(control(2U, RunFencePhase::EndFence));
-    controller.onInputIdle();
+    idle(controller, "tpcc");
     BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
     BLACKBOX_CHECK(hasDiagnostic(controller, "INTERNAL_ERROR"));
   }
@@ -1270,6 +1459,8 @@ void testStockLevelFocusedReconciliationAndMalformedEvidence() {
 
     RunController controller(run_manifest);
     discardStatuses(controller);
+    controller.acceptClientPayload(attestationPayload(
+        "tpcc", SchemaAttestationPhase::Startup, run_manifest.run_id));
     controller.acceptCdcTransaction(std::move(transactions[0]));
     controller.acceptCdcTransaction(std::move(transactions[1]));
     controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
@@ -1307,7 +1498,7 @@ void testStockLevelFocusedReconciliationAndMalformedEvidence() {
              marker_entries)}}.dump());
     transactions[11].cdc_seq = 6U;
     controller.acceptCdcTransaction(std::move(transactions[11]));
-    controller.onInputIdle();
+    idle(controller, "tpcc", run_manifest.run_id);
 
     BLACKBOX_CHECK(controller.terminal());
     BLACKBOX_CHECK(controller.finalOutcome() == expected);
@@ -1427,6 +1618,8 @@ void testCapturedTpccFullMixAndStructuralFailures() {
     }
     RunController controller(manifest, config);
     discardStatuses(controller);
+    controller.acceptClientPayload(attestationPayload(
+        "tpcc", SchemaAttestationPhase::Startup, manifest.run_id));
     controller.acceptCdcTransaction(std::move(transactions[0]));
     controller.acceptCdcTransaction(std::move(transactions[1]));
     controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
@@ -1473,7 +1666,7 @@ void testCapturedTpccFullMixAndStructuralFailures() {
     }
     controller.acceptClientPayload(client_fixture.at("session_done").dump());
     controller.acceptCdcTransaction(std::move(transactions[11]));
-    controller.onInputIdle();
+    idle(controller, "tpcc", manifest.run_id);
 
     if (!controller.terminal() || !controller.finalOutcome().has_value() ||
         !controller.finalReconciliation().has_value()) {
@@ -1645,7 +1838,7 @@ void testTpccStandardMixSessionAccounting() {
   }
 
   controller.acceptCdcTransaction(control(cdc_seq, RunFencePhase::EndFence));
-  controller.onInputIdle();
+  idle(controller, "tpcc");
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
   BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
@@ -1703,6 +1896,9 @@ void testCapturedTpccControllerReconciliation() {
   RunController controller(blackbox::ProtocolRecordParser{}.parseRunManifest(
       client_fixture.at("run_manifest").dump()));
   discardStatuses(controller);
+  const auto fixture_run_id = fixture.at("run_id").get<std::string>();
+  controller.acceptClientPayload(attestationPayload(
+      "tpcc", SchemaAttestationPhase::Startup, fixture_run_id));
   controller.acceptCdcTransaction(std::move(transactions[0]));
   controller.acceptCdcTransaction(std::move(transactions[1]));
   controller.acceptClientPayload(fixture.at("bootstrap_manifest").dump());
@@ -1733,7 +1929,7 @@ void testCapturedTpccControllerReconciliation() {
   }
   controller.acceptClientPayload(client_fixture.at("session_done").dump());
   controller.acceptCdcTransaction(std::move(transactions[11]));
-  controller.onInputIdle();
+  idle(controller, "tpcc", fixture_run_id);
 
   BLACKBOX_CHECK(controller.terminal());
   BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Pass);
@@ -1769,6 +1965,7 @@ void testCapturedTpccControllerReconciliation() {
 
 int runRunControllerTests() {
   testCleanPassRequiresDoneEndAndIdle();
+  testSchemaAttestationGatesAndDrift();
   testEndWithoutDoneIsInvalid();
   testOtherwiseCleanRunWithoutEndFenceIsInvalid();
   testTimeoutAndDuplicateControlRecordsAreInvalid();

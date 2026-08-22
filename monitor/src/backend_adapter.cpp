@@ -578,10 +578,91 @@ private:
   bool complete_ = false;
 };
 
+class CatalogOnlyStartupSchemaDecoder final : public CdcStartupSchemaDecoder {
+public:
+  [[nodiscard]] CdcStartupSchemaObservation
+  accept(const Json &, const Json &) override {
+    schemaError("backend does not admit connector-produced schema records");
+  }
+
+  [[nodiscard]] bool sawRecord() const noexcept override { return true; }
+  [[nodiscard]] bool complete() const noexcept override { return true; }
+};
+
+constexpr auto mariadb_fact_contract = std::to_array<BackendFactRule>({
+    {"database_name", BackendFactValueRule::Exact, "benchbase"},
+    {"schema_name", BackendFactValueRule::Exact, "benchbase"},
+    {"database_character_set", BackendFactValueRule::Exact, "utf8mb4"},
+    {"database_collation", BackendFactValueRule::Exact, "utf8mb4_bin"},
+    {"application_table_engine", BackendFactValueRule::Exact, "InnoDB"},
+    {"application_table_character_set", BackendFactValueRule::Exact, "utf8mb4"},
+    {"application_table_collation", BackendFactValueRule::Exact, "utf8mb4_bin"},
+    {"server_character_set", BackendFactValueRule::Exact, "utf8mb4"},
+    {"server_collation", BackendFactValueRule::Exact, "utf8mb4_bin"},
+    {"server_time_zone", BackendFactValueRule::Exact, "+00:00"},
+    {"server_sql_mode", BackendFactValueRule::Exact, pinned_sql_mode},
+    {"server_transaction_isolation", BackendFactValueRule::Exact,
+     "REPEATABLE_READ"},
+    {"server_snapshot_isolation", BackendFactValueRule::Exact, "true"},
+    {"connector_class", BackendFactValueRule::Exact,
+     "io.debezium.connector.mariadb.MariaDbConnector"},
+    {"connector_source", BackendFactValueRule::Exact, "mariadb"},
+    {"connector_version", BackendFactValueRule::Exact, "3.6.1.Final"},
+    {"connector_tasks", BackendFactValueRule::Exact, "1"},
+    {"redis_stream", BackendFactValueRule::Exact, "cdc"},
+    {"database_image_digest", BackendFactValueRule::Sha256, {}},
+    {"capture_table_roster_sha256", BackendFactValueRule::Sha256, {}},
+    {"table_definition_sha256", BackendFactValueRule::Sha256, {}},
+    {"dedicated_privileges_sha256", BackendFactValueRule::Sha256, {}},
+});
+
+constexpr auto yugabyte_fact_contract = std::to_array<BackendFactRule>({
+    {"database_name", BackendFactValueRule::Exact, "benchbase"},
+    {"schema_name", BackendFactValueRule::Exact, "benchbase"},
+    {"server_version", BackendFactValueRule::Exact, "2025.2.5.2-b5"},
+    {"server_build_hash", BackendFactValueRule::Exact,
+     "84b2d0064618859f160408c0ce1cb33985581943"},
+    {"client_encoding", BackendFactValueRule::Exact, "UTF8"},
+    {"time_zone", BackendFactValueRule::Exact, "UTC"},
+    {"search_path", BackendFactValueRule::Exact, "benchbase"},
+    {"default_transaction_isolation", BackendFactValueRule::Exact,
+     "repeatable read"},
+    {"yb_read_from_followers", BackendFactValueRule::Exact, "false"},
+    {"publication_name", BackendFactValueRule::CanonicalIdentifier, {}},
+    {"slot_name", BackendFactValueRule::CanonicalIdentifier, {}},
+    {"slot_database", BackendFactValueRule::Exact, "benchbase"},
+    {"slot_plugin", BackendFactValueRule::Exact, "pgoutput"},
+    {"slot_lsn_type", BackendFactValueRule::Exact, "SEQUENCE"},
+    {"slot_active_consumers", BackendFactValueRule::Exact, "1"},
+    {"streaming_mode", BackendFactValueRule::Exact, "default"},
+    {"connector_class", BackendFactValueRule::Exact,
+     "io.debezium.connector.postgresql.YugabyteDBConnector"},
+    {"connector_source", BackendFactValueRule::Exact, "postgresql"},
+    {"connector_version", BackendFactValueRule::Exact,
+     "dz.2.5.2.yb.2026.1"},
+    {"connector_sha256", BackendFactValueRule::Exact,
+     "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"},
+    {"connector_tasks", BackendFactValueRule::Exact, "1"},
+    {"redis_stream", BackendFactValueRule::Exact, "cdc"},
+    {"cdc_enable_intra_transactional_before_image", BackendFactValueRule::Exact,
+     "true"},
+    {"cdc_send_null_before_image_if_not_exists", BackendFactValueRule::Exact,
+     "false"},
+    {"database_image_digest", BackendFactValueRule::Sha256, {}},
+    {"publication_membership_sha256", BackendFactValueRule::Sha256, {}},
+    {"replica_identity_full_tables_sha256", BackendFactValueRule::Sha256, {}},
+    {"table_oid_type_typmod_sha256", BackendFactValueRule::Sha256, {}},
+    {"dedicated_privileges_sha256", BackendFactValueRule::Sha256, {}},
+});
+
 class MariaDbBackendAdapter final : public BackendAdapter {
 public:
   [[nodiscard]] std::string_view name() const noexcept override {
     return "mariadb";
+  }
+
+  [[nodiscard]] std::string_view connectorVersion() const noexcept override {
+    return "3.6.1.Final";
   }
 
   [[nodiscard]] BackendServerDefaults serverDefaults() const noexcept override {
@@ -626,18 +707,213 @@ public:
     };
   }
 
+  [[nodiscard]] BackendNormalizedCapabilities
+  normalizedCapabilities() const noexcept override {
+    return BackendNormalizedCapabilities{.connector_startup_schema_evidence =
+                                             true};
+  }
+
+  [[nodiscard]] std::span<const BackendFactRule>
+  attestationFactContract() const noexcept override {
+    return mariadb_fact_contract;
+  }
+
   [[nodiscard]] std::unique_ptr<CdcStartupSchemaDecoder>
   createCdcStartupSchemaDecoder(CdcStartupSchemaConfig config) const override {
     return std::make_unique<MariaDbStartupSchemaDecoder>(std::move(config));
   }
 };
 
+class YugabyteYsqlBackendAdapter final : public BackendAdapter {
+public:
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "yugabytedb_ysql";
+  }
+
+  [[nodiscard]] std::string_view connectorVersion() const noexcept override {
+    return "dz.2.5.2.yb.2026.1";
+  }
+
+  [[nodiscard]] BackendServerDefaults serverDefaults() const noexcept override {
+    return BackendServerDefaults{
+        .character_set = "UTF8",
+        .collation = "C",
+        .time_zone = "UTC",
+        .sql_mode = {},
+        .transaction_isolation = "REPEATABLE_READ",
+        .snapshot_isolation = true,
+    };
+  }
+
+  [[nodiscard]] BackendSessionRequirements
+  sessionRequirements() const noexcept override {
+    return BackendSessionRequirements{
+        .set_names = "SET client_encoding TO 'UTF8'",
+        .character_set_client = "UTF8",
+        .character_set_connection = "UTF8",
+        .character_set_results = "UTF8",
+        .collation_connection = "C",
+        .time_zone = "UTC",
+        .sql_mode = {},
+        .transaction_isolation = "REPEATABLE_READ",
+        .snapshot_isolation = true,
+    };
+  }
+
+  [[nodiscard]] BackendDatabaseDefaults
+  databaseDefaults() const noexcept override {
+    return BackendDatabaseDefaults{.character_set = "UTF8", .collation = "C"};
+  }
+
+  [[nodiscard]] ApplicationTableRequirements
+  applicationTableRequirements() const noexcept override {
+    return ApplicationTableRequirements{
+        .engine = {},
+        .character_set = "UTF8",
+        .collation = "C",
+        .char_read_semantics = "pad_to_declared_length",
+    };
+  }
+
+  [[nodiscard]] BackendNormalizedCapabilities
+  normalizedCapabilities() const noexcept override {
+    return BackendNormalizedCapabilities{.connector_startup_schema_evidence =
+                                             false};
+  }
+
+  [[nodiscard]] std::span<const BackendFactRule>
+  attestationFactContract() const noexcept override {
+    return yugabyte_fact_contract;
+  }
+
+  [[nodiscard]] std::unique_ptr<CdcStartupSchemaDecoder>
+  createCdcStartupSchemaDecoder(CdcStartupSchemaConfig) const override {
+    return std::make_unique<CatalogOnlyStartupSchemaDecoder>();
+  }
+};
+
 const MariaDbBackendAdapter mariadb_adapter;
-const std::array<const BackendAdapter *, 1> registered_adapters = {
+const YugabyteYsqlBackendAdapter yugabyte_ysql_adapter;
+const std::array<const BackendAdapter *, 2> registered_adapters = {
     &mariadb_adapter,
+    &yugabyte_ysql_adapter,
 };
 
 } // namespace
+
+void BackendAdapter::validateSchemaAttestation(
+    const SchemaAttestation &attestation,
+    const BenchmarkAdapter &benchmark_adapter) const {
+  if (attestation.backend != name()) {
+    throw MonitorError(MonitorErrorCode::SchemaAttestationMismatch,
+                       "SchemaAttestation backend differs from adapter");
+  }
+  const auto find_table = [&](const std::string_view name) -> const ProtocolSchemaTable * {
+    const auto found = std::find_if(
+        attestation.tables.begin(), attestation.tables.end(),
+        [name](const ProtocolSchemaTable &table) {
+          return table.canonical_table_name == name;
+        });
+    return found == attestation.tables.end() ? nullptr : &*found;
+  };
+  const auto validate_columns = [](
+                                    const ProtocolSchemaTable &actual,
+                                    const std::span<const AdapterColumnContract> expected) {
+    if (actual.columns.size() != expected.size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+      const auto &column = actual.columns[index];
+      const auto &contract = expected[index];
+      if (column.name != contract.name ||
+          column.logical_sql_type != contract.sql_type ||
+          column.nullable != contract.nullable ||
+          column.generated != contract.generated.has_value()) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (attestation.tables.size() != benchmark_adapter.tables().size() + 2U) {
+    throw MonitorError(MonitorErrorCode::SchemaAttestationMismatch,
+                       "SchemaAttestation table roster size differs");
+  }
+  for (const auto &contract : benchmark_adapter.tables()) {
+    const auto *table = find_table(contract.name);
+    if (table == nullptr ||
+        !std::equal(table->primary_key_columns.begin(),
+                    table->primary_key_columns.end(), contract.primary_key.begin(),
+                    contract.primary_key.end()) ||
+        !validate_columns(*table, contract.columns)) {
+      throw MonitorError(MonitorErrorCode::SchemaAttestationMismatch,
+                         "SchemaAttestation application table differs from benchmark contract");
+    }
+  }
+  const auto *fence = find_table("benchbase.checker_run_fence");
+  const auto *marker = find_table("benchbase.session_txn");
+  const std::vector<std::string> fence_key = {"run_id", "phase"};
+  const std::vector<std::string> marker_key = {"session_id"};
+  const auto matches_column = [](const ProtocolSchemaColumn &column,
+                                 const std::string_view name,
+                                 const std::string_view type) {
+    return column.name == name && column.logical_sql_type == type &&
+           !column.nullable && !column.generated;
+  };
+  if (fence == nullptr || fence->primary_key_columns != fence_key ||
+      fence->columns.size() != 3U ||
+      !matches_column(fence->columns[0], "run_id", "CHAR(36)") ||
+      !matches_column(fence->columns[1], "phase", "VARCHAR(32)") ||
+      !matches_column(fence->columns[2], "nonce", "CHAR(36)") ||
+      marker == nullptr || marker->primary_key_columns != marker_key ||
+      marker->columns.size() != 2U ||
+      !matches_column(marker->columns[0], "session_id", "VARCHAR(64)") ||
+      !matches_column(marker->columns[1], "txn_id", "BIGINT")) {
+    throw MonitorError(MonitorErrorCode::SchemaAttestationMismatch,
+                       "SchemaAttestation common control table contract differs");
+  }
+
+  const auto rules = attestationFactContract();
+  if (attestation.backend_facts.size() != rules.size()) {
+    throw MonitorError(MonitorErrorCode::BackendFactMismatch,
+                       "SchemaAttestation backend fact count differs");
+  }
+  const auto is_sha256 = [](const std::string_view value) {
+    return value.size() == 64U &&
+           std::all_of(value.begin(), value.end(), [](const char character) {
+             return (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f');
+           });
+  };
+  const auto is_positive_integer = [](const std::string_view value) {
+    return !value.empty() && value.front() != '0' &&
+           std::all_of(value.begin(), value.end(), [](const char character) {
+             return character >= '0' && character <= '9';
+           });
+  };
+  for (std::size_t index = 0; index < rules.size(); ++index) {
+    const auto &fact = attestation.backend_facts[index];
+    const auto &rule = rules[index];
+    bool valid = fact.name == rule.name;
+    switch (rule.value_rule) {
+    case BackendFactValueRule::Exact:
+      valid = valid && fact.canonical_value == rule.expected_value;
+      break;
+    case BackendFactValueRule::Sha256:
+      valid = valid && is_sha256(fact.canonical_value);
+      break;
+    case BackendFactValueRule::CanonicalIdentifier:
+      valid = valid && isCanonicalIdentifier(fact.canonical_value);
+      break;
+    case BackendFactValueRule::PositiveInteger:
+      valid = valid && is_positive_integer(fact.canonical_value);
+      break;
+    }
+    if (!valid) {
+      throw MonitorError(MonitorErrorCode::BackendFactMismatch,
+                         "SchemaAttestation backend fact differs from contract");
+    }
+  }
+}
 
 std::span<const BackendAdapter *const>
 BackendAdapterRegistry::adapters() noexcept {
@@ -660,6 +936,41 @@ BackendAdapterRegistry::require(const std::string_view backend) {
   if (adapter == nullptr) {
     throw MonitorError(MonitorErrorCode::ConfigInvalid,
                        "RunManifest names an unregistered backend adapter");
+  }
+  return *adapter;
+}
+
+BackendAdapterCatalog::BackendAdapterCatalog(
+    const std::span<const BackendAdapter *const> adapters)
+    : adapters_(adapters) {
+  if (adapters_.empty()) {
+    throw std::invalid_argument("backend adapter catalog is empty");
+  }
+  std::unordered_set<std::string_view> names;
+  for (const auto *adapter : adapters_) {
+    if (adapter == nullptr || !isCanonicalIdentifier(adapter->name()) ||
+        !names.insert(adapter->name()).second) {
+      throw std::invalid_argument("backend adapter catalog is invalid");
+    }
+  }
+}
+
+const BackendAdapter *
+BackendAdapterCatalog::find(const std::string_view backend) const noexcept {
+  const auto found =
+      std::find_if(adapters_.begin(), adapters_.end(),
+                   [backend](const BackendAdapter *adapter) {
+                     return adapter != nullptr && adapter->name() == backend;
+                   });
+  return found == adapters_.end() ? nullptr : *found;
+}
+
+const BackendAdapter &
+BackendAdapterCatalog::require(const std::string_view backend) const {
+  const auto *adapter = find(backend);
+  if (adapter == nullptr) {
+    throw MonitorError(MonitorErrorCode::ConfigInvalid,
+                       "backend adapter catalog has no requested registration");
   }
   return *adapter;
 }

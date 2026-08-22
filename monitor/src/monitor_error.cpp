@@ -15,6 +15,18 @@ std::string_view toString(const MonitorErrorCode code) noexcept {
     return "ISOLATION_MISMATCH";
   case MonitorErrorCode::SessionContractMismatch:
     return "SESSION_CONTRACT_MISMATCH";
+  case MonitorErrorCode::SchemaAttestationMissing:
+    return "SCHEMA_ATTESTATION_MISSING";
+  case MonitorErrorCode::SchemaAttestationDuplicate:
+    return "SCHEMA_ATTESTATION_DUPLICATE";
+  case MonitorErrorCode::SchemaAttestationMalformed:
+    return "SCHEMA_ATTESTATION_MALFORMED";
+  case MonitorErrorCode::SchemaAttestationMismatch:
+    return "SCHEMA_ATTESTATION_MISMATCH";
+  case MonitorErrorCode::SchemaAttestationDrift:
+    return "SCHEMA_ATTESTATION_DRIFT";
+  case MonitorErrorCode::BackendFactMismatch:
+    return "BACKEND_FACT_MISMATCH";
   case MonitorErrorCode::UnsupportedTransaction:
     return "UNSUPPORTED_TRANSACTION";
   case MonitorErrorCode::UnsupportedReadSource:

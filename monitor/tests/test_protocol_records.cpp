@@ -70,6 +70,26 @@ void testKindsAndExamples() {
                  std::vector<std::string>{"benchbase.checker_run_fence"});
   BLACKBOX_CHECK(manifest.result_scope == "point_transaction_soww");
 
+  const auto startup_payload = exampleText("schema-attestation-startup.json");
+  BLACKBOX_CHECK(parser.kind(startup_payload) ==
+                 ProtocolRecordKind::SchemaAttestation);
+  const auto startup = parser.parseSchemaAttestation(startup_payload);
+  BLACKBOX_CHECK(startup.run_id == run_id);
+  BLACKBOX_CHECK(startup.phase == blackbox::SchemaAttestationPhase::Startup);
+  BLACKBOX_CHECK(startup.backend == "mariadb");
+  BLACKBOX_CHECK(startup.backend_source_id == "mariadb-main");
+  BLACKBOX_CHECK(startup.tables.size() == 3U);
+  BLACKBOX_CHECK(startup.backend_facts.size() == 22U);
+  BLACKBOX_CHECK(blackbox::computeSchemaAttestationDigest(startup) ==
+                 startup.canonical_attestation_digest);
+  const auto final = parser.parseSchemaAttestation(
+      exampleText("schema-attestation-final.json"));
+  BLACKBOX_CHECK(final.phase == blackbox::SchemaAttestationPhase::Final);
+  BLACKBOX_CHECK(final.tables == startup.tables);
+  BLACKBOX_CHECK(final.backend_facts == startup.backend_facts);
+  BLACKBOX_CHECK(final.canonical_attestation_digest ==
+                 startup.canonical_attestation_digest);
+
   const auto bootstrap_payload = exampleText("bootstrap-manifest.json");
   BLACKBOX_CHECK(parser.kind(bootstrap_payload) ==
                  ProtocolRecordKind::BootstrapManifest);
@@ -150,7 +170,7 @@ void testManifestValidationAndBounds() {
 
   {
     auto invalid = manifest;
-    invalid["backend"] = "postgres";
+    invalid["backend"] = "postgres-backend";
     expectError([&] { (void)parser.parseRunManifest(invalid.dump()); },
                 MonitorErrorCode::ClientRecordMalformed);
   }
@@ -201,6 +221,36 @@ void testManifestValidationAndBounds() {
     });
     expectError([&] { (void)bounded.kind(manifest.dump()); },
                 MonitorErrorCode::ResourceExhausted);
+  }
+}
+
+void testSchemaAttestationValidation() {
+  ProtocolRecordParser parser;
+  const auto original = exampleJson("schema-attestation-startup.json");
+  {
+    auto invalid = original;
+    invalid["canonical_attestation_digest"] = std::string(64U, '0');
+    expectError([&] { (void)parser.parseSchemaAttestation(invalid.dump()); },
+                MonitorErrorCode::ClientRecordMalformed);
+  }
+  {
+    auto invalid = original;
+    invalid["tables"][1]["canonical_table_name"] =
+        invalid["tables"][0]["canonical_table_name"];
+    expectError([&] { (void)parser.parseSchemaAttestation(invalid.dump()); },
+                MonitorErrorCode::ClientRecordMalformed);
+  }
+  {
+    auto invalid = original;
+    invalid["backend_facts"].push_back(invalid["backend_facts"].front());
+    expectError([&] { (void)parser.parseSchemaAttestation(invalid.dump()); },
+                MonitorErrorCode::ClientRecordMalformed);
+  }
+  {
+    auto invalid = original;
+    invalid["tables"][2]["columns"][0]["nullable"] = "false";
+    expectError([&] { (void)parser.parseSchemaAttestation(invalid.dump()); },
+                MonitorErrorCode::ClientRecordMalformed);
   }
 }
 
@@ -374,6 +424,7 @@ void testSessionMarkerDigests() {
 int runProtocolRecordTests() {
   testKindsAndExamples();
   testManifestValidationAndBounds();
+  testSchemaAttestationValidation();
   testBootstrapValidation();
   testSessionDoneValidation();
   testFailureAndDiscriminatorValidation();

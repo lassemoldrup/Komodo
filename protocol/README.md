@@ -20,7 +20,7 @@ The contract is branch-local:
 | `canonical_encoding.md` | Exact key, value, and digest byte encodings. |
 | `result_error_codes.md` | Live/final outcomes and stable error identifiers. |
 | `adapters/` | Machine-checkable benchmark names, transaction membership, table contracts, result classification, loader rules, and runtime capabilities. |
-| `backends/` | Machine-checkable database, connection/session, isolation, and application-table requirements. |
+| `backends/` | Machine-checkable normalized capabilities, database/session requirements, pinned connector identities, and strict attestation-fact contracts. |
 | `schema/` | JSON Schemas for Redis records. |
 | `examples/` | Valid example records used by schema checks. |
 | `fixtures/` | Version-pinned real database/JDBC/CDC typed-row, transaction, and client-evidence fixtures. |
@@ -43,6 +43,11 @@ Every successful supported workload transaction is correlated by
 `(run_id, session_id, txn_id)`. The database marker row stores only
 `(session_id, txn_id)`; the active fenced run supplies `run_id`. Connector/server
 transaction identifiers are not part of the join contract.
+
+The coordinator also publishes `STARTUP` and `FINAL` `SchemaAttestation`
+records. Their normalized tables and backend-owned fact roster must validate
+against the selected backend/benchmark registries and retain an identical
+canonical digest through final reconciliation.
 
 The `cdc` stream retains Debezium's existing key/envelope field layout and is
 validated by the CDC assembler rather than these client-record schemas.

@@ -9,7 +9,9 @@ their golden tests in the same branch.
 
 ## Scope and result
 
-- MariaDB is the first backend.
+- MariaDB is the first live-gated backend. `yugabytedb_ysql` is registered but
+  cannot produce an audited verdict until every Milestone 9 correctness gate
+  passes for its pinned build.
 - Every successful supported workload transaction writes one `session_txn`
   marker and is therefore CDC-visible, including read-only and
   no-application-write transactions.
@@ -57,17 +59,16 @@ MariaDB uses `INSERT ... ON DUPLICATE KEY UPDATE`; YugabyteDB uses
 `INSERT ... ON CONFLICT DO UPDATE`; Oracle uses `MERGE`. Connector/server
 transaction identifiers are ignored for correlation.
 
-The CDC assembler also treats Debezium `transaction.id` as an opaque structural
-identity used only to match `BEGIN`, rows, and `END`. It does not interpret or
-cross-check connector-specific source transaction fields such as MariaDB GTID,
-nor does it require database, binlog position, server ID, or connector-specific
-source members in workload rows. The pinned Debezium version, configured source
-name, live/non-snapshot flag, and a table identity resolvable to the unique
-configured table roster remain mandatory. `END.data_collection` namespace
-qualifiers are opaque; the unique terminal table component is reconciled with
-the row table and configured roster. Backend-specific startup DDL/schema
-attestation remains behind the backend adapter and is completed before any
-transactional evidence is accepted.
+Connector `id`, row `transaction.id`, server transaction fields, GTID, LSN,
+HybridTime, binlog coordinates, and similar positions are bounded per-record
+diagnostics only. They are never used for grouping, ordering, deduplication,
+joining, or checker identity and are never compared across different records.
+The backend decoder may require the key and envelope ID copies in the same
+`BEGIN` or `END` record to agree. The generic assembler frames only the unique
+contiguous, noninterleaved `BEGIN`/rows/`END` interval; its internal identity is
+the Redis stream ID of `BEGIN`, and it assigns `cdc_seq` only at completed
+`END`. The pinned source/version, live/non-snapshot flag, exact envelope shape,
+and configured table roster remain mandatory.
 
 Rationale: the same client/monitor contract works on every backend, every
 successful transaction is observable in CDC order, and the marker before-image
@@ -275,7 +276,40 @@ counts against the backend and adapter contracts. TPC-C schema validation is
 available independently, while full TPC-C run admission remains disabled until
 all adapter runtime capabilities are present.
 
-## D12: Loader declarations and independent validation
+## D12: Backend-neutral schema and capture attestation
+
+`RunManifest.backend` is a bounded registry name. Backend contracts under
+`protocol/backends/` declare normalized capabilities, accepted database types,
+physical namespace, session setup/observations, pinned connector identity, and
+an ordered strict `attestation_fact_contract`. Adding a backend adds a contract
+and registered implementations; generic lifecycle, assembly, joining,
+reconciliation, and checking do not gain backend-name branches.
+
+The coordinator publishes one `SchemaAttestation` at `STARTUP` before
+`RUN_START`, and one at `FINAL` after `END_FENCE`. Both use the same outer
+record: normalized table/column/primary-key descriptions plus ordered
+`{name,canonical_value}` backend facts. Missing, extra, reordered, wrongly typed,
+or cross-backend facts fail closed. Dynamic catalog identities such as OID/type
+inventories use canonical SHA-256 facts; stable settings use exact values.
+
+The attestation digest is:
+
+```text
+SHA256(
+  UTF8("db-monitoring/schema-attestation") || 0x00 ||
+  UTF8(canonical_json({backend, backend_source_id, tables, backend_facts}))
+)
+```
+
+`canonical_json` sorts object keys recursively, uses UTF-8 without ASCII
+escaping, emits no insignificant whitespace, rejects non-finite numbers, and
+preserves array order. `kind`, `run_id`, `phase`, and the digest field itself are
+excluded so accepted `STARTUP` and `FINAL` digests are byte-identical.
+Finalization requires identical tables, facts, and digest. MariaDB additionally
+requires its pinned connector startup schema snapshot; YugabyteDB has no
+connector schema-only prefix and relies on the catalog/capture attestation.
+
+## D13: Loader declarations and independent validation
 
 Before codec-dependent bootstrap scanning, the coordinator validates one exact
 loader-declared count for every selected-adapter table. The loader publishes its
@@ -298,7 +332,7 @@ validation/performance artifacts, but it is not an acceptance constant.
 Canonical scans use the same shared row contract and globally byte-sort encoded
 keys before computing the bootstrap digest.
 
-## D13: Adapter readiness is boundary-specific
+## D14: Adapter readiness is boundary-specific
 
 Runtime capability flags are interpreted by boundary rather than collapsed into
 one ambiguous ready bit. `monitor_ready` requires both CDC normalization and
@@ -320,7 +354,7 @@ normalizers must agree on control/bootstrap/workload classification, marker
 filtering, correlation, repeated-write collapse, primary-key splits, touched
 net-no-change keys, deletes, and the final bootstrap digest.
 
-## D14: TPC-C trace SQL variants and client evidence
+## D15: TPC-C trace SQL variants and client evidence
 
 The ordinary BenchBase statement IDs and SQL remain unchanged. Each of the 15
 captured TPC-C result sets owns a stable opt-in `trace_statement_id` whose SQL

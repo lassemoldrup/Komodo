@@ -1,6 +1,7 @@
 #pragma once
 
 #include "blackbox/benchmark_adapter.h"
+#include "blackbox/protocol_records.h"
 
 #include <nlohmann/json_fwd.hpp>
 
@@ -57,6 +58,31 @@ struct CdcStartupSchemaObservation {
   bool complete = false;
 };
 
+enum class BackendFactValueRule {
+  Exact,
+  Sha256,
+  CanonicalIdentifier,
+  PositiveInteger,
+};
+
+struct BackendFactRule {
+  std::string_view name;
+  BackendFactValueRule value_rule = BackendFactValueRule::Exact;
+  std::string_view expected_value;
+
+  bool operator==(const BackendFactRule &) const = default;
+};
+
+struct BackendNormalizedCapabilities {
+  bool connector_startup_schema_evidence = false;
+  bool full_before_after_images = true;
+  bool marker_last = true;
+  std::string_view transaction_framing = "contiguous_begin_rows_end";
+  std::string_view commit_order = "single_stream_completed_transaction_order";
+
+  bool operator==(const BackendNormalizedCapabilities &) const = default;
+};
+
 // Startup schema evidence is backend-owned because connector DDL envelopes are
 // not part of the opaque transaction/row contract consumed by the assembler.
 class CdcStartupSchemaDecoder {
@@ -74,6 +100,7 @@ public:
   virtual ~BackendAdapter() = default;
 
   [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+  [[nodiscard]] virtual std::string_view connectorVersion() const noexcept = 0;
   [[nodiscard]] virtual BackendServerDefaults
   serverDefaults() const noexcept = 0;
   [[nodiscard]] virtual BackendSessionRequirements
@@ -82,6 +109,13 @@ public:
   databaseDefaults() const noexcept = 0;
   [[nodiscard]] virtual ApplicationTableRequirements
   applicationTableRequirements() const noexcept = 0;
+  [[nodiscard]] virtual BackendNormalizedCapabilities
+  normalizedCapabilities() const noexcept = 0;
+  [[nodiscard]] virtual std::span<const BackendFactRule>
+  attestationFactContract() const noexcept = 0;
+  virtual void validateSchemaAttestation(
+      const SchemaAttestation &attestation,
+      const BenchmarkAdapter &benchmark_adapter) const;
   [[nodiscard]] virtual std::unique_ptr<CdcStartupSchemaDecoder>
   createCdcStartupSchemaDecoder(CdcStartupSchemaConfig config) const = 0;
 };
@@ -95,6 +129,21 @@ public:
   [[nodiscard]] static const BackendAdapter *
   find(std::string_view backend) noexcept;
   [[nodiscard]] static const BackendAdapter &require(std::string_view backend);
+};
+
+// Injectable non-owning catalog used by registry conformance tests and future
+// dynamically loaded backend modules. Production uses BackendAdapterRegistry.
+class BackendAdapterCatalog final {
+public:
+  explicit BackendAdapterCatalog(
+      std::span<const BackendAdapter *const> adapters);
+
+  [[nodiscard]] const BackendAdapter *
+  find(std::string_view backend) const noexcept;
+  [[nodiscard]] const BackendAdapter &require(std::string_view backend) const;
+
+private:
+  std::span<const BackendAdapter *const> adapters_;
 };
 
 } // namespace blackbox

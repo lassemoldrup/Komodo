@@ -24,6 +24,9 @@
       "additionalProperties": false,
       "required": [
         "evidence_reconciled",
+        "startup_schema_attested",
+        "final_schema_attested",
+        "schema_attestation_digest",
         "bootstrap_manifest_validated",
         "end_fence_seen",
         "expected_sessions",
@@ -40,6 +43,14 @@
       ],
       "properties": {
         "evidence_reconciled": { "type": "boolean" },
+        "startup_schema_attested": { "type": "boolean" },
+        "final_schema_attested": { "type": "boolean" },
+        "schema_attestation_digest": {
+          "oneOf": [
+            { "const": "" },
+            { "$ref": "common.schema.json#/$defs/sha256" }
+          ]
+        },
         "bootstrap_manifest_validated": { "type": "boolean" },
         "end_fence_seen": { "type": "boolean" },
         "expected_sessions": { "$ref": "common.schema.json#/$defs/uint64" },
@@ -161,6 +172,11 @@
               {
                 "properties": {
                   "evidence_reconciled": { "const": true },
+                  "startup_schema_attested": { "const": true },
+                  "final_schema_attested": { "const": true },
+                  "schema_attestation_digest": {
+                    "$ref": "common.schema.json#/$defs/sha256"
+                  },
                   "bootstrap_manifest_validated": { "const": true },
                   "end_fence_seen": { "const": true },
                   "expected_sessions": {
