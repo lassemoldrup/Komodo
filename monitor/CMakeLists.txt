@@ -131,6 +131,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     tests/test_protocol_records.cpp
     tests/test_redis_reader.cpp
     tests/test_run_controller.cpp
+    tests/test_strict_json.cpp
     tests/test_transaction_joiner.cpp
   )
   target_link_libraries(blackbox_monitor_tests

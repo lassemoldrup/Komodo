@@ -12,6 +12,7 @@ int runDebeziumAssemblerTests();
 int runProtocolRecordTests();
 int runRedisReaderTests();
 int runRunControllerTests();
+int runStrictJsonTests();
 int runTransactionJoinerTests();
 
 int main() {
@@ -25,6 +26,7 @@ int main() {
   runProtocolRecordTests();
   runRedisReaderTests();
   runRunControllerTests();
+  runStrictJsonTests();
   runTransactionJoinerTests();
   if (blackbox::test::failures != 0) {
     std::cerr << blackbox::test::failures
