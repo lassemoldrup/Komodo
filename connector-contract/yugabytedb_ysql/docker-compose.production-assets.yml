@@ -1,0 +1,26 @@
+services:
+  initialize:
+    entrypoint: ["/bin/bash", "/blackbox/init.sh"]
+    environment:
+      BLACKBOX_YSQL_SLOT_NAME: production_asset_slot
+      BLACKBOX_YSQL_PUBLICATION_NAME: production_asset_publication
+      BLACKBOX_YSQL_CAPTURE_TABLES: benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn
+    volumes:
+      - ../../yugabytedb_ysql/init.sh:/blackbox/init.sh:ro
+      - ../../yugabytedb_ysql/initdb/02-common-schema.sql:/blackbox/common-schema.sql:ro
+      - ../../yugabytedb_ysql/initdb/adapters/ycsb.sql:/blackbox/adapter-schema.sql:ro
+
+  debezium_server:
+    build:
+      context: ../../debezium
+      dockerfile: Dockerfile.yugabytedb-ysql
+    image: db-monitoring/yugabytedb-ysql:dz.2.5.2.yb.2026.1
+    environment:
+      DEBEZIUM_SOURCE_SLOT_NAME: production_asset_slot
+      DEBEZIUM_SOURCE_PUBLICATION_NAME: production_asset_publication
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: connector_contract
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn
+      DEBEZIUM_SINK_REDIS_BATCH_SIZE: 2
+      DEBEZIUM_SOURCE_MAX_BATCH_SIZE: 2
+    volumes:
+      - ../../debezium/application-yugabytedb-ysql.properties:/debezium/conf/application.properties:ro

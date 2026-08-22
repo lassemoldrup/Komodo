@@ -1,0 +1,70 @@
+[
+    {
+        "Id": "sha256:935dc272cec443ff142ee812bcbe5c993ba50f5a0495184ca837f16209227d85",
+        "RepoTags": [
+            "db-monitoring/yugabytedb-ysql-connector-contract:dz.2.5.2.yb.2026.1"
+        ],
+        "RepoDigests": [],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-08-22T15:37:54.801062623Z",
+        "Config": {
+            "Env": [
+                "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "JAVA_HOME=/opt/java/openjdk",
+                "LANG=en_US.UTF-8",
+                "LANGUAGE=en_US:en",
+                "LC_ALL=en_US.UTF-8",
+                "JAVA_VERSION=jdk-17.0.20+8"
+            ],
+            "Entrypoint": [
+                "/__cacert_entrypoint.sh"
+            ],
+            "Cmd": [
+                "/debezium/run.sh"
+            ],
+            "WorkingDir": "/debezium",
+            "Labels": {
+                "com.docker.compose.project": "yugabytedb-ysql-connector-contract",
+                "com.docker.compose.service": "debezium_server",
+                "com.docker.compose.version": "2.40.3",
+                "org.opencontainers.image.created": "2026-08-17T09:02:45.677319+00:00",
+                "org.opencontainers.image.description": "The Ubuntu container image maintained by Canonical\n\nUbuntu is a Debian-based Linux operating system that runs from the desktop to the cloud, to all your internet connected things.\nIt is the world's most popular operating system across public clouds and OpenStack clouds.\nIt is the number one platform for containers; from Docker to Kubernetes to LXD, Ubuntu can run your containers at scale.\nFast, secure and simple, Ubuntu powers millions of PCs worldwide.\n",
+                "org.opencontainers.image.revision": "5c37f3575d4c2f690155d91886746527ab298bd2",
+                "org.opencontainers.image.source": "https://github.com/yugabyte/debezium/tree/dz.2.5.2.yb.2026.1",
+                "org.opencontainers.image.title": "YugabyteDB YSQL connector-contract Debezium Server",
+                "org.opencontainers.image.version": "dz.2.5.2.yb.2026.1"
+            },
+            "ArgsEscaped": true
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 1236707230,
+        "GraphDriver": {
+            "Data": {
+                "LowerDir": "/var/lib/docker/overlay2/fojfkcddy08gr2i6v1xh598cj/diff:/var/lib/docker/overlay2/mcvnzuo5ac4vlg2wgnl6hryj9/diff:/var/lib/docker/overlay2/eqfdypp4t43wy5zmsgerfp2in/diff:/var/lib/docker/overlay2/738832cf47cc9c9f71eb7596d1d8d8186f3335f198d67a2e09e77f2735b3ae57/diff:/var/lib/docker/overlay2/ba5ee597d70afca10054bf924db8bd033f2531a05e84f9198c86eb9bf09d40fe/diff:/var/lib/docker/overlay2/495d1eb450d5000c81f591af0df8cd6c17f3dd6876b6cc2fc3fb4b40797b8853/diff:/var/lib/docker/overlay2/7bf6e75087386826cd0b7d805045470146ef7f035ab58ab4f6d583278498940e/diff:/var/lib/docker/overlay2/1027ddc3206789d5d5b34696177c677bd5198b946640752728c85d12508f39aa/diff:/var/lib/docker/overlay2/c52c5bdf3fb58981a5abe251e5fb4b75c792c3e0220faddedd9829367970c143/diff",
+                "MergedDir": "/var/lib/docker/overlay2/zb2wobm8s0meud64elzv226cj/merged",
+                "UpperDir": "/var/lib/docker/overlay2/zb2wobm8s0meud64elzv226cj/diff",
+                "WorkDir": "/var/lib/docker/overlay2/zb2wobm8s0meud64elzv226cj/work"
+            },
+            "Name": "overlay2"
+        },
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:b577adbc0b589bb7c1d3be98cc4b703e8228ab4413156754445e8b20a001c5d3",
+                "sha256:168f4b64baaa0d1f3b8a1a27acfa9cd0f29527ebda716df024dfa0e9e8f24ef9",
+                "sha256:9c9c5161ed13ecc3ae720ec532eb6f6fe1a1b449f53a3a562bbd7e91fa763eb0",
+                "sha256:d1cb3b727c6bd42269ac2864eeaa416f9b6bd872819fa3c5e223bd17187010a9",
+                "sha256:1d4ad11192b0c85c36f20779645db9d6984465e76e7bad9d5344a94742fe644a",
+                "sha256:281852bcff0e9d9b833442a8978513593145887a3f6bc64d40c2c08e510a9d25",
+                "sha256:4de4b57c299aaa02d95ae62fe77b61762f9778fe716fa860b71cf41000de218c",
+                "sha256:b83817283b095fda8eba6842a88e3f24ff238653a02d4c169117afea356deaaa",
+                "sha256:d78be59d0e72e1df9a46e6882927aa38ad494e77aae2c1122bd7cb4256ac10d5",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-08-22T16:37:04.788797343Z"
+        }
+    }
+]

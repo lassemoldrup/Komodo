@@ -1,0 +1,67 @@
+{
+  "capture_id": "concurrent_commit_order_20260822T163647Z",
+  "captured_at_utc": "2026-08-22T16:36:47Z",
+  "scenario": "concurrent_commit_order",
+  "platform": "linux/amd64",
+  "plugin": "pgoutput",
+  "slot_lsn_type": "SEQUENCE",
+  "streaming_mode": "default",
+  "logical_slots": 1,
+  "publication_count": 1,
+  "publication_name": "connector_contract_publication",
+  "connector_tasks": 1,
+  "redis_streams": [
+    "cdc"
+  ],
+  "source_max_batch_size": 2,
+  "redis_sink_batch_size": 3,
+  "database_image": "docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb",
+  "database_binary_version": "2025.2.5.2-b5",
+  "database_build_hash": "84b2d0064618859f160408c0ce1cb33985581943",
+  "connector_version": "dz.2.5.2.yb.2026.1",
+  "connector_sha256": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98",
+  "debezium_server_version": "2.5.2.Final",
+  "java_runtime_version": "17.0.20+8",
+  "redis_version": "7.4.10",
+  "locally_built_image_id": "sha256:935dc272cec443ff142ee812bcbe5c993ba50f5a0495184ca837f16209227d85",
+  "expected_completed_transactions": [
+    {
+      "session_id": "commit_b",
+      "txn_id": 1
+    },
+    {
+      "session_id": "commit_a",
+      "txn_id": 1
+    }
+  ],
+  "gate": {
+    "name": "raw_connector_redis_contract",
+    "status": "PASSED",
+    "decision_boundary": "Connector IDs, source.txId, LSN, and HybridTime are diagnostic metadata only; the verifier frames only the unique contiguous BEGIN/rows/END interval and correlates completed frames only by the SQL-last client marker."
+  },
+  "file_sha256": {
+    "application.properties": "43a80b7f39070ac9c3510e5ea9fad34262147204a64447db4596580fbd71a018",
+    "backpressure_commit_order.sql": "4b29867d271bf0b3a30952160949d33917d232e27826bf73807b8762e36e8b93",
+    "commit-a.log": "caa0d3e93cf2ae853764e22546ca340d90710bccf5c04d588f7ef4ba84f92b66",
+    "commit-b.log": "690cd423458a5769687838de4db46d7c82e382c912c7b913233ee7adccc576f1",
+    "commit-order.json": "a0f6a381812714514d108512376f2b27ba34e39651438acaca7bd637d31c1155",
+    "compose-services.json": "7fff7cf4ba602e0f4490f4fb282d74ef49e4cc51b4193b0dd5a9c6ea9c6c97d6",
+    "connector-classpath.txt": "0b38c8a20df56ab9b44950daebc63d825c2bec2d09775c44729c52781953c3e5",
+    "connector-contract-image.json": "1a2290859cb20ba9e9478b8e6cc7de8a2616eaa42a46813f63939a46d30dac4f",
+    "contract_transactions.sql": "7932bd57997e2e44097dc4c2e2c41184318fa9838c4b1e342b866af0023441c2",
+    "cross_tablet_marker_last.sql": "abb92b959b45a78b29d37aa3c2f62dd432a44451d86b4510ac7d8b27453ff8c5",
+    "database-build.txt": "0cac5993923b8b706501fdc1ff7558d354b75c2a18b545ace2ab4873b1976a16",
+    "database-catalog.txt": "f2930fdf9d55a5a528cb2aaa2e1d33b902f8e7ea6876ec46b3c42b6612a93c34",
+    "debezium-server.log": "a6776493bc727f45b98fe6041a493ed8c4d74d3567b100e9713a1c74b943599b",
+    "docker-compose-config.yml": "5774ee3bca6df24ad28bd0c5be8ab3784a87c079c05cd08fd5e32eeb3aef0809",
+    "docker-compose.yml": "137c9c66b9a68554a4298cf06a279224696268fd0be6b2d9ba5f8ed1ab1bb1cf",
+    "initialize.log": "1ab3776911462f02565a2383458862378a792b38a8f4627b2126b96857f3ffb6",
+    "provenance.lock.json": "568ae071087c8134322bbc68ca678d2fcde7707d26643eec20a8f1dd6dbb321c",
+    "redis-info.txt": "f482dfeb6ef1160cb6319ef5d1d97ccb6205cc719dfa41659ab212b1a83c4440",
+    "redis-stream.json": "d27321f91df832c395b44d5484069aa50b5008c42e8b099daa5eefe0ec12b5b4",
+    "redis-streams.txt": "bfa144c145a5aa2341c2657bb425c3681a7e2e6b919b0df4f53e8643b55de574",
+    "redis.log": "5468ecde81800a72117100f117feacb2f72eaa578586de35346ae607f335557b",
+    "schema.sql": "419101b1caa6efc7fc868d1ee8ffa15ded030201619f14bca4034f97aed5ac8f",
+    "yugabytedb-ysql.log": "a5632dff00f85be86f3381672420e780136caa9f442a69797c0c0285a3197b57"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "source": "ysqlsh_commit_acknowledgement_order",
+  "completed_transactions": [
+    {
+      "session_id": "cross_tablet",
+      "txn_id": 1
+    }
+  ]
+}

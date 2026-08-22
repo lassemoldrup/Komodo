@@ -1,0 +1,54 @@
+SET
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+INSERT 0 1
+INSERT 0 1
+COMMIT
+ committed_session_id | committed_txn_id | final_commit_acknowledged_at_utc 
+----------------------+------------------+----------------------------------
+ backpressure         |               12 | 2026-08-22 16:37:27.595997
+(1 row)
+

@@ -1,0 +1,24 @@
+DATABASE	benchbase	UTF8	C
+TABLE	benchbase.checker_run_fence	r	f
+TABLE	benchbase.session_txn	r	f
+TABLE	benchbase.usertable	r	f
+COLUMN	benchbase.checker_run_fence	run_id	1	character	NO	-	-	36	-	-	-	-
+COLUMN	benchbase.checker_run_fence	phase	2	character varying	NO	-	-	32	-	-	-	-
+COLUMN	benchbase.checker_run_fence	nonce	3	character	NO	-	-	36	-	-	-	-
+COLUMN	benchbase.session_txn	session_id	1	character varying	NO	-	-	64	-	-	-	-
+COLUMN	benchbase.session_txn	txn_id	2	bigint	NO	64	0	-	-	-	-	-
+COLUMN	benchbase.usertable	ycsb_key	1	integer	NO	32	0	-	-	-	-	-
+COLUMN	benchbase.usertable	field1	2	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field2	3	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field3	4	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field4	5	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field5	6	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field6	7	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field7	8	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field8	9	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field9	10	character varying	YES	-	-	100	-	-	-	-
+COLUMN	benchbase.usertable	field10	11	character varying	YES	-	-	100	-	-	-	-
+PRIMARY	benchbase.checker_run_fence	run_id	1
+PRIMARY	benchbase.checker_run_fence	phase	2
+PRIMARY	benchbase.session_txn	session_id	1
+PRIMARY	benchbase.usertable	ycsb_key	1

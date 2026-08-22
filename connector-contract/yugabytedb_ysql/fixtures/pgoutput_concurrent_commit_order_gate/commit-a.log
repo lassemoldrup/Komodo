@@ -1,0 +1,15 @@
+SET
+BEGIN
+INSERT 0 1
+ pg_sleep 
+----------
+ 
+(1 row)
+
+INSERT 0 1
+COMMIT
+ committed_session_id | committed_txn_id | commit_acknowledged_at_utc 
+----------------------+------------------+----------------------------
+ commit_a             |                1 | 2026-08-22 16:36:44.004405
+(1 row)
+

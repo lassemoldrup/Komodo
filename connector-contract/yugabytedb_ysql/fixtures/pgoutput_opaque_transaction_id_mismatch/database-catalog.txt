@@ -1,0 +1,35 @@
+                                                                                          version                                                                                           
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 15.12-YB-2025.2.5.2-b0 on x86_64-pc-linux-gnu, compiled by clang version 19.1.0 (https://github.com/yugabyte/llvm-project.git a2a6b655e14e7fa1fcf1011a6cb29cb8575249c0), 64-bit
+(1 row)
+
+        slot_name        |  plugin  | database  | yb_lsn_type | active | active_pid | confirmed_flush_lsn 
+-------------------------+----------+-----------+-------------+--------+------------+---------------------
+ connector_contract_slot | pgoutput | benchbase | SEQUENCE    | t      |        765 | 0/8
+(1 row)
+
+ schemaname |     tablename     
+------------+-------------------
+ benchbase  | checker_run_fence
+ benchbase  | session_txn
+ benchbase  | usertable
+(3 rows)
+
+      relname      | relreplident 
+-------------------+--------------
+ checker_run_fence | f
+ session_txn       | f
+ usertable         | f
+(3 rows)
+
+ i | yb_hash_code 
+---+--------------
+ 1 |         4624
+ 2 |        49348
+(2 rows)
+
+ application_rows 
+------------------
+                2
+(1 row)
+

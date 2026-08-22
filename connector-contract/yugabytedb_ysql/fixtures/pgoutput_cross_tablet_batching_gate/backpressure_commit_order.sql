@@ -1,0 +1,78 @@
+\set ON_ERROR_STOP on
+SET search_path TO benchbase;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1001, 'backpressure-01');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 1)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1002, 'backpressure-02');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 2)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1003, 'backpressure-03');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 3)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1004, 'backpressure-04');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 4)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1005, 'backpressure-05');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 5)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1006, 'backpressure-06');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 6)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1007, 'backpressure-07');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 7)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1008, 'backpressure-08');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 8)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1009, 'backpressure-09');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 9)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1010, 'backpressure-10');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 10)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1011, 'backpressure-11');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 11)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+INSERT INTO usertable (ycsb_key, field1) VALUES (1012, 'backpressure-12');
+INSERT INTO session_txn (session_id, txn_id) VALUES ('backpressure', 12)
+ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+COMMIT;
+
+SELECT 'backpressure' AS committed_session_id,
+       12 AS committed_txn_id,
+       clock_timestamp() AT TIME ZONE 'UTC' AS final_commit_acknowledged_at_utc;

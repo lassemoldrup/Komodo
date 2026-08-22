@@ -1,0 +1,13 @@
+{
+  "source": "ysqlsh_commit_acknowledgement_order",
+  "completed_transactions": [
+    {
+      "session_id": "commit_b",
+      "txn_id": 1
+    },
+    {
+      "session_id": "commit_a",
+      "txn_id": 1
+    }
+  ]
+}

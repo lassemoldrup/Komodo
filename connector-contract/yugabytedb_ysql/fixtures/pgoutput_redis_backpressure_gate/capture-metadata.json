@@ -1,0 +1,111 @@
+{
+  "capture_id": "redis_backpressure_20260822T163732Z",
+  "captured_at_utc": "2026-08-22T16:37:32Z",
+  "scenario": "redis_backpressure",
+  "platform": "linux/amd64",
+  "plugin": "pgoutput",
+  "slot_lsn_type": "SEQUENCE",
+  "streaming_mode": "default",
+  "logical_slots": 1,
+  "publication_count": 1,
+  "publication_name": "connector_contract_publication",
+  "connector_tasks": 1,
+  "redis_streams": [
+    "cdc"
+  ],
+  "source_max_batch_size": 2,
+  "redis_sink_batch_size": 2,
+  "database_image": "docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb",
+  "database_binary_version": "2025.2.5.2-b5",
+  "database_build_hash": "84b2d0064618859f160408c0ce1cb33985581943",
+  "connector_version": "dz.2.5.2.yb.2026.1",
+  "connector_sha256": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98",
+  "debezium_server_version": "2.5.2.Final",
+  "java_runtime_version": "17.0.20+8",
+  "redis_version": "7.4.10",
+  "locally_built_image_id": "sha256:935dc272cec443ff142ee812bcbe5c993ba50f5a0495184ca837f16209227d85",
+  "expected_completed_transactions": [
+    {
+      "session_id": "backpressure",
+      "txn_id": 1
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 2
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 3
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 4
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 5
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 6
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 7
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 8
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 9
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 10
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 11
+    },
+    {
+      "session_id": "backpressure",
+      "txn_id": 12
+    }
+  ],
+  "gate": {
+    "name": "raw_connector_redis_contract",
+    "status": "PASSED",
+    "decision_boundary": "Connector IDs, source.txId, LSN, and HybridTime are diagnostic metadata only; the verifier frames only the unique contiguous BEGIN/rows/END interval and correlates completed frames only by the SQL-last client marker."
+  },
+  "backpressure": {
+    "redis_client_pause_write_ms": 750,
+    "transport_errors_observed": false
+  },
+  "file_sha256": {
+    "application.properties": "43a80b7f39070ac9c3510e5ea9fad34262147204a64447db4596580fbd71a018",
+    "backpressure_commit_order.sql": "4b29867d271bf0b3a30952160949d33917d232e27826bf73807b8762e36e8b93",
+    "commit-order.json": "9de4089171f6f3a5f1897dad770422257510808a034127f62e58bb6bffaa7841",
+    "compose-services.json": "039f5c21dd14ba525fb1ca0dc65d609723881e68a2658cfb8520c026d9154bb0",
+    "connector-classpath.txt": "0b38c8a20df56ab9b44950daebc63d825c2bec2d09775c44729c52781953c3e5",
+    "connector-contract-image.json": "8d30eec1a5cc082ecbac1fddfc1419565e50c9802a2782aa51d01de6afee00d5",
+    "contract_transactions.sql": "7932bd57997e2e44097dc4c2e2c41184318fa9838c4b1e342b866af0023441c2",
+    "cross_tablet_marker_last.sql": "abb92b959b45a78b29d37aa3c2f62dd432a44451d86b4510ac7d8b27453ff8c5",
+    "database-build.txt": "0cac5993923b8b706501fdc1ff7558d354b75c2a18b545ace2ab4873b1976a16",
+    "database-catalog.txt": "3e824ab0606ea4e1f6e626cfdb9ed009402f103574cad293264840eb7e7b6933",
+    "debezium-server.log": "1cf17c7949bd8e49a0c74b3806a0518b52f8db2cdf789829ed390dd511552687",
+    "docker-compose-config.yml": "00f8838106b3f940ef89d51b759260fb3f09cefccc37c5f7ca6bd5bd4ee376e1",
+    "docker-compose.yml": "137c9c66b9a68554a4298cf06a279224696268fd0be6b2d9ba5f8ed1ab1bb1cf",
+    "initialize.log": "1ab3776911462f02565a2383458862378a792b38a8f4627b2126b96857f3ffb6",
+    "provenance.lock.json": "568ae071087c8134322bbc68ca678d2fcde7707d26643eec20a8f1dd6dbb321c",
+    "redis-backpressure.log": "a12b7cb43c9d9134b5bb1b35e9096b66775d9e92e7611d1cc92b02edd6782a87",
+    "redis-info.txt": "58f8796eb9315a9325a2738ed57a73cc16ead512a38fbf87ab3fc71575f64f2f",
+    "redis-stream.json": "05156422ae91cededf2fa1f42f969698643841b43988c4016dcb058857aed778",
+    "redis-streams.txt": "bfa144c145a5aa2341c2657bb425c3681a7e2e6b919b0df4f53e8643b55de574",
+    "redis.log": "4a7b5db5d42a705a14942ac40e7289fcaddbb1b89f0535423ec7ce9373cc3620",
+    "schema.sql": "419101b1caa6efc7fc868d1ee8ffa15ded030201619f14bca4034f97aed5ac8f",
+    "workload.log": "148f65d32a4643647748622ad219d8d7856eabe57c193fbeb64116150c6d3951",
+    "yugabytedb-ysql.log": "81b2bbb52ef2f25209a730384a23d44a09982e0395a963ff7e2c92e949dd99b1"
+  }
+}

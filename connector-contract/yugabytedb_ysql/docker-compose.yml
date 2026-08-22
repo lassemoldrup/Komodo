@@ -1,0 +1,87 @@
+name: yugabytedb-ysql-connector-contract
+
+services:
+  redis:
+    image: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+    container_name: connector-contract-redis
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - "268435456"
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [connector_contract]
+
+  yugabytedb_ysql:
+    image: docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb
+    container_name: connector-contract-yugabytedb-ysql
+    command: >-
+      bin/yugabyted start --background=false --callhome=false
+      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true,cdc_enable_intra_transactional_before_image=true,cdc_send_null_before_image_if_not_exists=false
+    healthcheck:
+      test: ["CMD", "bin/ysqlsh", "-h", "yugabytedb_ysql", "-U", "yugabyte", "-d", "yugabyte", "-c", "SELECT 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    volumes:
+      - ./workload:/connector-contract/workload:ro
+    networks: [connector_contract]
+
+  initialize:
+    image: docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb
+    container_name: connector-contract-initialize
+    depends_on:
+      yugabytedb_ysql:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/connector-contract/initialize.sh"]
+    environment:
+      CONNECTOR_CONTRACT_PLUGIN: ${CONNECTOR_CONTRACT_PLUGIN:-pgoutput}
+      CONNECTOR_CONTRACT_SLOT: ${CONNECTOR_CONTRACT_SLOT:-connector_contract_slot}
+    volumes:
+      - ./initialize.sh:/connector-contract/initialize.sh:ro
+      - ./schema.sql:/connector-contract/schema.sql:ro
+    restart: "no"
+    networks: [connector_contract]
+
+  debezium_server:
+    build:
+      context: .
+      dockerfile: Dockerfile.debezium-server
+    image: db-monitoring/yugabytedb-ysql-connector-contract:dz.2.5.2.yb.2026.1
+    container_name: connector-contract-debezium-server
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      DEBEZIUM_SOURCE_PLUGIN_NAME: ${CONNECTOR_CONTRACT_PLUGIN:-pgoutput}
+      DEBEZIUM_SOURCE_SLOT_NAME: ${CONNECTOR_CONTRACT_SLOT:-connector_contract_slot}
+      DEBEZIUM_SINK_REDIS_BATCH_SIZE: ${CONNECTOR_CONTRACT_REDIS_BATCH_SIZE:-1000}
+      DEBEZIUM_SOURCE_MAX_BATCH_SIZE: ${CONNECTOR_CONTRACT_SOURCE_BATCH_SIZE:-2}
+      DEBEZIUM_SOURCE_POLL_INTERVAL_MS: ${CONNECTOR_CONTRACT_POLL_INTERVAL_MS:-10}
+    volumes:
+      - ./application.properties:/debezium/conf/application.properties:ro
+    tmpfs:
+      - /debezium/data:rw,size=64m
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /q/health HTTP/1.0\r\n\r\n' >&3 && grep -q 'UP' <&3"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+    networks: [connector_contract]
+
+networks:
+  connector_contract:
+    name: yugabytedb-ysql-connector-contract

@@ -1,0 +1,233 @@
+connector-contract-debezium-server  |        __       __                 _                 
+connector-contract-debezium-server  |   ____/ /___   / /_   ___  ____   (_)__  __ ____ ___ 
+connector-contract-debezium-server  |  / __  // _ \ / __ \ / _ \/_  /  / // / / // __ `__ \
+connector-contract-debezium-server  | / /_/ //  __// /_/ //  __/ / /_ / // /_/ // / / / / /
+connector-contract-debezium-server  | \__,_/ \___//_.___/ \___/ /___//_/ \__,_//_/ /_/ /_/ 
+connector-contract-debezium-server  |                                                      
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  |                        Powered by Quarkus 3.2.3.Final
+connector-contract-debezium-server  | 2026-08-22 15:39:10,079 INFO  [io.deb.ser.BaseChangeConsumer] (main) Using 'io.debezium.server.BaseChangeConsumer$$Lambda$252/0x00007fae50307110@6dbcf214' stream name mapper
+connector-contract-debezium-server  | 2026-08-22 15:39:10,101 INFO  [io.deb.sto.red.RedisCommonConfig] (main) Configuration for 'RedisStreamChangeConsumerConfig' with prefix 'debezium.sink.': {redis.batch.size=1000, redis.socket.timeout.ms=2000, redis.retry.max.delay.ms=1000, type=redis, redis.connection.timeout.ms=2000, redis.retry.initial.delay.ms=100, redis.address=redis:6379}
+connector-contract-debezium-server  | 2026-08-22 15:39:10,175 INFO  [io.deb.sto.red.RedisConnection] (main) Using Redis client 'JedisClient [jedis=Jedis{Connection{DefaultJedisSocketFactory{redis:6379}}}]'
+connector-contract-debezium-server  | 2026-08-22 15:39:10,179 INFO  [io.deb.ser.DebeziumServer] (main) Consumer 'io.debezium.server.redis.RedisStreamChangeConsumer' instantiated
+connector-contract-debezium-server  | 2026-08-22 15:39:10,234 INFO  [org.apa.kaf.con.jso.JsonConverterConfig] (main) JsonConverterConfig values: 
+connector-contract-debezium-server  | 	converter.type = key
+connector-contract-debezium-server  | 	decimal.format = BASE64
+connector-contract-debezium-server  | 	replace.null.with.default = true
+connector-contract-debezium-server  | 	schemas.cache.size = 1000
+connector-contract-debezium-server  | 	schemas.enable = false
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  | 2026-08-22 15:39:10,236 INFO  [org.apa.kaf.con.jso.JsonConverterConfig] (main) JsonConverterConfig values: 
+connector-contract-debezium-server  | 	converter.type = value
+connector-contract-debezium-server  | 	decimal.format = BASE64
+connector-contract-debezium-server  | 	replace.null.with.default = true
+connector-contract-debezium-server  | 	schemas.cache.size = 1000
+connector-contract-debezium-server  | 	schemas.enable = false
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  | 2026-08-22 15:39:10,256 INFO  [io.deb.emb.EmbeddedEngine$EmbeddedConfig] (main) EmbeddedConfig values: 
+connector-contract-debezium-server  | 	access.control.allow.methods = 
+connector-contract-debezium-server  | 	access.control.allow.origin = 
+connector-contract-debezium-server  | 	admin.listeners = null
+connector-contract-debezium-server  | 	auto.include.jmx.reporter = true
+connector-contract-debezium-server  | 	bootstrap.servers = [localhost:9092]
+connector-contract-debezium-server  | 	client.dns.lookup = use_all_dns_ips
+connector-contract-debezium-server  | 	config.providers = []
+connector-contract-debezium-server  | 	connector.client.config.override.policy = All
+connector-contract-debezium-server  | 	header.converter = class org.apache.kafka.connect.storage.SimpleHeaderConverter
+connector-contract-debezium-server  | 	key.converter = class org.apache.kafka.connect.json.JsonConverter
+connector-contract-debezium-server  | 	listeners = [http://:8083]
+connector-contract-debezium-server  | 	metric.reporters = []
+connector-contract-debezium-server  | 	metrics.num.samples = 2
+connector-contract-debezium-server  | 	metrics.recording.level = INFO
+connector-contract-debezium-server  | 	metrics.sample.window.ms = 30000
+connector-contract-debezium-server  | 	offset.flush.interval.ms = 0
+connector-contract-debezium-server  | 	offset.flush.timeout.ms = 5000
+connector-contract-debezium-server  | 	offset.storage.file.filename = /debezium/data/offsets.dat
+connector-contract-debezium-server  | 	offset.storage.partitions = null
+connector-contract-debezium-server  | 	offset.storage.replication.factor = null
+connector-contract-debezium-server  | 	offset.storage.topic = 
+connector-contract-debezium-server  | 	plugin.discovery = hybrid_warn
+connector-contract-debezium-server  | 	plugin.path = null
+connector-contract-debezium-server  | 	response.http.headers.config = 
+connector-contract-debezium-server  | 	rest.advertised.host.name = null
+connector-contract-debezium-server  | 	rest.advertised.listener = null
+connector-contract-debezium-server  | 	rest.advertised.port = null
+connector-contract-debezium-server  | 	rest.extension.classes = []
+connector-contract-debezium-server  | 	ssl.cipher.suites = null
+connector-contract-debezium-server  | 	ssl.client.auth = none
+connector-contract-debezium-server  | 	ssl.enabled.protocols = [TLSv1.2, TLSv1.3]
+connector-contract-debezium-server  | 	ssl.endpoint.identification.algorithm = https
+connector-contract-debezium-server  | 	ssl.engine.factory.class = null
+connector-contract-debezium-server  | 	ssl.key.password = null
+connector-contract-debezium-server  | 	ssl.keymanager.algorithm = SunX509
+connector-contract-debezium-server  | 	ssl.keystore.certificate.chain = null
+connector-contract-debezium-server  | 	ssl.keystore.key = null
+connector-contract-debezium-server  | 	ssl.keystore.location = null
+connector-contract-debezium-server  | 	ssl.keystore.password = null
+connector-contract-debezium-server  | 	ssl.keystore.type = JKS
+connector-contract-debezium-server  | 	ssl.protocol = TLSv1.3
+connector-contract-debezium-server  | 	ssl.provider = null
+connector-contract-debezium-server  | 	ssl.secure.random.implementation = null
+connector-contract-debezium-server  | 	ssl.trustmanager.algorithm = PKIX
+connector-contract-debezium-server  | 	ssl.truststore.certificates = null
+connector-contract-debezium-server  | 	ssl.truststore.location = null
+connector-contract-debezium-server  | 	ssl.truststore.password = null
+connector-contract-debezium-server  | 	ssl.truststore.type = JKS
+connector-contract-debezium-server  | 	task.shutdown.graceful.timeout.ms = 5000
+connector-contract-debezium-server  | 	topic.creation.enable = true
+connector-contract-debezium-server  | 	topic.tracking.allow.reset = true
+connector-contract-debezium-server  | 	topic.tracking.enable = true
+connector-contract-debezium-server  | 	value.converter = class org.apache.kafka.connect.json.JsonConverter
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  | 2026-08-22 15:39:10,258 INFO  [org.apa.kaf.con.jso.JsonConverterConfig] (main) JsonConverterConfig values: 
+connector-contract-debezium-server  | 	converter.type = key
+connector-contract-debezium-server  | 	decimal.format = BASE64
+connector-contract-debezium-server  | 	replace.null.with.default = true
+connector-contract-debezium-server  | 	schemas.cache.size = 1000
+connector-contract-debezium-server  | 	schemas.enable = false
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  | 2026-08-22 15:39:10,259 INFO  [org.apa.kaf.con.jso.JsonConverterConfig] (main) JsonConverterConfig values: 
+connector-contract-debezium-server  | 	converter.type = value
+connector-contract-debezium-server  | 	decimal.format = BASE64
+connector-contract-debezium-server  | 	replace.null.with.default = true
+connector-contract-debezium-server  | 	schemas.cache.size = 1000
+connector-contract-debezium-server  | 	schemas.enable = false
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  | 2026-08-22 15:39:10,259 INFO  [org.apa.kaf.con.jso.JsonConverterConfig] (main) JsonConverterConfig values: 
+connector-contract-debezium-server  | 	converter.type = header
+connector-contract-debezium-server  | 	decimal.format = BASE64
+connector-contract-debezium-server  | 	replace.null.with.default = true
+connector-contract-debezium-server  | 	schemas.cache.size = 1000
+connector-contract-debezium-server  | 	schemas.enable = true
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  | 2026-08-22 15:39:10,261 INFO  [io.deb.ser.DebeziumServer] (main) Engine executor started
+connector-contract-debezium-server  | 2026-08-22 15:39:10,336 INFO  [io.deb.con.CommonConnectorConfig] (pool-7-thread-1) Loading the custom source info struct maker plugin: io.debezium.connector.postgresql.PostgresSourceInfoStructMaker
+connector-contract-debezium-server  | 2026-08-22 15:39:10,362 INFO  [io.quarkus] (main) debezium-server-dist 2.5.2.Final on JVM (powered by Quarkus 3.2.3.Final) started in 1.518s. Listening on: http://0.0.0.0:8080
+connector-contract-debezium-server  | 2026-08-22 15:39:10,363 INFO  [io.quarkus] (main) Profile prod activated. 
+connector-contract-debezium-server  | 2026-08-22 15:39:10,363 INFO  [io.quarkus] (main) Installed features: [cdi, kubernetes-client, resteasy-jackson, smallrye-context-propagation, smallrye-health, vertx]
+connector-contract-debezium-server  | 2026-08-22 15:39:10,519 INFO  [io.deb.con.pos.YugabyteDBConnector] (pool-7-thread-1) Successfully tested connection for jdbc:yugabytedb://yugabytedb_ysql:5433/benchbase?load-balance=only-primary with user 'connector_contract_replication'
+connector-contract-debezium-server  | 2026-08-22 15:39:10,590 INFO  [io.deb.jdb.JdbcConnection] (pool-8-thread-1) Connection gracefully closed
+connector-contract-debezium-server  | 2026-08-22 15:39:10,601 INFO  [org.apa.kaf.con.jso.JsonConverterConfig] (pool-7-thread-1) JsonConverterConfig values: 
+connector-contract-debezium-server  | 	converter.type = key
+connector-contract-debezium-server  | 	decimal.format = BASE64
+connector-contract-debezium-server  | 	replace.null.with.default = true
+connector-contract-debezium-server  | 	schemas.cache.size = 1000
+connector-contract-debezium-server  | 	schemas.enable = false
+connector-contract-debezium-server  | 
+connector-contract-debezium-server  | 2026-08-22 15:39:10,602 INFO  [org.apa.kaf.con.sto.FileOffsetBackingStore] (pool-7-thread-1) Starting FileOffsetBackingStore with file /debezium/data/offsets.dat
+connector-contract-debezium-server  | 2026-08-22 15:39:10,607 INFO  [io.deb.con.CommonConnectorConfig] (pool-7-thread-1) Loading the custom source info struct maker plugin: io.debezium.connector.postgresql.PostgresSourceInfoStructMaker
+connector-contract-debezium-server  | 2026-08-22 15:39:10,624 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1) Starting PostgresConnectorTask with configuration:
+connector-contract-debezium-server  | 2026-08-22 15:39:10,627 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    connector.class = io.debezium.connector.postgresql.YugabyteDBConnector
+connector-contract-debezium-server  | 2026-08-22 15:39:10,628 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    publication.name = connector_contract_publication
+connector-contract-debezium-server  | 2026-08-22 15:39:10,628 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    transforms = route
+connector-contract-debezium-server  | 2026-08-22 15:39:10,628 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    schema.include.list = benchbase
+connector-contract-debezium-server  | 2026-08-22 15:39:10,628 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    include.schema.changes = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,628 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    database.sslmode = disable
+connector-contract-debezium-server  | 2026-08-22 15:39:10,629 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    transforms.route.regex = .*
+connector-contract-debezium-server  | 2026-08-22 15:39:10,629 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    poll.interval.ms = 10
+connector-contract-debezium-server  | 2026-08-22 15:39:10,629 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    slot.lsn.type = SEQUENCE
+connector-contract-debezium-server  | 2026-08-22 15:39:10,629 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    errors.retry.delay.initial.ms = 300
+connector-contract-debezium-server  | 2026-08-22 15:39:10,629 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    schema.history.internal.redis.retry.initial.delay.ms = 100
+connector-contract-debezium-server  | 2026-08-22 15:39:10,630 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    key.converter = org.apache.kafka.connect.json.JsonConverter
+connector-contract-debezium-server  | 2026-08-22 15:39:10,630 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    database.dbname = benchbase
+connector-contract-debezium-server  | 2026-08-22 15:39:10,630 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    database.user = connector_contract_replication
+connector-contract-debezium-server  | 2026-08-22 15:39:10,630 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    header.converter.value.schemas.enable = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,630 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    header.converter.key = json
+connector-contract-debezium-server  | 2026-08-22 15:39:10,631 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.storage = org.apache.kafka.connect.storage.FileOffsetBackingStore
+connector-contract-debezium-server  | 2026-08-22 15:39:10,631 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    header.converter.key.schemas.enable = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,631 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    plugin.name = pgoutput
+connector-contract-debezium-server  | 2026-08-22 15:39:10,631 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    key.converter.schemas.enable = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,632 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    errors.max.retries = -1
+connector-contract-debezium-server  | 2026-08-22 15:39:10,632 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    value.converter.key.schemas.enable = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,632 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    database.password = ********
+connector-contract-debezium-server  | 2026-08-22 15:39:10,632 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    value.converter.schemas.enable = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,633 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    name = redis
+connector-contract-debezium-server  | 2026-08-22 15:39:10,633 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    schema.history.internal.redis.connection.timeout.ms = 2000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,633 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    streaming.mode = default
+connector-contract-debezium-server  | 2026-08-22 15:39:10,633 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    max.batch.size = 2
+connector-contract-debezium-server  | 2026-08-22 15:39:10,633 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    skipped.operations = none
+connector-contract-debezium-server  | 2026-08-22 15:39:10,634 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    snapshot.mode = never
+connector-contract-debezium-server  | 2026-08-22 15:39:10,634 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    max.queue.size = 32
+connector-contract-debezium-server  | 2026-08-22 15:39:10,634 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    schema.history.internal.redis.socket.timeout.ms = 2000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,634 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    slot.name = connector_contract_slot
+connector-contract-debezium-server  | 2026-08-22 15:39:10,634 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    tasks.max = 1
+connector-contract-debezium-server  | 2026-08-22 15:39:10,635 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.storage.redis.connection.timeout.ms = 2000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,635 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    provide.transaction.metadata = true
+connector-contract-debezium-server  | 2026-08-22 15:39:10,635 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    tombstones.on.delete = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,635 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    transforms.route.type = org.apache.kafka.connect.transforms.RegexRouter
+connector-contract-debezium-server  | 2026-08-22 15:39:10,635 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.storage.redis.address = redis:6379
+connector-contract-debezium-server  | 2026-08-22 15:39:10,636 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    topic.prefix = connector_contract
+connector-contract-debezium-server  | 2026-08-22 15:39:10,636 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    decimal.handling.mode = string
+connector-contract-debezium-server  | 2026-08-22 15:39:10,636 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.storage.file.filename = /debezium/data/offsets.dat
+connector-contract-debezium-server  | 2026-08-22 15:39:10,636 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.storage.redis.socket.timeout.ms = 2000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,636 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    value.converter = org.apache.kafka.connect.json.JsonConverter
+connector-contract-debezium-server  | 2026-08-22 15:39:10,637 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    transforms.route.replacement = cdc
+connector-contract-debezium-server  | 2026-08-22 15:39:10,637 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    value.converter.value.schemas.enable = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,637 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.storage.redis.retry.max.delay.ms = 1000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,637 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    schema.history.internal.redis.address = redis:6379
+connector-contract-debezium-server  | 2026-08-22 15:39:10,637 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    publication.autocreate.mode = disabled
+connector-contract-debezium-server  | 2026-08-22 15:39:10,638 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    header.converter.value = json
+connector-contract-debezium-server  | 2026-08-22 15:39:10,638 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    schema.history.internal.redis.retry.max.delay.ms = 1000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,638 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    key.converter.value.schemas.enable = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,638 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    key.converter.value = json
+connector-contract-debezium-server  | 2026-08-22 15:39:10,638 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    key.converter.key.schemas.enable = false
+connector-contract-debezium-server  | 2026-08-22 15:39:10,639 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.storage.redis.batch.size = 1000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,639 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.flush.timeout.ms = 5000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,639 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    errors.retry.delay.max.ms = 10000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,639 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    event.processing.failure.handling.mode = fail
+connector-contract-debezium-server  | 2026-08-22 15:39:10,639 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.storage.redis.retry.initial.delay.ms = 100
+connector-contract-debezium-server  | 2026-08-22 15:39:10,640 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    value.converter.value = json
+connector-contract-debezium-server  | 2026-08-22 15:39:10,640 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    database.port = 5433
+connector-contract-debezium-server  | 2026-08-22 15:39:10,640 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    offset.flush.interval.ms = 0
+connector-contract-debezium-server  | 2026-08-22 15:39:10,640 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    database.hostname = yugabytedb_ysql
+connector-contract-debezium-server  | 2026-08-22 15:39:10,640 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    task.id = 0
+connector-contract-debezium-server  | 2026-08-22 15:39:10,641 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    table.include.list = benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn
+connector-contract-debezium-server  | 2026-08-22 15:39:10,641 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    value.converter.key = json
+connector-contract-debezium-server  | 2026-08-22 15:39:10,641 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    schema.history.internal.redis.batch.size = 1000
+connector-contract-debezium-server  | 2026-08-22 15:39:10,641 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1)    key.converter.key = json
+connector-contract-debezium-server  | 2026-08-22 15:39:10,641 INFO  [io.deb.con.CommonConnectorConfig] (pool-7-thread-1) Loading the custom source info struct maker plugin: io.debezium.connector.postgresql.PostgresSourceInfoStructMaker
+connector-contract-debezium-server  | 2026-08-22 15:39:10,645 INFO  [io.deb.con.CommonConnectorConfig] (pool-7-thread-1) Loading the custom topic naming strategy plugin: io.debezium.schema.SchemaTopicNamingStrategy
+connector-contract-debezium-server  | 2026-08-22 15:39:10,710 INFO  [io.deb.jdb.JdbcConnection] (pool-9-thread-1) Connection gracefully closed
+connector-contract-debezium-server  | 2026-08-22 15:39:11,461 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1) No previous offsets found
+connector-contract-debezium-server  | 2026-08-22 15:39:12,151 INFO  [io.deb.con.pos.PostgresConnectorTask] (pool-7-thread-1) user 'connector_contract_replication' connected to database 'benchbase' on PostgreSQL 15.12-YB-2025.2.5.2-b0 on x86_64-pc-linux-gnu, compiled by clang version 19.1.0 (https://github.com/yugabyte/llvm-project.git a2a6b655e14e7fa1fcf1011a6cb29cb8575249c0), 64-bit with roles:
+connector-contract-debezium-server  | 	role 'connector_contract_replication' [superuser: false, replication: true, inherit: true, create role: false, create db: false, can log in: true]
+connector-contract-debezium-server  | 2026-08-22 15:39:12,197 INFO  [io.deb.con.pos.con.PostgresConnection] (pool-7-thread-1) Obtained valid replication slot ReplicationSlot [active=true, latestFlushedLsn=LSN{2}, catalogXmin=1]
+connector-contract-debezium-server  | 2026-08-22 15:39:12,198 INFO  [io.deb.con.pos.PostgresConnectorTask] (pool-7-thread-1) No previous offset found
+connector-contract-debezium-server  | 2026-08-22 15:39:12,198 INFO  [io.deb.con.pos.sna.NeverSnapshotter] (pool-7-thread-1) Snapshots are not allowed as per configuration, starting streaming logical changes only
+connector-contract-debezium-server  | 2026-08-22 15:39:12,212 INFO  [io.deb.con.pos.con.PostgresReplicationConnection] (pool-7-thread-1) Detected YugabyteDB version: 2025.2.5.2-b0
+connector-contract-debezium-server  | 2026-08-22 15:39:12,227 INFO  [io.deb.uti.Threads] (pool-7-thread-1) Requested thread factory for connector YugabyteDBConnector, id = connector_contract named = SignalProcessor
+connector-contract-debezium-server  | 2026-08-22 15:39:12,253 INFO  [io.deb.uti.Threads] (pool-7-thread-1) Requested thread factory for connector YugabyteDBConnector, id = connector_contract named = change-event-source-coordinator
+connector-contract-debezium-server  | 2026-08-22 15:39:12,253 INFO  [io.deb.uti.Threads] (pool-7-thread-1) Requested thread factory for connector YugabyteDBConnector, id = connector_contract named = blocking-snapshot
+connector-contract-debezium-server  | 2026-08-22 15:39:12,265 INFO  [io.deb.uti.Threads] (pool-7-thread-1) Creating thread debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator
+connector-contract-debezium-server  | 2026-08-22 15:39:12,343 INFO  [io.deb.pip.ChangeEventSourceCoordinator] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Metrics registered
+connector-contract-debezium-server  | 2026-08-22 15:39:12,344 INFO  [io.deb.pip.ChangeEventSourceCoordinator] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Context created
+connector-contract-debezium-server  | 2026-08-22 15:39:12,349 INFO  [io.deb.con.pos.PostgresSnapshotChangeEventSource] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) According to the connector configuration no snapshot will be executed
+connector-contract-debezium-server  | 2026-08-22 15:39:12,351 INFO  [io.deb.pip.ChangeEventSourceCoordinator] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Snapshot ended with SnapshotResult [status=SKIPPED, offset=null]
+connector-contract-debezium-server  | 2026-08-22 15:39:12,352 INFO  [io.deb.con.pos.PostgresChangeEventSourceCoordinator] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Transitioning to streaming
+connector-contract-debezium-server  | 2026-08-22 15:39:12,354 INFO  [io.deb.pip.ChangeEventSourceCoordinator] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Connected metrics set to 'true'
+connector-contract-debezium-server  | 2026-08-22 15:39:12,354 INFO  [io.deb.con.pos.PostgresOffsetContext] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Creating initial offset context
+connector-contract-debezium-server  | 2026-08-22 15:39:12,355 INFO  [io.deb.con.pos.PostgresOffsetContext] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Read xlogStart at 'null' from transaction '2'
+connector-contract-debezium-server  | 2026-08-22 15:39:12,714 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) REPLICA IDENTITY for 'benchbase.checker_run_fence' is 'FULL'; UPDATE AND DELETE events will contain the previous values of all the columns
+connector-contract-debezium-server  | 2026-08-22 15:39:12,718 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) REPLICA IDENTITY for 'benchbase.usertable' is 'FULL'; UPDATE AND DELETE events will contain the previous values of all the columns
+connector-contract-debezium-server  | 2026-08-22 15:39:12,722 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) REPLICA IDENTITY for 'benchbase.session_txn' is 'FULL'; UPDATE AND DELETE events will contain the previous values of all the columns
+connector-contract-debezium-server  | 2026-08-22 15:39:12,754 INFO  [io.deb.pip.sig.SignalProcessor] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) SignalProcessor started. Scheduling it every 5000ms
+connector-contract-debezium-server  | 2026-08-22 15:39:12,755 INFO  [io.deb.uti.Threads] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Creating thread debezium-yugabytedbconnector-connector_contract-SignalProcessor
+connector-contract-debezium-server  | 2026-08-22 15:39:12,756 INFO  [io.deb.pip.ChangeEventSourceCoordinator] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Starting streaming
+connector-contract-debezium-server  | 2026-08-22 15:39:12,821 INFO  [io.deb.con.pos.PostgresStreamingChangeEventSource] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) PID for replication connection: 765 on node 172.20.0.2
+connector-contract-debezium-server  | 2026-08-22 15:39:12,821 INFO  [io.deb.con.pos.PostgresStreamingChangeEventSource] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) No previous LSN found in Kafka, streaming from the latest xlogpos or flushed LSN...
+connector-contract-debezium-server  | 2026-08-22 15:39:12,822 INFO  [io.deb.con.pos.con.WalPositionLocator] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) WAL position will not be searched
+connector-contract-debezium-server  | 2026-08-22 15:39:12,822 INFO  [io.deb.con.pos.con.PostgresReplicationConnection] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Initializing PgOutput logical decoder publication
+connector-contract-debezium-server  | 2026-08-22 15:39:13,013 INFO  [io.deb.con.pos.con.PostgresConnection] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Obtained valid replication slot ReplicationSlot [active=true, latestFlushedLsn=LSN{2}, catalogXmin=1]
+connector-contract-debezium-server  | 2026-08-22 15:39:13,015 INFO  [io.deb.jdb.JdbcConnection] (pool-10-thread-1) Connection gracefully closed
+connector-contract-debezium-server  | 2026-08-22 15:39:13,044 INFO  [io.deb.uti.Threads] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Requested thread factory for connector YugabyteDBConnector, id = connector_contract named = keep-alive
+connector-contract-debezium-server  | 2026-08-22 15:39:13,045 INFO  [io.deb.uti.Threads] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Creating thread debezium-yugabytedbconnector-connector_contract-keep-alive
+connector-contract-debezium-server  | 2026-08-22 15:39:13,179 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) REPLICA IDENTITY for 'benchbase.checker_run_fence' is 'FULL'; UPDATE AND DELETE events will contain the previous values of all the columns
+connector-contract-debezium-server  | 2026-08-22 15:39:13,182 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) REPLICA IDENTITY for 'benchbase.usertable' is 'FULL'; UPDATE AND DELETE events will contain the previous values of all the columns
+connector-contract-debezium-server  | 2026-08-22 15:39:13,186 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) REPLICA IDENTITY for 'benchbase.session_txn' is 'FULL'; UPDATE AND DELETE events will contain the previous values of all the columns
+connector-contract-debezium-server  | 2026-08-22 15:39:13,189 INFO  [io.deb.con.pos.PostgresStreamingChangeEventSource] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Connector config provide.transaction.metadata is set to true. Therefore, skip records filtering in order to ship entire transactions.
+connector-contract-debezium-server  | 2026-08-22 15:39:13,190 INFO  [io.deb.con.pos.PostgresStreamingChangeEventSource] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Processing messages
+connector-contract-debezium-server  | 2026-08-22 15:41:17,865 INFO  [io.deb.con.com.BaseSourceTask] (pool-7-thread-1) 1 records sent during previous 00:02:07.245, last recorded offset of {server=connector_contract_0_connector_contract_slot} partition is {transaction_id=2, lsn_proc=2, messageType=BEGIN, lsn=3, txId=2, ts_usec=1787413277785716}
+connector-contract-debezium-server  | 2026-08-22 15:41:17,893 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Replica identity being stored for table benchbase.usertable is FULL
+connector-contract-debezium-server  | 2026-08-22 15:41:17,945 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Replica identity being stored for table benchbase.checker_run_fence is FULL
+connector-contract-debezium-server  | 2026-08-22 15:41:17,961 INFO  [io.deb.con.pos.PostgresSchema] (debezium-yugabytedbconnector-connector_contract-change-event-source-coordinator) Replica identity being stored for table benchbase.session_txn is FULL

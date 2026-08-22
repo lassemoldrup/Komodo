@@ -1,0 +1,74 @@
+{
+  "contract": "yugabytedb_ysql_logical_replication_to_debezium_server_to_redis",
+  "recorded_at_utc": "2026-08-22T15:42:16Z",
+  "platform": "linux/amd64",
+  "artifacts": {
+    "database": {
+      "name": "YugabyteDB",
+      "version": "2025.2.5.2-b5",
+      "image": "docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb",
+      "manifest_digest": "sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb",
+      "source": "https://docs.yugabyte.com/stable/releases/ybdb-releases/v2025.2/"
+    },
+    "connector": {
+      "name": "YugabyteDB logical replication connector",
+      "version": "dz.2.5.2.yb.2026.1",
+      "source_commit": "5c37f3575d4c2f690155d91886746527ab298bd2",
+      "url": "https://github.com/yugabyte/debezium/releases/download/dz.2.5.2.yb.2026.1/yugabytedb-source-connector-dz.2.5.2.yb.2026.1-jar-with-dependencies.jar",
+      "bytes": 8239789,
+      "sha256": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98",
+      "source": "https://github.com/yugabyte/debezium/releases/tag/dz.2.5.2.yb.2026.1"
+    },
+    "debezium_server": {
+      "version": "2.5.2.Final",
+      "image": "quay.io/debezium/server@sha256:e4a41c33d252d6a358ea18e3e58c680e03d76970ee2edf3b7bd021ce75555296",
+      "manifest_digest": "sha256:e4a41c33d252d6a358ea18e3e58c680e03d76970ee2edf3b7bd021ce75555296",
+      "source": "https://debezium.io/documentation/reference/2.5/operations/debezium-server.html"
+    },
+    "connector_contract_image": {
+      "image": "db-monitoring/yugabytedb-ysql-connector-contract:dz.2.5.2.yb.2026.1",
+      "local_image_id": "sha256:935dc272cec443ff142ee812bcbe5c993ba50f5a0495184ca837f16209227d85",
+      "built_at_utc": "2026-08-22T15:37:54.801062623Z",
+      "connector_sha256_in_image": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"
+    },
+    "java_runtime": {
+      "name": "Eclipse Temurin JRE",
+      "version": "17.0.20+8",
+      "image": "docker.io/library/eclipse-temurin@sha256:c984fca94ab42452795a0bee45a35a92318390a673d890b8216e9677ac21aa37",
+      "manifest_digest": "sha256:c984fca94ab42452795a0bee45a35a92318390a673d890b8216e9677ac21aa37",
+      "source": "https://hub.docker.com/_/eclipse-temurin"
+    },
+    "postgresql_jdbc": {
+      "version": "42.7.4",
+      "url": "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar",
+      "bytes": 1086687,
+      "sha256": "188976721ead8e8627eb6d8389d500dccc0c9bebd885268a3047180274a6031e",
+      "used_by_contract_stack": false,
+      "source": "https://jdbc.postgresql.org/"
+    },
+    "redis": {
+      "version": "7.4.10",
+      "image": "docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
+      "manifest_digest": "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
+      "source": "https://hub.docker.com/_/redis"
+    }
+  },
+  "connector_configuration": {
+    "connector_class": "io.debezium.connector.postgresql.YugabyteDBConnector",
+    "primary_plugin": "pgoutput",
+    "comparison_plugin": "yboutput",
+    "slot_lsn_type": "SEQUENCE",
+    "streaming_mode": "default",
+    "tasks": 1,
+    "logical_slots": 1,
+    "snapshot_mode": "never",
+    "transaction_metadata": true,
+    "publication_autocreate_mode": "disabled",
+    "redis_stream": "cdc"
+  },
+  "revalidation": {
+    "postgresql_jdbc_current_release_at_recording": "42.7.13",
+    "postgresql_jdbc_current_release_source": "https://jdbc.postgresql.org/",
+    "postgresql_jdbc_upgrade_deferred_until_java_backend_adapter": true
+  }
+}

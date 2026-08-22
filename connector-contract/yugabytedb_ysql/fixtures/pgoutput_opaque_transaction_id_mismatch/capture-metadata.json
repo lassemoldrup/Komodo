@@ -1,0 +1,62 @@
+{
+  "capture_id": "pgoutput_opaque_transaction_id_mismatch_20260822T153917Z",
+  "captured_at_utc": "2026-08-22T15:42:16Z",
+  "scenario": "cross_tablet_marker_last",
+  "platform": "linux/amd64",
+  "plugin": "pgoutput",
+  "slot_lsn_type": "SEQUENCE",
+  "streaming_mode": "default",
+  "logical_slots": 1,
+  "publication_count": 1,
+  "publication_name": "connector_contract_publication",
+  "connector_tasks": 1,
+  "redis_streams": ["cdc"],
+  "source_max_batch_size": 2,
+  "redis_sink_batch_size": 1000,
+  "database_image": "docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb",
+  "database_binary_version": "2025.2.5.2-b5",
+  "database_build_hash": "84b2d0064618859f160408c0ce1cb33985581943",
+  "connector_version": "dz.2.5.2.yb.2026.1",
+  "connector_sha256": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98",
+  "debezium_server_version": "2.5.2.Final",
+  "java_runtime_version": "17.0.20+8",
+  "redis_version": "7.4.10",
+  "locally_built_image_id": "sha256:935dc272cec443ff142ee812bcbe5c993ba50f5a0495184ca837f16209227d85",
+  "expected_completed_transactions": [
+    {
+      "session_id": "cross_tablet",
+      "txn_id": 1
+    }
+  ],
+  "transaction": {
+    "sql_order": [
+      "benchbase.usertable[ycsb_key=1]",
+      "benchbase.usertable[ycsb_key=2]",
+      "benchbase.checker_run_fence[CONTRACT_SPIKE]",
+      "benchbase.session_txn[cross_tablet,1]"
+    ],
+    "yb_hash_codes": {
+      "1": 4624,
+      "2": 49348
+    },
+    "begin_id": "2:3",
+    "row_ids": ["2:3", "2:4", "2:5", "2:6"],
+    "end_id": "2:8",
+    "source_tx_id_diagnostic_only": 2,
+    "source_lsns_diagnostic_only": [3, 4, 5, 6]
+  },
+  "gate": {
+    "name": "raw_connector_redis_contract",
+    "status": "PASSED",
+    "decision_boundary": "Connector IDs, source.txId, LSN, and HybridTime are diagnostic metadata only; the verifier frames only the unique contiguous BEGIN/rows/END interval and correlates completed frames only by the SQL-last client marker."
+  },
+  "file_sha256": {
+    "compose-services.json": "e2f20b10341d3a90f8890e9a018aa2d767977f4b5b6f8fdaa7bf5bc42345897d",
+    "connector-contract-image.json": "29c2e1268fa2ef34451ba6f39c102b61816a7c8438c405d2aa03c92118a2a972",
+    "database-build.txt": "8224e1f304fcc4b0fb8c6ee4282ec77e0258d2f42163c24d7e8e4b019fb7e9da",
+    "database-catalog.txt": "32db5544b18c9a5b7998f91aca391e63d07dae975c779b97bff62e91a164caa1",
+    "debezium-server.log": "48d46cccb00bbf9fb449ad2662ddded626cd86a42dc61eb5cab951b11169d1cb",
+    "initialize.log": "1ab3776911462f02565a2383458862378a792b38a8f4627b2126b96857f3ffb6",
+    "redis-stream.json": "09de81a9da680e1754faa20ebd874553321334e91181a0e05d626995282b47bb"
+  }
+}

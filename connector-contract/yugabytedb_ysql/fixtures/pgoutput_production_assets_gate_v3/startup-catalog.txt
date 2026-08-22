@@ -1,0 +1,29 @@
+ publication_count 
+-------------------
+                 1
+(1 row)
+
+ schemaname |     tablename     
+------------+-------------------
+ benchbase  | checker_run_fence
+ benchbase  | session_txn
+ benchbase  | usertable
+(3 rows)
+
+       slot_name       |  plugin  | database  | yb_lsn_type | active | active_pid 
+-----------------------+----------+-----------+-------------+--------+------------
+ production_asset_slot | pgoutput | benchbase | SEQUENCE    | t      |        890
+(1 row)
+
+  nspname  |      relname      | relreplident 
+-----------+-------------------+--------------
+ benchbase | checker_run_fence | f
+ benchbase | session_txn       | f
+ benchbase | usertable         | f
+(3 rows)
+
+ application_rows | fence_rows | marker_rows 
+------------------+------------+-------------
+                0 |          0 |           0
+(1 row)
+
