@@ -122,8 +122,8 @@ compose exec -T -e PGPASSWORD=blackbox_application_password yugabytedb_ysql \
     yugabytedb_ysql bin/ysqlsh --host yugabytedb_ysql \
     --username blackbox_setup --dbname benchbase --no-psqlrc \
     --set ON_ERROR_STOP=on --command "SELECT pg_sleep(10)" \
-    >"$output_dir/external-ddl-session.log" 2>&1 &
-  external_session_pid=$!
+    >"$output_dir/concurrent-setup-session.log" 2>&1 &
+  concurrent_setup_session_pid=$!
   blackbox_compose exec -T -e PGAPPNAME=privilege_gate_admin \
     yugabytedb_ysql bin/ysqlsh --host yugabytedb_ysql \
     --username yugabyte --dbname yugabyte --no-psqlrc \
@@ -137,12 +137,12 @@ compose exec -T -e PGPASSWORD=blackbox_application_password yugabytedb_ysql \
     (( external_count >= 2 )) && break
     sleep 0.05
   done
-  printf '%s\n' "$external_count" >"$output_dir/external-ddl-session-count.txt"
+  printf '%s\n' "$external_count" >"$output_dir/concurrent-privileged-session-count.txt"
   (( external_count >= 2 ))
   blackbox_backend_admin_query \
     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name IN ('privilege_gate_setup','privilege_gate_admin') AND pid <> pg_backend_pid()" \
     >/dev/null
-  wait "$external_session_pid" 2>/dev/null || true
+  wait "$concurrent_setup_session_pid" 2>/dev/null || true
   wait "$external_admin_pid" 2>/dev/null || true
   wait_for_no_external_sessions
 
