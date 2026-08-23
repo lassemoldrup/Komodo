@@ -702,18 +702,21 @@ run_all_cases() {
       ycsb_fractured_read_probe
     run_case fractured_read_committed READ_COMMITTED fractured '' VIOLATION 3 old new \
       ycsb_fractured_read_probe
+    run_case dropped_client_record REPEATABLE_READ clean ycsb/worker/1 INVALID 4 old old \
+      ycsb_fractured_read_probe
     run_bounded_diagnostic python3 "$YUGABYTEDB_YCSB_VALIDATOR" \
       --directory "$RUN_OUTPUT" \
       --provenance "$RUN_OUTPUT/provenance.lock.json" \
       --output "$RUN_OUTPUT/yugabytedb-ysql-ycsb-semantic-report.json"
   else
-    run_case clean_repeatable_read REPEATABLE_READ clean '' PASS 0 old old ycsb
+    run_case clean_repeatable_read REPEATABLE_READ clean '' PASS 0 old old \
+      ycsb_fractured_read_probe
     run_case fractured_read_committed READ_COMMITTED fractured '' VIOLATION 3 old new \
       ycsb_fractured_read_probe
     run_case fractured_repeatable_read REPEATABLE_READ fractured '' PASS 0 old old \
       ycsb_fractured_read_probe
     run_case dropped_client_record REPEATABLE_READ clean ycsb/worker/1 INVALID 4 old old \
-      ycsb
+      ycsb_fractured_read_probe
   fi
 
   SUCCESS=1

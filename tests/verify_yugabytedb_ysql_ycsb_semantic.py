@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from yugabytedb_ysql_acceptance_evidence import (
+    cdc_frames,
     validate_client_cdc_correlations,
     validate_runtime_provenance,
 )
@@ -54,6 +55,57 @@ def case_final_status(directory: Path, case: str, outcome: str) -> dict[str, Any
     require(reconciliation.get("joined_workload_transactions") == 2, f"{case} joins differ")
     require(reconciliation.get("unmatched_client_records") == 0, f"{case} unmatched clients")
     require(reconciliation.get("unmatched_workload_cdc_slots") == 0, f"{case} unmatched CDC")
+    return final
+
+
+def dropped_client_final_status(directory: Path) -> dict[str, Any]:
+    case = "dropped_client_record"
+    finals = [
+        record
+        for record in records(directory / f"{case}-status.json")
+        if record.get("lifecycle_state") == "FINAL"
+    ]
+    require(len(finals) == 1, "dropped-client final-status count differs")
+    final = finals[0]
+    reconciliation = final.get("reconciliation", {})
+    require(final.get("outcome") == "INVALID", "dropped-client outcome differs")
+    require(final.get("checker_observation") != "VIOLATION_OBSERVED",
+            "dropped-client run reported a checker violation")
+    require(reconciliation.get("evidence_reconciled") is False,
+            "dropped-client evidence unexpectedly reconciled")
+    require(reconciliation.get("accepted_client_transactions") == 1,
+            "dropped-client accepted-client count differs")
+    require(reconciliation.get("joined_workload_transactions") == 0,
+            "dropped-client joined count differs")
+    require(reconciliation.get("unmatched_client_records") == 0,
+            "dropped-client unmatched-client count differs")
+    require(reconciliation.get("unmatched_workload_cdc_slots") == 1,
+            "dropped-client unmatched-CDC count differs")
+    diagnostics = final.get("diagnostics", [])
+    require(any(item.get("code") == "CLIENT_HALF_MISSING" for item in diagnostics),
+            "dropped-client diagnostic is absent")
+    require(all(item.get("code") != "CDC_ORDER_INVALID" for item in diagnostics),
+            "dropped-client run invented a CDC-order failure")
+
+    client_records = records(directory / f"{case}-client.json")
+    manifests = [record for record in client_records if record.get("kind") == "run_manifest"]
+    require(
+        len(manifests) == 1
+        and manifests[0].get("benchmark") == "ycsb_fractured_read_probe"
+        and manifests[0].get("declared_isolation") == "REPEATABLE_READ",
+        "dropped-client RunManifest admission differs",
+    )
+    clients = [record for record in client_records if record.get("kind") == "client_txn"]
+    done = [record for record in client_records if record.get("kind") == "session_done"]
+    require(len(clients) == 1 and len(done) == 2,
+            "dropped-client stream roster differs")
+    frames = cdc_frames(directory / f"{case}-cdc.json")
+    marker_frames = [
+        frame for frame in frames
+        if frame and frame[-1].get("source", {}).get("table") == "session_txn"
+    ]
+    require(len(marker_frames) == 2,
+            "dropped-client raw marker-bearing frame count differs")
     return final
 
 
@@ -152,6 +204,7 @@ def main() -> None:
         "definitive_retry",
         "fractured_repeatable_read",
         "fractured_read_committed",
+        "dropped_client_record",
     )
     connector_image_id = validate_runtime_provenance(
         args.provenance,
@@ -164,6 +217,7 @@ def main() -> None:
     retry = verify_retry(directory)
     repeatable = case_final_status(directory, "fractured_repeatable_read", "PASS")
     committed = case_final_status(directory, "fractured_read_committed", "VIOLATION")
+    dropped = dropped_client_final_status(directory)
     for case, final, benchmark, isolation in (
         ("definitive_retry", retry, "ycsb", "REPEATABLE_READ"),
         (
@@ -209,6 +263,10 @@ def main() -> None:
         for suffix in ("cdc.raw.txt", "client.raw.txt", "status.raw.txt", "compose.log"):
             path = directory / f"{case}-{suffix}"
             require(path.is_file() and path.stat().st_size > 0, f"missing raw evidence: {path.name}")
+    for suffix in ("cdc.raw.txt", "client.raw.txt", "status.raw.txt", "compose.log"):
+        path = directory / f"dropped_client_record-{suffix}"
+        require(path.is_file() and path.stat().st_size > 0,
+                f"missing dropped-client raw evidence: {path.name}")
 
     report = {
         "kind": "yugabytedb_ysql_ycsb_semantic_acceptance",
@@ -218,6 +276,12 @@ def main() -> None:
             "run_id": committed["run_id"],
             "outcome": "VIOLATION",
             "checker_observation": committed["checker_observation"],
+        },
+        "dropped_client_record": {
+            "run_id": dropped["run_id"],
+            "outcome": "INVALID",
+            "diagnostic": "CLIENT_HALF_MISSING",
+            "evidence_reconciled": False,
         },
         "repeatable_read_values": ["old", "old", "old"],
         "read_committed_values": ["old", "old", "new"],

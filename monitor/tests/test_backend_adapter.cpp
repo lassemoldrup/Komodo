@@ -154,12 +154,50 @@ void checkYugabyteSchemaAttestationFailures() {
   auto extra_fact = parsed;
   extra_fact.backend_facts.push_back({.name = "extra", .canonical_value = "x"});
   expect(std::move(extra_fact), MonitorErrorCode::BackendFactMismatch);
+  for (std::size_t index = 0U; index < parsed.backend_facts.size(); ++index) {
+    auto drifted_fact = parsed;
+    auto &fact = drifted_fact.backend_facts[index];
+    const auto rules = adapter.attestationFactContract();
+    const auto rule = std::find_if(
+        rules.begin(), rules.end(),
+        [&](const auto &candidate) { return candidate.name == fact.name; });
+    BLACKBOX_REQUIRE(rule != rules.end());
+    switch (rule->value_rule) {
+    case blackbox::BackendFactValueRule::Exact:
+      fact.canonical_value = "unexpected";
+      break;
+    case blackbox::BackendFactValueRule::Sha256:
+      fact.canonical_value = "not-a-sha256";
+      break;
+    case blackbox::BackendFactValueRule::CanonicalIdentifier:
+      fact.canonical_value = "-invalid";
+      break;
+    case blackbox::BackendFactValueRule::PositiveInteger:
+      fact.canonical_value = "0";
+      break;
+    }
+    expect(std::move(drifted_fact), MonitorErrorCode::BackendFactMismatch);
+  }
   auto wrong_table = parsed;
   wrong_table.tables[0].canonical_table_name = "benchbase.unknown_table";
   expect(std::move(wrong_table), MonitorErrorCode::SchemaAttestationMismatch);
   auto wrong_column = parsed;
   wrong_column.tables[0].columns[0].logical_sql_type = "BIGINT";
   expect(std::move(wrong_column), MonitorErrorCode::SchemaAttestationMismatch);
+  auto wrong_nullability = parsed;
+  wrong_nullability.tables[0].columns[0].nullable =
+      !wrong_nullability.tables[0].columns[0].nullable;
+  expect(std::move(wrong_nullability),
+         MonitorErrorCode::SchemaAttestationMismatch);
+  auto wrong_primary_key = parsed;
+  wrong_primary_key.tables[0].primary_key_columns[0] = "nonce";
+  expect(std::move(wrong_primary_key),
+         MonitorErrorCode::SchemaAttestationMismatch);
+  auto wrong_column_order = parsed;
+  std::swap(wrong_column_order.tables[0].columns[0],
+            wrong_column_order.tables[0].columns[1]);
+  expect(std::move(wrong_column_order),
+         MonitorErrorCode::SchemaAttestationMismatch);
 }
 
 class SyntheticBackendAdapter final : public blackbox::BackendAdapter {

@@ -23,17 +23,18 @@
     },
     {
       "purpose": "retry_and_isolation_semantics",
-      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_semantic_adapter_reconciled_gate",
+      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_failure_matrix_complete_gate",
       "manifest": "SHA256SUMS",
-      "manifest_sha256": "c1fce1cd1f9da32f37452512f7a0ea9d41aa70b6fb8559ddf2aae9a0fee5a163",
-      "report": "blackbox-correctness.HlAgjr/yugabytedb-ysql-ycsb-semantic-report.json",
-      "report_sha256": "54484a3c3a07e61c4803c4e3308ad7a21b4fa43ae8d32d6045718c12b82aada6",
+      "manifest_sha256": "df7461e62b0b5fddd074970255a0cb39aa24f358060f216e189c13bd169e8481",
+      "report": "blackbox-correctness.rdJREO/yugabytedb-ysql-ycsb-semantic-report.json",
+      "report_sha256": "0124e7088c2bbdbd50d6096597eed90b66e6825713aabb8102c0d5518f380fc0",
       "run_ids": [
-        "f4b134e0-079d-4dca-87bc-dc8f9edd94a6",
-        "60c6f400-f583-4584-be1a-49e49dc8f8c6",
-        "a38072c1-f55b-4e61-b2f5-30b4aad12689"
+        "087d1fde-cb6c-47f4-994a-bace46e71691",
+        "e1319484-f99f-4f4f-9c1f-e35c74fa0bb8",
+        "cbdf8df8-a497-4922-852b-9a159860c11a",
+        "643318d5-e861-4f85-80dd-fda410351913"
       ],
-      "regular_file_count": 71
+      "regular_file_count": 90
     }
   ]
 }
