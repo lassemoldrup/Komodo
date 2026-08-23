@@ -366,7 +366,7 @@ def operational_invalid_status(
 
 def connector_stall_status(directory: Path) -> dict[str, Any]:
     case = "connector_stall_invalid"
-    status_records = records(directory / f"{case}-status.json")
+    status_records = records(directory / f"{case}-stalled-status.json")
     require(
         not any(record.get("lifecycle_state") == "FINAL" for record in status_records),
         "connector-stall case unexpectedly reached a final verdict",
@@ -432,7 +432,18 @@ def connector_stall_status(directory: Path) -> dict[str, Any]:
             == attestation.get("canonical_attestation_digest"),
             "connector-stall attestation digest differs",
         )
-    frames = cdc_frames(directory / f"{case}-cdc.json")
+    stalled_container = json.loads(
+        (directory / f"{case}-stalled-connector-container.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    require(
+        isinstance(stalled_container, list)
+        and len(stalled_container) == 1
+        and stalled_container[0].get("State", {}).get("Paused") is True,
+        "connector was not captured in its paused state",
+    )
+    frames = cdc_frames(directory / f"{case}-stalled-cdc.json")
     fence_phases = [
         frame[0].get("after", {}).get("phase")
         for frame in frames
@@ -634,6 +645,10 @@ def main() -> None:
             path = directory / f"{case}-{suffix}"
             require(path.is_file() and path.stat().st_size > 0,
                     f"missing operational raw evidence: {path.name}")
+    for suffix in ("stalled-cdc.raw.txt", "stalled-status.raw.txt"):
+        path = directory / f"connector_stall_invalid-{suffix}"
+        require(path.is_file() and path.stat().st_size > 0,
+                f"missing stalled-boundary raw evidence: {path.name}")
 
     report = {
         "kind": "yugabytedb_ysql_ycsb_semantic_acceptance",

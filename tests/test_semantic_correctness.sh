@@ -581,7 +581,7 @@ run_case_body() {
     printf -v workload_command '%q run' "$CLIENT"
   fi
 
-  local status status_timeout_seconds=120
+  local status status_timeout_seconds=120 stall_run_id=
   if [[ $failure_kind == connector_stall ]]; then
     status_timeout_seconds=8
   fi
@@ -617,6 +617,16 @@ run_case_body() {
   trap - HUP INT TERM
 
   if [[ $failure_kind == connector_stall ]]; then
+    stall_run_id=$(extract_run_id "$log_file")
+    capture_redis_stream cdc "$RUN_OUTPUT/connector_stall_invalid-stalled-cdc.json"
+    capture_redis_stream "blackbox:status:$stall_run_id" \
+      "$RUN_OUTPUT/connector_stall_invalid-stalled-status.json"
+    redis_command --raw XRANGE cdc - + \
+      >"$RUN_OUTPUT/connector_stall_invalid-stalled-cdc.raw.txt"
+    redis_command --raw XRANGE "blackbox:status:$stall_run_id" - + \
+      >"$RUN_OUTPUT/connector_stall_invalid-stalled-status.raw.txt"
+    run_bounded_diagnostic "$BLACKBOX_DOCKER" inspect "$BLACKBOX_CONNECTOR_CONTAINER" \
+      >"$RUN_OUTPUT/connector_stall_invalid-stalled-connector-container.json"
     printf 'unpaused_container=%s\n' \
       "$("$BLACKBOX_DOCKER" unpause "$BLACKBOX_CONNECTOR_CONTAINER")" \
       >>"$RUN_OUTPUT/connector_stall_invalid-operation.txt"
@@ -631,6 +641,7 @@ run_case_body() {
 
   local final_status run_id status_run_id
   run_id=$(extract_run_id "$log_file")
+  [[ -z $stall_run_id || $run_id == "$stall_run_id" ]]
   if [[ $BLACKBOX_BACKEND == yugabytedb_ysql ]]; then
     local compact_run_id=${run_id//-/}
     BLACKBOX_YSQL_SLOT_NAME="blackbox_${compact_run_id}_slot"
