@@ -65,6 +65,8 @@ run_backend() {
   ROOT="$ROOT" \
     bash -eu -o pipefail <<'SCRIPT'
 . "$ROOT/scripts/blackbox_lifecycle.sh"
+
+[[ $BLACKBOX_DOCKER == docker ]]
 BLACKBOX_DOCKER=true
 BLACKBOX_ACTIVE_RUN_ID=00112233-4455-6677-8899-aabbccddeeff
 BLACKBOX_SESSION_IDS=(ycsb/worker/1)

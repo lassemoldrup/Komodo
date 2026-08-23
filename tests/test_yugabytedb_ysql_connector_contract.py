@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -131,6 +132,25 @@ def canonical_capture() -> list[list[object]]:
 
 
 class YugabyteYsqlConnectorContractTest(unittest.TestCase):
+    def test_monitor_decoder_preserves_literal_hex_escape_text(self) -> None:
+        sys.path.insert(0, str(ROOT))
+        module_path = ROOT / "extract_connector_output.py"
+        spec = importlib.util.spec_from_file_location(
+            "yugabytedb_ysql_extract_connector_output", module_path
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        literal = module.decode_redis_monitor_command(
+            '"XADD" "cdc" "*" "field" "literal\\\\x41"', 1
+        )
+        encoded = module.decode_redis_monitor_command(
+            '"XADD" "cdc" "*" "field" "\\x41"', 2
+        )
+        self.assertEqual(literal[-1], r"literal\x41")
+        self.assertEqual(encoded[-1], "A")
+
     def run_verifier(self, capture: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -250,6 +270,7 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
                 f"{sequence}.0 [0 connector:6379] "
                 + " ".join(json.dumps(token) for token in command)
             )
+        monitor_lines[2] = monitor_lines[2].replace("alpha", r"\xc3\xa9")
         with tempfile.TemporaryDirectory(prefix="connector-output-extractor-") as temporary:
             monitor = Path(temporary) / "redis-monitor.log"
             monitor.write_text("\n".join(monitor_lines) + "\n", encoding="utf-8")

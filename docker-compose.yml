@@ -92,7 +92,7 @@ services:
   # ------------------------------------------------------------ YugabyteDB --
   yugabytedb_ysql:
     profiles: [yugabytedb_ysql]
-    image: docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb
+    image: docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb
     container_name: cdc-yugabytedb-ysql
     command: >
       bin/yugabyted start --background=false --callhome=false

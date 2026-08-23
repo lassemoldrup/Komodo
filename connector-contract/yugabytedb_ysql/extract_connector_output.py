@@ -3,11 +3,87 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 import tempfile
 from pathlib import Path
 
 from verify_raw_contract import ContractViolation, verify_contract
+
+
+def decode_redis_monitor_command(value: str, line_number: int) -> list[str]:
+    arguments: list[str] = []
+    index = 0
+    while index < len(value):
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index == len(value):
+            break
+        if value[index] != '"':
+            raise ContractViolation(
+                "CONNECTOR_OUTPUT_CAPTURE_INVALID",
+                f"Redis MONITOR line {line_number} contains an unquoted argument",
+            )
+        index += 1
+        encoded = bytearray()
+        while index < len(value) and value[index] != '"':
+            character = value[index]
+            if character != "\\":
+                encoded.extend(character.encode("utf-8"))
+                index += 1
+                continue
+            index += 1
+            if index == len(value):
+                raise ContractViolation(
+                    "CONNECTOR_OUTPUT_CAPTURE_INVALID",
+                    f"Redis MONITOR line {line_number} ends inside an escape",
+                )
+            escape = value[index]
+            if escape == "x":
+                digits = value[index + 1 : index + 3]
+                if len(digits) != 2 or any(
+                    digit not in "0123456789abcdefABCDEF" for digit in digits
+                ):
+                    raise ContractViolation(
+                        "CONNECTOR_OUTPUT_CAPTURE_INVALID",
+                        f"Redis MONITOR line {line_number} has a malformed hexadecimal escape",
+                    )
+                encoded.append(int(digits, 16))
+                index += 3
+                continue
+            escaped_bytes = {
+                "\\": b"\\",
+                '"': b'"',
+                "n": b"\n",
+                "r": b"\r",
+                "t": b"\t",
+                "a": b"\a",
+                "b": b"\b",
+            }.get(escape)
+            if escaped_bytes is None:
+                raise ContractViolation(
+                    "CONNECTOR_OUTPUT_CAPTURE_INVALID",
+                    f"Redis MONITOR line {line_number} has an unknown escape",
+                )
+            encoded.extend(escaped_bytes)
+            index += 1
+        if index == len(value):
+            raise ContractViolation(
+                "CONNECTOR_OUTPUT_CAPTURE_INVALID",
+                f"Redis MONITOR line {line_number} has an unterminated argument",
+            )
+        index += 1
+        if index < len(value) and not value[index].isspace():
+            raise ContractViolation(
+                "CONNECTOR_OUTPUT_CAPTURE_INVALID",
+                f"Redis MONITOR line {line_number} has no argument boundary",
+            )
+        try:
+            arguments.append(encoded.decode("utf-8", "strict"))
+        except UnicodeDecodeError as error:
+            raise ContractViolation(
+                "CONNECTOR_OUTPUT_CAPTURE_INVALID",
+                f"Redis MONITOR line {line_number} contains malformed UTF-8",
+            ) from error
+    return arguments
 
 
 def monitor_xadds(path: Path) -> tuple[int, list[list[object]]]:
@@ -24,13 +100,7 @@ def monitor_xadds(path: Path) -> tuple[int, list[list[object]]]:
                 "CONNECTOR_OUTPUT_CAPTURE_INVALID",
                 f"Redis MONITOR line {line_number} has no command boundary",
             )
-        try:
-            command = shlex.split(line[separator + 2 :], posix=True)
-        except ValueError as error:
-            raise ContractViolation(
-                "CONNECTOR_OUTPUT_CAPTURE_INVALID",
-                f"Redis MONITOR line {line_number} cannot be decoded: {error}",
-            ) from error
+        command = decode_redis_monitor_command(line[separator + 2 :], line_number)
         if not command or command[0].upper() != "XADD":
             continue
         if len(command) != 5 or command[1] != "cdc" or command[2] != "*":
@@ -38,7 +108,12 @@ def monitor_xadds(path: Path) -> tuple[int, list[list[object]]]:
                 "CONNECTOR_OUTPUT_CAPTURE_INVALID",
                 f"unexpected connector XADD shape at MONITOR line {line_number}",
             )
-        entries.append([f"{len(entries) + 1}-0", command[3:5]])
+        entries.append(
+            [
+                f"{len(entries) + 1}-0",
+                [command[3], command[4]],
+            ]
+        )
     if not entries:
         raise ContractViolation(
             "CONNECTOR_OUTPUT_CAPTURE_INVALID", "Redis MONITOR captured no connector XADD"

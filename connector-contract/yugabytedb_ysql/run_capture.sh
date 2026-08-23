@@ -7,12 +7,14 @@ readonly scenario=${1:-cross_tablet_marker_last}
 readonly redis_batch_size=${2:-2}
 readonly source_batch_size=${CONNECTOR_CONTRACT_SOURCE_BATCH_SIZE:-2}
 readonly backpressure_ms=5000
-readonly capture_timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+capture_timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+readonly capture_timestamp
 readonly output_dir=${3:-"$script_dir/fixtures/pgoutput-${scenario}-${capture_timestamp}"}
 readonly plugin=pgoutput
+readonly cdc_codec_replay_bin=${BLACKBOX_CDC_CODEC_REPLAY_BIN:-}
 
 case "$scenario" in
-  cross_tablet_marker_last | concurrent_commit_order | redis_backpressure) ;;
+  cross_tablet_marker_last | concurrent_commit_order | redis_backpressure | ycsb_value_normalization) ;;
   *)
     echo "unsupported capture scenario: $scenario" >&2
     exit 2
@@ -28,6 +30,11 @@ if [[ ! "$source_batch_size" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [[ -e "$output_dir" ]]; then
   echo "capture output already exists: $output_dir" >&2
+  exit 2
+fi
+if [[ $scenario == ycsb_value_normalization &&
+      ( -z $cdc_codec_replay_bin || ! -x $cdc_codec_replay_bin ) ]]; then
+  echo "BLACKBOX_CDC_CODEC_REPLAY_BIN must name the built codec replay tool" >&2
   exit 2
 fi
 
@@ -229,6 +236,50 @@ run_redis_backpressure() {
   commit_order_logs=("$output_dir/workload.log")
 }
 
+run_ycsb_value_normalization() {
+  jdbc_build_dir=$(mktemp -d /tmp/yugabytedb-ycsb-normalization-jdbc-build.XXXXXX)
+  ysql_application ycsb_value_normalization \
+    --file /connector-contract/workload/ycsb_value_normalization.sql \
+    >"$output_dir/workload.log" 2>&1
+  commit_order_logs=("$output_dir/workload.log")
+  ysql_application ycsb_value_normalization_scan \
+    --tuples-only --no-align --field-separator=$'\t' --command "
+      SELECT ycsb_key,
+             CASE WHEN field1 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field1, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field2 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field2, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field3 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field3, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field4 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field4, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field5 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field5, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field6 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field6, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field7 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field7, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field8 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field8, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field9 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field9, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END,
+             CASE WHEN field10 IS NULL THEN 'N' ELSE 'P' || replace(replace(encode(convert_to(field10, 'UTF8'), 'base64'), E'\\n', ''), E'\\r', '') END
+        FROM benchbase.usertable ORDER BY ycsb_key" \
+    >"$output_dir/bootstrap-scan.tsv"
+  docker network connect yugabytedb-ysql-connector-contract db-monitoring-dev
+  jdbc_network_connected=1
+  mvn --file "$script_dir/../../../benchbase/pom.xml" --batch-mode --quiet \
+    --activate-profiles postgres -Dmaven.gitcommitid.skip=true -Dfmt.skip \
+    -DbuildDirectory="$jdbc_build_dir" -DskipTests clean compile \
+    >"$output_dir/jdbc-build.log" 2>&1
+  BLACKBOX_BACKEND=yugabytedb_ysql \
+  BLACKBOX_JDBC_URL="jdbc:postgresql://yugabytedb_ysql:5433/benchbase?sslmode=disable" \
+  BLACKBOX_DB_USER=connector_contract_application \
+  BLACKBOX_DB_PASSWORD=connector_contract_application_password \
+    mvn --file "$script_dir/../../../benchbase/pom.xml" --batch-mode --quiet \
+      --activate-profiles postgres -Dmaven.gitcommitid.skip=true \
+      -DbuildDirectory="$jdbc_build_dir" \
+      -Dexec.executable=java -Dexec.classpathScope=runtime \
+      "-Dexec.args=-classpath %classpath com.oltpbenchmark.blackbox.tools.YcsbJdbcNormalizationCapture" \
+      org.codehaus.mojo:exec-maven-plugin:3.4.1:exec \
+      >"$output_dir/jdbc-capture.json" 2>"$output_dir/jdbc-capture.log"
+  ysql_application ycsb_repeated_write_shapes \
+    --file /connector-contract/workload/ycsb_repeated_write_shapes.sql \
+    >"$output_dir/repeated-write-shapes.log" 2>&1
+  commit_order_logs+=("$output_dir/repeated-write-shapes.log")
+}
+
 preserve_evidence() {
   compose exec -T redis redis-cli --json XRANGE cdc - + \
     >"$output_dir/redis-stream.json"
@@ -258,6 +309,7 @@ preserve_evidence() {
   docker image inspect \
     db-monitoring/yugabytedb-ysql-connector-contract:dz.2.5.2.yb.2026.1 \
     >"$output_dir/connector-contract-image.json"
+  # shellcheck disable=SC2016
   compose exec -T debezium_server sh -lc '
     set -eu
     connector_jar=$(find /debezium/lib -maxdepth 1 -type f -name "yugabytedb-source-connector-*.jar")
@@ -278,6 +330,12 @@ preserve_evidence() {
   cp -- "$script_dir/workload/cross_tablet_marker_last.sql" "$output_dir/cross_tablet_marker_last.sql"
   cp -- "$script_dir/workload/contract_transactions.sql" "$output_dir/contract_transactions.sql"
   cp -- "$script_dir/workload/backpressure_commit_order.sql" "$output_dir/backpressure_commit_order.sql"
+  cp -- "$script_dir/workload/ycsb_value_normalization.sql" "$output_dir/ycsb_value_normalization.sql"
+  cp -- "$script_dir/workload/ycsb_repeated_write_shapes.sql" "$output_dir/ycsb_repeated_write_shapes.sql"
+  cp -- "$script_dir/verify_ycsb_value_normalization.py" "$output_dir/verify_ycsb_value_normalization.py"
+  if [[ $scenario == ycsb_value_normalization ]]; then
+    cp -- "$cdc_codec_replay_bin" "$output_dir/blackbox-cdc-codec-replay"
+  fi
 }
 
 mkdir -p -- "$output_dir"
@@ -289,13 +347,28 @@ connector_write_observed_ns=
 unpause_ns=
 stream_length_before=
 stream_length_during=
+jdbc_network_connected=0
+jdbc_build_dir=
+
+disconnect_jdbc_network() {
+  if ((jdbc_network_connected == 1)); then
+    docker network disconnect yugabytedb-ysql-connector-contract \
+      db-monitoring-dev >/dev/null 2>&1 || true
+    jdbc_network_connected=0
+  fi
+}
 
 cleanup_capture() {
   stop_connector_output_monitor
+  disconnect_jdbc_network
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  if [[ -n $jdbc_build_dir && -d $jdbc_build_dir ]]; then
+    rm -rf -- "$jdbc_build_dir"
+  fi
 }
 trap cleanup_capture EXIT
 
+disconnect_jdbc_network
 compose down --volumes --remove-orphans
 compose up --detach --build
 wait_for_streaming
@@ -305,6 +378,7 @@ case "$scenario" in
   cross_tablet_marker_last) run_cross_tablet_marker_last ;;
   concurrent_commit_order) run_concurrent_commit_order ;;
   redis_backpressure) run_redis_backpressure ;;
+  ycsb_value_normalization) run_ycsb_value_normalization ;;
 esac
 
 python3 "$script_dir/extract_commit_order.py" "${commit_order_logs[@]}" \
@@ -333,6 +407,25 @@ python3 "$script_dir/extract_connector_output.py" \
   >"$output_dir/connector-output-order.json"
 preserve_evidence
 
+if [[ "$scenario" == ycsb_value_normalization ]]; then
+  "$output_dir/blackbox-cdc-codec-replay" \
+    --input "$output_dir/redis-stream.json" \
+    --backend yugabytedb_ysql \
+    --benchmark ycsb \
+    --backend-source-id connector_contract \
+    >"$output_dir/cpp-codec-replay.json"
+  python3 "$script_dir/../../scripts/blackbox_record.py" bootstrap-manifest \
+    --run-id 00000000-0000-0000-0000-000000000001 \
+    --scan-file "$output_dir/bootstrap-scan.tsv" \
+    >"$output_dir/bootstrap-manifest.json"
+  python3 "$script_dir/verify_ycsb_value_normalization.py" \
+    --redis-stream "$output_dir/redis-stream.json" \
+    --bootstrap-scan "$output_dir/bootstrap-scan.tsv" \
+    --jdbc-capture "$output_dir/jdbc-capture.json" \
+    --cpp-codec-replay "$output_dir/cpp-codec-replay.json" \
+    --report "$output_dir/normalization-report.json"
+fi
+
 python3 "$script_dir/verify_provenance.py"
 python3 "$script_dir/verify_raw_contract.py" \
   --plugin "$plugin" \
@@ -352,13 +445,19 @@ python3 "$script_dir/verify_raw_contract.py" \
   --redis-batch-size "$redis_batch_size" \
   "$output_dir/redis-stream.json"
 
+checksum_file=$(mktemp /tmp/yugabytedb-ysql-capture-checksums.XXXXXX)
 (
   cd -- "$output_dir"
   find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
     | LC_ALL=C sort -z \
-    | xargs -0 sha256sum >SHA256SUMS
-)
+    | xargs -0 sha256sum
+) >"$checksum_file"
+mv -- "$checksum_file" "$output_dir/SHA256SUMS"
 
+disconnect_jdbc_network
 compose down --volumes --remove-orphans
 trap - EXIT
+if [[ -n $jdbc_build_dir && -d $jdbc_build_dir ]]; then
+  rm -rf -- "$jdbc_build_dir"
+fi
 echo "connector-contract evidence preserved at $output_dir"

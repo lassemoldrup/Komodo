@@ -44,10 +44,24 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
 
     def test_compose_uses_pinned_single_slot_logical_stack(self) -> None:
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        provenance = json.loads(
+            (
+                ROOT
+                / "connector-contract"
+                / "yugabytedb_ysql"
+                / "provenance.lock.json"
+            ).read_text(encoding="utf-8")
+        )
+        locked_database_image = provenance["artifacts"]["database"]["image"]
+        compose_database_images = re.findall(
+            r"docker\.io/yugabytedb/yugabyte@sha256:[0-9a-f]+", compose
+        )
+
         self.assertIn("profiles: [yugabytedb_ysql]", compose)
-        self.assertIn(
-            "docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb",
-            compose,
+        self.assertRegex(locked_database_image, r"@sha256:[0-9a-f]{64}\Z")
+        self.assertEqual(
+            compose_database_images,
+            [locked_database_image, locked_database_image],
         )
         self.assertIn(
             "docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
@@ -119,6 +133,16 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         self.assertNotIn("blackbox_setup", connector)
         self.assertNotIn("database.user=yugabyte", connector)
 
+        self.assertEqual(
+            (YSQL / "initdb" / "adapters" / "ycsb.sql").read_text(encoding="utf-8"),
+            (
+                YSQL
+                / "initdb"
+                / "adapters"
+                / "ycsb_fractured_read_probe.sql"
+            ).read_text(encoding="utf-8"),
+        )
+
     def test_privilege_attestation_covers_effective_ddl_authority(self) -> None:
         driver = (
             ROOT / "scripts" / "backends" / "yugabytedb_ysql.sh"
@@ -148,6 +172,17 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         }
         self.assertNotIn("slot_active_consumers", stable_facts)
         self.assertIn("dedicated_privileges_sha256", stable_facts)
+        self.assertEqual(
+            backend["session_contract"]["declared_isolations"],
+            ["READ_COMMITTED", "REPEATABLE_READ"],
+        )
+
+    def test_attestation_casts_internal_char_catalog_values_to_text(self) -> None:
+        driver = (
+            ROOT / "scripts" / "backends" / "yugabytedb_ysql.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("c.relreplident::text", driver)
+        self.assertNotRegex(driver, r"\|\|\s*c\.relreplident(?:\s|FROM)")
 
     def test_generic_lifecycle_has_no_backend_name_or_physical_sql_branch(self) -> None:
         generic = "\n".join(
@@ -175,6 +210,7 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
             (ROOT / "protocol" / "backends" / "yugabytedb_ysql.json").read_text()
         )
         connector = provenance["artifacts"]["connector"]
+        runtime_image = provenance["artifacts"]["runtime_connector_image"]
         self.assertEqual(
             backend["connector_contract"]["source_version"], connector["version"]
         )
@@ -185,6 +221,16 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         )
         self.assertEqual(fact["expected_value"], connector["sha256"])
         self.assertRegex(connector["sha256"], re.compile(r"^[0-9a-f]{64}$"))
+        self.assertEqual(
+            runtime_image["image"],
+            "db-monitoring/yugabytedb-ysql:dz.2.5.2.yb.2026.1",
+        )
+        self.assertRegex(
+            runtime_image["local_image_id"], re.compile(r"^sha256:[0-9a-f]{64}$")
+        )
+        self.assertEqual(
+            runtime_image["connector_sha256_in_image"], connector["sha256"]
+        )
 
 
 if __name__ == "__main__":

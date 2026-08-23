@@ -31,6 +31,12 @@
       "built_at_utc": "2026-08-22T15:37:54.801062623Z",
       "connector_sha256_in_image": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"
     },
+    "runtime_connector_image": {
+      "image": "db-monitoring/yugabytedb-ysql:dz.2.5.2.yb.2026.1",
+      "local_image_id": "sha256:391888ffc9d765fe5981630273ab4ec2aaf20696058f839384a8e4b98b187c88",
+      "built_at_utc": "2026-08-22T18:12:15.521621981Z",
+      "connector_sha256_in_image": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"
+    },
     "java_runtime": {
       "name": "Eclipse Temurin JRE",
       "version": "17.0.20+8",

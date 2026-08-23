@@ -11,11 +11,14 @@ blackbox_backend_initialize() {
   BLACKBOX_DB_USER=${BLACKBOX_DB_USER:-blackbox_application}
   BLACKBOX_DB_PASSWORD=${BLACKBOX_DB_PASSWORD:-blackbox_application_password}
   BLACKBOX_BACKEND_SOURCE_ID=${BLACKBOX_BACKEND_SOURCE_ID:-yugabytedb_ysql_main}
+  BLACKBOX_BENCHBASE_DATABASE_PROFILE=postgres
+  BLACKBOX_JDBC_URL=${BLACKBOX_JDBC_URL:-jdbc:postgresql://${BLACKBOX_DB_HOST}:${BLACKBOX_DB_PORT}/benchbase?sslmode=disable\&ApplicationName=blackbox-fractured-read-probe}
   export BLACKBOX_COMPOSE_PROFILE BLACKBOX_DATABASE_SERVICE
   export BLACKBOX_DATABASE_CONTAINER BLACKBOX_CONNECTOR_SERVICE
   export BLACKBOX_CONNECTOR_CONTAINER BLACKBOX_DB_PORT
   export BLACKBOX_DB_USER BLACKBOX_DB_PASSWORD
   export BLACKBOX_BACKEND_SOURCE_ID
+  export BLACKBOX_BENCHBASE_DATABASE_PROFILE BLACKBOX_JDBC_URL
 }
 
 blackbox_backend_prepare_run() {
@@ -422,7 +425,7 @@ blackbox_backend_capture_attestation_inputs() {
     "SELECT schemaname || '.' || tablename FROM pg_publication_tables WHERE pubname='$BLACKBOX_YSQL_PUBLICATION_NAME' ORDER BY 1" |
     sha256sum | cut -d' ' -f1) || return 1
   replica_digest=$(blackbox_backend_admin_query \
-    "SELECT n.nspname || '.' || c.relname || E'\\t' || c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='benchbase' AND c.relkind='r' ORDER BY 1" |
+    "SELECT n.nspname || '.' || c.relname || E'\\t' || c.relreplident::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='benchbase' AND c.relkind='r' ORDER BY 1" |
     sha256sum | cut -d' ' -f1) || return 1
   types_digest=$(blackbox_backend_admin_query \
     "SELECT c.oid || E'\\t' || n.nspname || '.' || c.relname || E'\\t' || a.attnum || E'\\t' || a.attname || E'\\t' || a.atttypid || E'\\t' || a.atttypmod || E'\\t' || a.attnotnull FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid WHERE n.nspname='benchbase' AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum" |
@@ -444,13 +447,15 @@ blackbox_backend_capture_attestation_inputs() {
     "SELECT slot_name || E'\\t' || plugin || E'\\t' || database || E'\\t' || yb_lsn_type FROM pg_replication_slots WHERE slot_name='$BLACKBOX_YSQL_SLOT_NAME'") || return 1
   IFS=$'\t' read -r observed_slot observed_plugin observed_database observed_lsn \
     <<<"$slot_facts"
-  local build_text server_version server_build_hash container_command intra_before null_before
+  local build_text server_version server_build_hash ysql_server_version
+  local container_command intra_before null_before
   build_text=$("$BLACKBOX_DOCKER" exec "$BLACKBOX_DATABASE_CONTAINER" \
     bin/yb-admin --version) || return 1
   server_version=$(sed -n 's/^version \([^ ]*\) build \([^ ]*\).*/\1-b\2/p' \
     <<<"$build_text")
   server_build_hash=$(sed -n 's/.* revision \([0-9a-f]\{40\}\) .*/\1/p' \
     <<<"$build_text")
+  ysql_server_version=$(blackbox_backend_admin_query "SELECT version()") || return 1
   container_command=$("$BLACKBOX_DOCKER" inspect --format '{{json .Config.Cmd}}' \
     "$BLACKBOX_DATABASE_CONTAINER") || return 1
   intra_before=false
@@ -463,6 +468,7 @@ blackbox_backend_capture_attestation_inputs() {
     --arg membership "$membership_digest" --arg replica "$replica_digest" \
     --arg types "$types_digest" --arg privileges "$privileges_digest" \
     --arg server_version "$server_version" --arg server_build_hash "$server_build_hash" \
+    --arg ysql_server_version "$ysql_server_version" \
     --arg client_encoding "$client_encoding" --arg time_zone "$time_zone" \
     --arg search_path "$search_path" --arg isolation "$isolation" \
     --arg follower_reads "$follower_reads" --arg observed_slot "$observed_slot" \
@@ -474,6 +480,7 @@ blackbox_backend_capture_attestation_inputs() {
       {name:"schema_name",canonical_value:"benchbase"},
       {name:"server_version",canonical_value:$server_version},
       {name:"server_build_hash",canonical_value:$server_build_hash},
+      {name:"ysql_server_version",canonical_value:$ysql_server_version},
       {name:"client_encoding",canonical_value:$client_encoding},
       {name:"time_zone",canonical_value:$time_zone},
       {name:"search_path",canonical_value:$search_path},
@@ -504,5 +511,5 @@ blackbox_backend_capture_attestation_inputs() {
 
 blackbox_backend_status() {
   blackbox_backend_admin_query \
-    "SELECT slot_name, plugin, database, yb_lsn_type, active, confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name='$BLACKBOX_YSQL_SLOT_NAME'; SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname='$BLACKBOX_YSQL_PUBLICATION_NAME' ORDER BY 1,2; SELECT count(*) AS tablets FROM yb_local_tablets"
+    "SELECT slot_name, plugin, database, yb_lsn_type, active, confirmed_flush_lsn FROM pg_replication_slots ORDER BY slot_name; SELECT pubname, schemaname, tablename FROM pg_publication_tables ORDER BY 1,2,3; SELECT count(*) AS tablets FROM yb_local_tablets"
 }

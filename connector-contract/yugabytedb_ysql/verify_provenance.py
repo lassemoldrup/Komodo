@@ -69,6 +69,20 @@ def main() -> int:
     for name in ("connector", "postgresql_jdbc"):
         require(bool(SHA256.fullmatch(artifacts[name]["sha256"])), f"{name} checksum is malformed")
         require(artifacts[name]["url"].startswith("https://"), f"{name} URL is not HTTPS")
+    for name in ("connector_contract_image", "runtime_connector_image"):
+        image = artifacts[name]
+        require(
+            isinstance(image["image"], str) and ":latest" not in image["image"],
+            f"{name} image name is not frozen",
+        )
+        require(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", image["local_image_id"]) is not None,
+            f"{name} local image ID is malformed",
+        )
+        require(
+            image["connector_sha256_in_image"] == artifacts["connector"]["sha256"],
+            f"{name} connector checksum differs",
+        )
 
     configuration = lock["connector_configuration"]
     require(configuration["connector_class"] == "io.debezium.connector.postgresql.YugabyteDBConnector", "wrong connector class")
