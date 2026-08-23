@@ -406,9 +406,14 @@ constexpr std::array ycsb_transactions = {
     std::string_view{"ycsb_read"},
     std::string_view{"ycsb_update"},
     std::string_view{"ycsb_delete"},
-    std::string_view{"si_fractured_read_probe"},
 };
 constexpr std::array ycsb_isolations = {
+    std::string_view{"REPEATABLE_READ"},
+};
+constexpr std::array ycsb_fractured_read_probe_transactions = {
+    std::string_view{"si_fractured_read_probe"},
+};
+constexpr std::array ycsb_fractured_read_probe_isolations = {
     std::string_view{"READ_COMMITTED"},
     std::string_view{"REPEATABLE_READ"},
 };
@@ -787,6 +792,14 @@ const StaticBenchmarkAdapter
                                             .bootstrap_scan = true},
                  ycsb_codecs, nullptr);
 
+const StaticBenchmarkAdapter ycsb_fractured_read_probe_adapter(
+    "ycsb_fractured_read_probe", ycsb_fractured_read_probe_transactions,
+    ycsb_fractured_read_probe_isolations, ycsb_tables, ycsb_result_sets,
+    AdapterRuntimeCapabilities{.client_trace = true,
+                               .cdc_normalization = true,
+                               .bootstrap_scan = true},
+    ycsb_codecs, nullptr);
+
 const StaticBenchmarkAdapter
     tpcc_adapter("tpcc", tpcc_transactions, tpcc_isolations, tpcc_tables,
                  tpcc_result_sets,
@@ -795,8 +808,9 @@ const StaticBenchmarkAdapter
                                             .bootstrap_scan = true},
                  tpcc_codecs, CanonicalTpccCodec::tableCodec);
 
-const std::array<const BenchmarkAdapter *, 2> registered_adapters = {
+const std::array<const BenchmarkAdapter *, 3> registered_adapters = {
     &ycsb_adapter,
+    &ycsb_fractured_read_probe_adapter,
     &tpcc_adapter,
 };
 

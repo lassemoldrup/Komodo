@@ -15,6 +15,44 @@
       "hex": "0001000000000100000001410100000002c3a90100000003e4b8ad010000000130010000000568656c6c6f0100000004f09f9982010000000361006201000000046c617374",
       "base64": "AAEAAAAAAQAAAAFBAQAAAALDqQEAAAAD5LitAQAAAAEwAQAAAAVoZWxsbwEAAAAE8J+ZggEAAAADYQBiAQAAAARsYXN0",
       "sha256": "4d953fbb87c4ac6d920410774a9c8669dac28678b9a940738e82fa2dcb43c1c0"
+    },
+    {
+      "name": "live_sql_corpus",
+      "fields": [
+        null,
+        "",
+        "A",
+        "é",
+        "中",
+        "0",
+        "hello",
+        "🙂",
+        "embedded",
+        "last"
+      ],
+      "length": 74,
+      "hex": "0001000000000100000001410100000002c3a90100000003e4b8ad010000000130010000000568656c6c6f0100000004f09f99820100000008656d62656464656401000000046c617374",
+      "base64": "AAEAAAAAAQAAAAFBAQAAAALDqQEAAAAD5LitAQAAAAEwAQAAAAVoZWxsbwEAAAAE8J+ZggEAAAAIZW1iZWRkZWQBAAAABGxhc3Q=",
+      "sha256": "ef31af688c30ed3198a8de5560b482f05feaf4ac97a5a937fda5adf03abe083d"
+    },
+    {
+      "name": "maximum_declared_varchar",
+      "fields": [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "length": 114,
+      "hex": "010000006478787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878000000000000000000",
+      "base64": "AQAAAGR4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4AAAAAAAAAAAA",
+      "sha256": "8eeed9185b6e021a9b9a9a895f22c1ac8f759f198814add278f949599e60e945"
     }
   ]
 }

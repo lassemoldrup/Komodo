@@ -14,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <initializer_list>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <set>
@@ -62,7 +63,7 @@ constexpr std::string_view kFixtureRunId =
   std::ifstream input(std::string(BLACKBOX_CDC_FIXTURE_DIR) + "/" +
                       std::string(name));
   if (!input) {
-    throw std::runtime_error("failed to open captured MariaDB CDC fixture");
+    throw std::runtime_error("failed to open captured CDC fixture");
   }
   return Json::parse(input);
 }
@@ -90,6 +91,20 @@ constexpr std::string_view kFixtureRunId =
       .backend_adapter = &blackbox::BackendAdapterRegistry::require("mariadb"),
       .benchmark_adapter = &adapter,
       .application_tables = std::move(tables),
+      .transaction_marker_table = "benchbase.session_txn",
+      .run_fence_table = "benchbase.checker_run_fence",
+  };
+}
+
+[[nodiscard]] DebeziumAssemblerConfig yugabyteAssemblerConfig() {
+  return DebeziumAssemblerConfig{
+      .run_id = std::string(kFixtureRunId),
+      .backend_source_id = "yugabytedb_ysql_main",
+      .debezium_version = "dz.2.5.2.yb.2026.1",
+      .backend_adapter =
+          &blackbox::BackendAdapterRegistry::require("yugabytedb_ysql"),
+      .benchmark_adapter = &blackbox::BenchmarkAdapterRegistry::require("ycsb"),
+      .application_tables = {"benchbase.usertable"},
       .transaction_marker_table = "benchbase.session_txn",
       .run_fence_table = "benchbase.checker_run_fence",
   };
@@ -329,6 +344,11 @@ void expectError(Json root, const CdcErrorCode expected,
     assembler.finish();
   } catch (const CdcAssemblerError &error) {
     observed = true;
+    if (error.code() != expected) {
+      std::cerr << "expected " << blackbox::toString(expected) << ", observed "
+                << blackbox::toString(error.code()) << " at "
+                << error.streamId() << ": " << error.what() << '\n';
+    }
     BLACKBOX_CHECK(error.code() == expected);
     BLACKBOX_CHECK(assembler.failed());
     BLACKBOX_CHECK(assembler.errorCode() == expected);
@@ -382,6 +402,261 @@ fields(std::optional<std::string> field1 = std::nullopt,
           std::move(field4), std::move(field5), std::move(field6),
           std::move(field7), std::move(field8), std::move(field9),
           std::move(field10)};
+}
+
+void checkEquivalentBackendNeutralTransaction(const CdcTransaction &left,
+                                              const CdcTransaction &right) {
+  BLACKBOX_CHECK(left.kind == right.kind);
+  BLACKBOX_CHECK(left.fence_phase == right.fence_phase);
+  BLACKBOX_CHECK(left.correlation_id == right.correlation_id);
+  BLACKBOX_CHECK(left.writes == right.writes);
+}
+
+void checkCapturedYugabyteLifecycleAndRawFailures() {
+  const auto raw_capture =
+      loadFixtureNamed("yugabytedb_pgoutput_2_5_2_raw_cross_tablet.json");
+  auto raw_decoder =
+      blackbox::BackendAdapterRegistry::require("yugabytedb_ysql")
+          .createCdcDecoder(blackbox::BackendCdcDecoderConfig{
+              .backend_source_id = "connector_contract",
+              .connector_version = "dz.2.5.2.yb.2026.1",
+              .application_tables = {"benchbase.usertable"},
+              .control_tables = {"benchbase.session_txn",
+                                 "benchbase.checker_run_fence"},
+          });
+  BLACKBOX_REQUIRE(raw_decoder != nullptr);
+  std::vector<blackbox::BackendCdcRecord> decoded_raw;
+  for (const auto &record : recordsFromFixture(raw_capture)) {
+    decoded_raw.push_back(raw_decoder->decode(
+        Json::parse(record.key_json), Json::parse(record.envelope_json)));
+  }
+  BLACKBOX_REQUIRE(decoded_raw.size() == 6U);
+  BLACKBOX_CHECK(decoded_raw.front().kind ==
+                 blackbox::BackendCdcRecordKind::Begin);
+  BLACKBOX_CHECK(decoded_raw.back().kind ==
+                 blackbox::BackendCdcRecordKind::End);
+  BLACKBOX_CHECK(decoded_raw[1].canonical_table == "benchbase.usertable");
+  BLACKBOX_CHECK(decoded_raw[2].canonical_table == "benchbase.usertable");
+  BLACKBOX_CHECK(decoded_raw[3].canonical_table ==
+                 "benchbase.checker_run_fence");
+  BLACKBOX_CHECK(decoded_raw[4].canonical_table == "benchbase.session_txn");
+  BLACKBOX_CHECK(decoded_raw[0].diagnostic_connector_id == "2:3");
+  BLACKBOX_CHECK(decoded_raw[1].diagnostic_connector_id == "2:3");
+  BLACKBOX_CHECK(decoded_raw[2].diagnostic_connector_id == "2:4");
+  BLACKBOX_CHECK(decoded_raw[3].diagnostic_connector_id == "2:5");
+  BLACKBOX_CHECK(decoded_raw[4].diagnostic_connector_id == "2:6");
+  BLACKBOX_CHECK(decoded_raw[5].diagnostic_connector_id == "2:8");
+
+  const auto captured =
+      loadFixtureNamed("yugabytedb_pgoutput_2_5_2_lifecycle.json");
+  const auto transactions = replay(captured, yugabyteAssemblerConfig(), false);
+  BLACKBOX_REQUIRE(transactions.size() == 5U);
+  BLACKBOX_CHECK(transactions[0].kind == CdcTransactionKind::RunControl);
+  BLACKBOX_CHECK(transactions[0].fence_phase == RunFencePhase::RunStart);
+  BLACKBOX_CHECK(transactions[1].kind == CdcTransactionKind::BootstrapApp);
+  BLACKBOX_REQUIRE(transactions[1].writes.size() == 1U);
+  BLACKBOX_CHECK(transactions[2].fence_phase == RunFencePhase::LoadFinished);
+  BLACKBOX_CHECK(transactions[3].kind == CdcTransactionKind::WorkloadMarked);
+  BLACKBOX_REQUIRE(transactions[3].correlation_id.has_value());
+  BLACKBOX_CHECK(transactions[3].correlation_id->session_id == "ycsb/worker/1");
+  BLACKBOX_CHECK(transactions[3].correlation_id->txn_id == 1U);
+  BLACKBOX_REQUIRE(transactions[3].writes.size() == 1U);
+  BLACKBOX_CHECK(transactions[4].fence_phase == RunFencePhase::EndFence);
+
+  const auto mariadb = replay(loadFixture());
+  BLACKBOX_REQUIRE(mariadb.size() == 11U);
+  checkEquivalentBackendNeutralTransaction(mariadb[0], transactions[0]);
+  checkEquivalentBackendNeutralTransaction(mariadb[2], transactions[2]);
+  checkEquivalentBackendNeutralTransaction(mariadb[3], transactions[3]);
+  checkEquivalentBackendNeutralTransaction(mariadb[10], transactions[4]);
+
+  const auto expect_yugabyte_error = [&](Json invalid,
+                                         const CdcErrorCode expected) {
+    expectError(std::move(invalid), expected, yugabyteAssemblerConfig(), false);
+  };
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["ts_us"] = 2000010000U;
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid), CdcErrorCode::CdcRecordMalformed);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope.erase("ts_ms");
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid), CdcErrorCode::CdcRecordMalformed);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["source"]["version"] = "unknown";
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid), CdcErrorCode::CdcRecordMalformed);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["source"]["name"] = "other-source";
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid), CdcErrorCode::CdcRecordMalformed);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["source"]["snapshot"] = "true";
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid),
+                          CdcErrorCode::ExternalWriterObserved);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["source"]["table"] = "unknown_table";
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid), CdcErrorCode::UnexpectedTable);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["source"]["unexpected"] = true;
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid), CdcErrorCode::CdcRecordMalformed);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["source"]["txId"] = "13";
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid), CdcErrorCode::CdcRecordMalformed);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["after"]["field1"] = Json{{"value", "changed"}, {"set", false}};
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid),
+                          CdcErrorCode::PrimaryKeyImageIncomplete);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 10U);
+    envelope["before"] = nullptr;
+    setEnvelope(invalid, 10U, envelope);
+    expect_yugabyte_error(std::move(invalid),
+                          CdcErrorCode::PrimaryKeyImageIncomplete);
+  }
+  {
+    auto invalid = captured;
+    auto envelope = envelopeAt(invalid, 12U);
+    envelope["id"] = "13:different";
+    setEnvelope(invalid, 12U, envelope);
+    expect_yugabyte_error(std::move(invalid),
+                          CdcErrorCode::CdcTransactionIdMismatch);
+  }
+
+  {
+    auto primary_key_change = captured;
+    auto key = keyAt(primary_key_change, 10U);
+    auto envelope = envelopeAt(primary_key_change, 10U);
+    key["ycsb_key"] = 43;
+    envelope["after"]["ycsb_key"] = 43;
+    setKey(primary_key_change, 10U, key);
+    setEnvelope(primary_key_change, 10U, envelope);
+    const auto normalized =
+        replay(primary_key_change, yugabyteAssemblerConfig(), false);
+    BLACKBOX_REQUIRE(normalized[3].writes.size() == 2U);
+    BLACKBOX_CHECK(normalized[3].writes[0].state ==
+                   NormalizedValueState::Absent);
+    BLACKBOX_CHECK(normalized[3].writes[1].state ==
+                   NormalizedValueState::Present);
+  }
+  {
+    auto deleted = captured;
+    auto envelope = envelopeAt(deleted, 10U);
+    envelope["op"] = "d";
+    envelope["after"] = nullptr;
+    setEnvelope(deleted, 10U, envelope);
+    const auto normalized = replay(deleted, yugabyteAssemblerConfig(), false);
+    BLACKBOX_REQUIRE(normalized[3].writes.size() == 1U);
+    BLACKBOX_CHECK(normalized[3].writes[0].state ==
+                   NormalizedValueState::Absent);
+  }
+  {
+    auto inserted = captured;
+    auto envelope = envelopeAt(inserted, 10U);
+    envelope["op"] = "c";
+    envelope["before"] = nullptr;
+    setEnvelope(inserted, 10U, envelope);
+    const auto normalized = replay(inserted, yugabyteAssemblerConfig(), false);
+    BLACKBOX_REQUIRE(normalized[3].writes.size() == 1U);
+    BLACKBOX_CHECK(normalized[3].writes[0].state ==
+                   NormalizedValueState::Present);
+  }
+
+  const auto add_second_application_row = [](Json lifecycle,
+                                             const bool insert_delete) {
+    auto first_key = keyAt(lifecycle, 10U);
+    auto first = envelopeAt(lifecycle, 10U);
+    Json second = lifecycle.at(10U);
+    auto second_envelope = first;
+    if (insert_delete) {
+      first_key["ycsb_key"] = 100;
+      first["before"] = nullptr;
+      first["after"]["ycsb_key"] = 100;
+      first["op"] = "c";
+      second_envelope["before"] = first["after"];
+      second_envelope["after"] = nullptr;
+      second_envelope["op"] = "d";
+    } else {
+      second_envelope["before"] = first["after"];
+      second_envelope["after"] = first["before"];
+    }
+    first["transaction"]["id"] = "13:2";
+    first["transaction"]["total_order"] = 1;
+    second_envelope["transaction"]["id"] = "13:4";
+    second_envelope["transaction"]["total_order"] = 2;
+    second_envelope["transaction"]["data_collection_order"] = 2;
+    setKey(lifecycle, 10U, first_key);
+    setEnvelope(lifecycle, 10U, first);
+    second[0] = "2000010-1";
+    second[1][0] = first_key.dump();
+    second[1][1] = second_envelope.dump();
+    lifecycle.insert(lifecycle.begin() + 11, second);
+    auto marker = envelopeAt(lifecycle, 12U);
+    marker["transaction"]["total_order"] = 3;
+    setEnvelope(lifecycle, 12U, marker);
+    auto end = envelopeAt(lifecycle, 13U);
+    end["event_count"] = 3;
+    for (auto &collection : end["data_collections"]) {
+      if (collection["data_collection"] == "benchbase.usertable") {
+        collection["event_count"] = 2;
+      }
+    }
+    setEnvelope(lifecycle, 13U, end);
+    return lifecycle;
+  };
+  {
+    const auto normalized = replay(add_second_application_row(captured, false),
+                                   yugabyteAssemblerConfig(), false);
+    BLACKBOX_REQUIRE(normalized[3].writes.size() == 1U);
+    BLACKBOX_CHECK(normalized[3].writes[0].state ==
+                   NormalizedValueState::Present);
+    BLACKBOX_CHECK(
+        normalized[3].writes[0].value ==
+        CanonicalYcsbCodec::encodeValue(fields(
+            std::nullopt, std::string(""), std::string("A"), std::string("é"),
+            std::string("中"), std::string("0"), std::string("hello"),
+            std::string("🙂"), std::string("a\0b", 3), std::string("last"))));
+  }
+  {
+    const auto normalized = replay(add_second_application_row(captured, true),
+                                   yugabyteAssemblerConfig(), false);
+    BLACKBOX_REQUIRE(normalized[3].writes.size() == 1U);
+    BLACKBOX_CHECK(normalized[3].writes[0].state ==
+                   NormalizedValueState::Absent);
+  }
 }
 
 void checkCapturedStartupSchemaSnapshot() {
@@ -738,22 +1013,13 @@ void checkStructuralFailuresAreClosed() {
   expectError(std::move(wrong_table_count),
               CdcErrorCode::CdcEventCountMismatch);
 
-  auto opaque_source_metadata = captured;
-  envelope = envelopeAt(opaque_source_metadata, 1U);
-  const auto opaque_table = envelope["source"]["table"].get<std::string>();
-  envelope["source"] = {
-      {"version", "3.6.1.Final"},
-      {"name", "mariadb-main"},
-      {"snapshot", false},
-      {"table", "opaque.namespace." + opaque_table},
-      {"vendor_metadata", {{"transaction", "not-a-join-key"}}},
-  };
-  setEnvelope(opaque_source_metadata, 1U, envelope);
-  envelope = envelopeAt(opaque_source_metadata, 2U);
-  envelope["data_collections"][0]["data_collection"] =
-      "opaque.namespace." + opaque_table;
-  setEnvelope(opaque_source_metadata, 2U, envelope);
-  BLACKBOX_CHECK(replay(std::move(opaque_source_metadata)).size() == 11U);
+  auto unexpected_source_metadata = captured;
+  envelope = envelopeAt(unexpected_source_metadata, 1U);
+  envelope["source"]["vendor_metadata"] =
+      Json{{"transaction", "not-a-join-key"}};
+  setEnvelope(unexpected_source_metadata, 1U, envelope);
+  expectError(std::move(unexpected_source_metadata),
+              CdcErrorCode::CdcRecordMalformed);
 
   auto mismatched_end_id = captured;
   envelope = envelopeAt(mismatched_end_id, 2U);
@@ -1710,6 +1976,7 @@ void checkCapturedTpccTransactionsAndFailures() {
 int runDebeziumAssemblerTests() {
   checkCapturedStartupSchemaSnapshot();
   checkCapturedLifecycleAndNormalization();
+  checkCapturedYugabyteLifecycleAndRawFailures();
   checkMeasurementMetrics();
   checkStructuralFailuresAreClosed();
   checkMarkerAndFenceFailuresAreClosed();

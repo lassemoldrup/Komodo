@@ -65,7 +65,7 @@ class YcsbBootstrapAdapter:
             encoded = token[1:]
             try:
                 decoded = base64.b64decode(encoded, validate=True)
-                decoded.decode("utf-8", "strict")
+                text = decoded.decode("utf-8", "strict")
             except (ValueError, UnicodeError) as error:
                 raise BootstrapAdapterError(
                     f"scan line {line_number} FIELD{field_number} is invalid: {error}"
@@ -73,6 +73,10 @@ class YcsbBootstrapAdapter:
             if base64.b64encode(decoded).decode("ascii") != encoded:
                 raise BootstrapAdapterError(
                     f"scan line {line_number} FIELD{field_number} has noncanonical Base64"
+                )
+            if len(text) > 100:
+                raise BootstrapAdapterError(
+                    f"scan line {line_number} FIELD{field_number} exceeds VARCHAR(100)"
                 )
             result.append(1)
             result.extend(cls._lp(decoded))

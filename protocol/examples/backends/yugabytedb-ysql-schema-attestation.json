@@ -129,6 +129,10 @@
       "canonical_value": "84b2d0064618859f160408c0ce1cb33985581943"
     },
     {
+      "name": "ysql_server_version",
+      "canonical_value": "PostgreSQL 15.12-YB-2025.2.5.2-b0 on x86_64-pc-linux-gnu, compiled by clang version 19.1.0 (https://github.com/yugabyte/llvm-project.git a2a6b655e14e7fa1fcf1011a6cb29cb8575249c0), 64-bit"
+    },
+    {
       "name": "client_encoding",
       "canonical_value": "UTF8"
     },
@@ -225,5 +229,5 @@
       "canonical_value": "9999999999999999999999999999999999999999999999999999999999999999"
     }
   ],
-  "canonical_attestation_digest": "7982839d609182e2261aab522c4d472219bd02121243819dab825acc7d2b23e1"
+  "canonical_attestation_digest": "c79e5d77d9c29a48d6b1e29f310359f918f9f710f571c45cbb89dc771fd3854f"
 }

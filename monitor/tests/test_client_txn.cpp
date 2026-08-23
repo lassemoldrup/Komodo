@@ -156,7 +156,7 @@ void testGoldenRecords() {
   BLACKBOX_CHECK(mixed.logical_txn_id ==
                  "11111111-1111-4111-8111-111111111111");
   BLACKBOX_CHECK(mixed.attempt_id == "22222222-2222-4222-8222-222222222222");
-  BLACKBOX_CHECK(mixed.txn_type == "si_fractured_read_probe");
+  BLACKBOX_CHECK(mixed.txn_type == "ycsb_read");
   BLACKBOX_CHECK(mixed.correlation_id.run_id == run_id);
   BLACKBOX_CHECK(mixed.correlation_id.session_id == session_id);
   BLACKBOX_CHECK(mixed.correlation_id.txn_id == 1U);

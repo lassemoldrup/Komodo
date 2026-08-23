@@ -219,25 +219,19 @@ public:
       validateStreamOrder(record);
       auto key = detail::parseStrictJson(record.key_json);
       auto envelope = detail::parseStrictJson(record.envelope_json);
-      if (!envelope.is_object()) {
-        fail(CdcErrorCode::CdcRecordMalformed,
-             "Debezium envelope is not a JSON object");
-      }
-      const bool has_status = envelope.contains("status");
-      const bool has_operation = envelope.contains("op");
+      const auto decoded = cdc_decoder_->decode(key, envelope);
       std::optional<CdcTransaction> completed;
-      if (has_status == has_operation) {
-        if (!has_status && envelope.contains("ddl")) {
-          acceptStartupSchemaRecord(key, envelope);
-        } else {
-          fail(CdcErrorCode::CdcRecordMalformed,
-               "Debezium record must be exactly one of transaction metadata "
-               "or row data");
-        }
-      } else if (has_status) {
-        completed = acceptTransactionMetadata(record, key, envelope);
-      } else {
-        acceptRow(record, std::move(key), std::move(envelope));
+      switch (decoded.kind) {
+      case BackendCdcRecordKind::StartupSchema:
+        acceptStartupSchemaRecord(key, envelope);
+        break;
+      case BackendCdcRecordKind::Begin:
+      case BackendCdcRecordKind::End:
+        completed = acceptTransactionMetadata(record, decoded);
+        break;
+      case BackendCdcRecordKind::Row:
+        acceptRow(record, decoded);
+        break;
       }
       recordAcceptedRaw(record);
       recordAcceptProcessing(accept_started, completed);
@@ -245,6 +239,11 @@ public:
     } catch (const CdcAssemblerError &error) {
       rememberFailure(error);
       throw;
+    } catch (const BackendCdcDecodeError &error) {
+      const CdcAssemblerError wrapped(error.code(), error.what(),
+                                      record.stream_id);
+      rememberFailure(wrapped);
+      throw wrapped;
     } catch (const std::bad_alloc &) {
       const CdcAssemblerError error(
           CdcErrorCode::ResourceExhausted,
@@ -541,6 +540,16 @@ private:
     if (startup_schema_decoder_ == nullptr) {
       throw std::invalid_argument("backend startup schema decoder is missing");
     }
+    cdc_decoder_ =
+        config_.backend_adapter->createCdcDecoder(BackendCdcDecoderConfig{
+            .backend_source_id = config_.backend_source_id,
+            .connector_version = config_.debezium_version,
+            .application_tables = config_.application_tables,
+            .control_tables = {marker->full_name, fence->full_name},
+        });
+    if (cdc_decoder_ == nullptr) {
+      throw std::invalid_argument("backend CDC decoder is missing");
+    }
   }
 
   void validateStreamOrder(const CdcStreamRecord &record) {
@@ -663,28 +672,9 @@ private:
     ++startup_schema_snapshot_records_;
   }
 
-  [[nodiscard]] std::string validateMetadataKey(const Json &key) const {
-    requireExactKeys(key, {"id"}, "Debezium transaction metadata key");
-    const auto identifier =
-        stringValue(member(key, "id", "Debezium transaction metadata key"),
-                    "Debezium transaction metadata key.id");
-    if (identifier.empty() || identifier.size() > 512U) {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "Debezium transaction metadata key.id is empty or oversized");
-    }
-    return identifier;
-  }
-
   [[nodiscard]] std::optional<CdcTransaction>
-  acceptTransactionMetadata(const CdcStreamRecord &record, const Json &key,
-                            const Json &envelope) {
-    requireExactKeys(
-        envelope, {"status", "id", "event_count", "data_collections", "ts_ms"},
-        "Debezium transaction metadata");
-    const auto key_id = validateMetadataKey(key);
-    const auto status =
-        stringValue(member(envelope, "status", "transaction metadata"),
-                    "transaction metadata.status");
+  acceptTransactionMetadata(const CdcStreamRecord &record,
+                            const BackendCdcRecord &decoded) {
     if (!startup_schema_decoder_->complete()) {
       if (!startup_schema_decoder_->sawRecord()) {
         fail(CdcErrorCode::CdcRecordMalformed,
@@ -695,27 +685,7 @@ private:
            "transactional evidence began before the startup schema snapshot "
            "reached its last record");
     }
-    const auto envelope_id =
-        stringValue(member(envelope, "id", "transaction metadata"),
-                    "transaction metadata.id");
-    if (envelope_id.empty() || envelope_id != key_id) {
-      fail(CdcErrorCode::CdcTransactionIdMismatch,
-           "Debezium transaction metadata key and envelope IDs disagree");
-    }
-    (void)uintValue(member(envelope, "ts_ms", "transaction metadata"),
-                    "transaction metadata.ts_ms");
-
-    if (status == "BEGIN") {
-      if (!member(envelope, "event_count", "BEGIN").is_null() ||
-          !member(envelope, "data_collections", "BEGIN").is_null()) {
-        fail(CdcErrorCode::CdcRecordMalformed,
-             "Debezium BEGIN must have null event_count and data_collections");
-      }
-      if (active_.contains(envelope_id) ||
-          completed_structural_ids_.contains(envelope_id)) {
-        fail(CdcErrorCode::CdcDuplicateConflict,
-             "Debezium transaction structural ID was reused");
-      }
+    if (decoded.kind == BackendCdcRecordKind::Begin) {
       if (!active_.empty()) {
         fail(CdcErrorCode::CdcOrderInvalid,
              "nested or interleaved Debezium BEGIN violates configured "
@@ -729,118 +699,59 @@ private:
           record.key_json.size() + record.envelope_json.size();
       reserveActiveBytes(raw_bytes);
       ActiveTransaction transaction;
-      transaction.structural_id = envelope_id;
+      transaction.structural_id = record.stream_id;
       transaction.begin_stream_id = record.stream_id;
       transaction.raw_bytes = raw_bytes;
-      active_.emplace(envelope_id, std::move(transaction));
-      current_timed_structural_id_ = envelope_id;
+      active_.emplace(record.stream_id, std::move(transaction));
+      current_timed_structural_id_ = record.stream_id;
       active_transactions_high_water_ =
           std::max(active_transactions_high_water_, active_.size());
       ++begin_metadata_records_;
       return std::nullopt;
     }
 
-    if (status != "END") {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "unknown Debezium transaction status " + status);
+    if (decoded.kind != BackendCdcRecordKind::End) {
+      fail(
+          CdcErrorCode::CdcRecordMalformed,
+          "backend decoder returned a non-metadata record to metadata framing");
     }
-    if (completed_structural_ids_.contains(envelope_id)) {
-      fail(CdcErrorCode::CdcDuplicateConflict,
-           "Debezium END was delivered for an already completed transaction");
-    }
-    auto active = active_.find(envelope_id);
-    if (active == active_.end()) {
+    if (active_.empty()) {
       fail(CdcErrorCode::CdcBeginMissing,
-           "Debezium END has no matching active BEGIN");
+           "Debezium END has no active contiguous BEGIN frame");
     }
-    current_timed_structural_id_ = envelope_id;
-    auto completed = completeTransaction(active, envelope, record.stream_id);
+    auto active = active_.begin();
+    current_timed_structural_id_ = active->first;
+    auto completed = completeTransaction(active, decoded, record.stream_id);
     ++end_metadata_records_;
     return completed;
   }
 
-  [[nodiscard]] const QualifiedTable &
-  resolveDataCollection(const std::string_view identity,
-                        const CdcErrorCode code) const {
-    const auto separator = identity.rfind('.');
-    const auto leaf = separator == std::string_view::npos
-                          ? identity
-                          : identity.substr(separator + 1U);
-    if (!isCanonicalIdentifier(leaf)) {
-      fail(code, "CDC data-collection identity is not canonical");
-    }
-    const auto found = tables_by_leaf_.find(std::string(leaf));
-    if (found == tables_by_leaf_.end()) {
-      fail(code,
-           "CDC data collection is outside the configured table roster: " +
-               std::string(identity));
-    }
-    return found->second;
-  }
-
-  void validateSource(const Json &source, QualifiedTable &table) const {
-    requireObject(source, "Debezium source metadata");
-    const auto version =
-        stringValue(member(source, "version", "source"), "source.version");
-    if (version != config_.debezium_version) {
+  void acceptRow(const CdcStreamRecord &record,
+                 const BackendCdcRecord &decoded) {
+    if (decoded.kind != BackendCdcRecordKind::Row) {
       fail(CdcErrorCode::CdcRecordMalformed,
-           "unsupported Debezium envelope version");
+           "backend decoder returned a non-row record to row assembly");
     }
-    const auto source_name =
-        stringValue(member(source, "name", "source"), "source.name");
-    if (source_name != config_.backend_source_id) {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "CDC source identity differs from the configured source");
-    }
-    const auto table_name =
-        stringValue(member(source, "table", "source"), "source.table");
-    table = resolveDataCollection(table_name, CdcErrorCode::UnexpectedTable);
-
-    const auto &snapshot = member(source, "snapshot", "source");
-    const bool snapshot_false =
-        (snapshot.is_boolean() && !snapshot.get<bool>()) ||
-        (snapshot.is_string() &&
-         snapshot.get_ref<const std::string &>() == "false");
-    if (!snapshot_false) {
-      fail(CdcErrorCode::ExternalWriterObserved,
-           "snapshot CDC row is outside the captured live run");
-    }
-  }
-
-  void acceptRow(const CdcStreamRecord &record, Json key, Json envelope) {
-    requireExactKeys(envelope,
-                     {"before", "after", "source", "transaction", "op", "ts_ms",
-                      "ts_us", "ts_ns"},
-                     "Debezium row envelope");
-    requireObject(key, "Debezium row key");
-    const auto operation =
-        stringValue(member(envelope, "op", "row envelope"), "row envelope.op");
-    if (operation != "c" && operation != "u" && operation != "d") {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "unsupported Debezium row operation " + operation);
-    }
-    const auto &transaction = member(envelope, "transaction", "row envelope");
-    requireExactKeys(transaction,
-                     {"id", "total_order", "data_collection_order"},
-                     "Debezium row transaction metadata");
-    const auto transaction_id = stringValue(
-        member(transaction, "id", "row transaction"), "row transaction.id");
-    if (transaction_id.empty()) {
-      fail(CdcErrorCode::CdcRecordMalformed, "row transaction.id is empty");
-    }
-    if (completed_structural_ids_.contains(transaction_id)) {
-      fail(CdcErrorCode::CdcDuplicateConflict,
-           "row was delivered for an already completed transaction");
-    }
-    auto active = active_.find(transaction_id);
-    if (active == active_.end()) {
+    if (active_.empty()) {
       fail(CdcErrorCode::CdcBeginMissing,
-           "row event has no matching active Debezium BEGIN");
+           "row event has no active contiguous Debezium BEGIN frame");
     }
-    current_timed_structural_id_ = transaction_id;
+    auto active = active_.begin();
+    current_timed_structural_id_ = active->first;
 
     QualifiedTable table;
-    validateSource(member(envelope, "source", "row envelope"), table);
+    if (const auto application =
+            application_tables_.find(decoded.canonical_table);
+        application != application_tables_.end()) {
+      table = application->second;
+    } else if (decoded.canonical_table == marker_table_.full_name) {
+      table = marker_table_;
+    } else if (decoded.canonical_table == fence_table_.full_name) {
+      table = fence_table_;
+    } else {
+      fail(CdcErrorCode::UnexpectedTable,
+           "decoded canonical table is outside the configured allowlist");
+    }
     const bool application = application_tables_.contains(table.full_name);
     const bool marker = table.full_name == marker_table_.full_name;
     const bool fence = table.full_name == fence_table_.full_name;
@@ -850,12 +761,8 @@ private:
                table.full_name);
     }
 
-    const auto total_order =
-        uintValue(member(transaction, "total_order", "row transaction"),
-                  "row transaction.total_order");
-    const auto collection_order = uintValue(
-        member(transaction, "data_collection_order", "row transaction"),
-        "row transaction.data_collection_order");
+    const auto total_order = decoded.total_order;
+    const auto collection_order = decoded.data_collection_order;
     const auto expected_total =
         static_cast<std::uint64_t>(active->second.rows.size()) + 1U;
     const auto expected_collection =
@@ -870,27 +777,13 @@ private:
            "CDC transaction event limit exceeded");
     }
 
-    const auto &before = member(envelope, "before", "row envelope");
-    const auto &after = member(envelope, "after", "row envelope");
-    if (!(before.is_null() || before.is_object()) ||
-        !(after.is_null() || after.is_object())) {
-      fail(CdcErrorCode::CdcRecordMalformed,
-           "row before/after images must be objects or null");
-    }
-    (void)uintValue(member(envelope, "ts_ms", "row envelope"),
-                    "row envelope.ts_ms");
-    (void)uintValue(member(envelope, "ts_us", "row envelope"),
-                    "row envelope.ts_us");
-    (void)uintValue(member(envelope, "ts_ns", "row envelope"),
-                    "row envelope.ts_ns");
-
     const auto raw_bytes = record.key_json.size() + record.envelope_json.size();
     reserveActiveBytes(raw_bytes);
     active->second.rows.push_back(RowEvent{
-        .key = std::move(key),
-        .before = std::move(envelope["before"]),
-        .after = std::move(envelope["after"]),
-        .operation = operation,
+        .key = decoded.key,
+        .before = decoded.before,
+        .after = decoded.after,
+        .operation = decoded.operation,
         .table = std::move(table),
         .total_order = total_order,
         .data_collection_order = collection_order,
@@ -931,33 +824,22 @@ private:
 
   [[nodiscard]] std::optional<CdcTransaction> completeTransaction(
       const std::unordered_map<std::string, ActiveTransaction>::iterator active,
-      const Json &end, const std::string &end_stream_id) {
-    const auto declared_total =
-        uintValue(member(end, "event_count", "END"), "END.event_count");
+      const BackendCdcRecord &end, const std::string &end_stream_id) {
+    if (!end.event_count.has_value()) {
+      fail(CdcErrorCode::CdcEventCountMismatch,
+           "decoded END lacks event_count");
+    }
+    const auto declared_total = *end.event_count;
     if (declared_total != active->second.rows.size()) {
       fail(CdcErrorCode::CdcEventCountMismatch,
            "END.event_count differs from observed row events");
     }
-    const auto &collections = member(end, "data_collections", "END");
-    if (!collections.is_array()) {
-      fail(CdcErrorCode::CdcEventCountMismatch,
-           "END.data_collections is not an array");
-    }
     std::unordered_map<std::string, std::uint64_t> declared_counts;
     std::uint64_t declared_sum = 0;
-    for (const auto &collection : collections) {
-      requireExactKeys(collection, {"data_collection", "event_count"},
-                       "END data collection");
-      const auto name =
-          stringValue(member(collection, "data_collection", "END collection"),
-                      "END data_collection");
-      const auto &table =
-          resolveDataCollection(name, CdcErrorCode::CdcEventCountMismatch);
-      const auto count =
-          uintValue(member(collection, "event_count", "END collection"),
-                    "END data_collection.event_count");
+    for (const auto &collection : end.data_collections) {
+      const auto count = collection.event_count;
       if (count == 0U ||
-          !declared_counts.emplace(table.full_name, count).second) {
+          !declared_counts.emplace(collection.canonical_table, count).second) {
         fail(CdcErrorCode::CdcEventCountMismatch,
              "END contains an empty or duplicate data-collection count");
       }
@@ -1453,6 +1335,7 @@ private:
   std::unordered_map<std::string, QualifiedTable> application_tables_;
   std::unordered_map<std::string, QualifiedTable> tables_by_leaf_;
   std::unique_ptr<CdcStartupSchemaDecoder> startup_schema_decoder_;
+  std::unique_ptr<BackendCdcDecoder> cdc_decoder_;
   QualifiedTable marker_table_;
   QualifiedTable fence_table_;
   std::unordered_map<std::string, ActiveTransaction> active_;

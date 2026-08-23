@@ -353,8 +353,49 @@ class BlackboxRecordTest(unittest.TestCase):
         )
         self.assertEqual(json.loads(result.stdout)["backend"], "yugabytedb_ysql")
 
+    def test_read_committed_is_admitted_only_by_fractured_probe_adapter(self) -> None:
+        rejected = self.run_tool(
+            "run-manifest",
+            "--run-id",
+            RUN_ID,
+            "--backend",
+            "yugabytedb_ysql",
+            "--backend-source-id",
+            "yugabytedb-ysql-main",
+            "--declared-isolation",
+            "READ_COMMITTED",
+            "--benchmark",
+            "ycsb",
+            "--session-id",
+            "ycsb/worker/1",
+            expected_status=2,
+        )
+        self.assertIn("unsupported by adapter ycsb", rejected.stderr)
+
+        admitted = self.run_tool(
+            "run-manifest",
+            "--run-id",
+            RUN_ID,
+            "--backend",
+            "yugabytedb_ysql",
+            "--backend-source-id",
+            "yugabytedb-ysql-main",
+            "--declared-isolation",
+            "READ_COMMITTED",
+            "--benchmark",
+            "ycsb_fractured_read_probe",
+            "--session-id",
+            "ycsb/worker/1",
+            "--session-id",
+            "ycsb/worker/2",
+        )
+        self.assertEqual(
+            json.loads(admitted.stdout)["benchmark"],
+            "ycsb_fractured_read_probe",
+        )
+
     def test_schema_check_accepts_ycsb_and_tpcc_contracts(self) -> None:
-        for benchmark in ("ycsb", "tpcc"):
+        for benchmark in ("ycsb", "ycsb_fractured_read_probe", "tpcc"):
             with self.subTest(benchmark=benchmark):
                 self.run_tool(
                     "schema-check",

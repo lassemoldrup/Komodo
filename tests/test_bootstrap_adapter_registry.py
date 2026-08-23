@@ -24,9 +24,16 @@ class BootstrapAdapterRegistryTest(unittest.TestCase):
         registry = REGISTRY_MODULE.BootstrapAdapterRegistry.discover(
             ROOT / "protocol" / "tools" / "bootstrap_adapters"
         )
-        self.assertEqual(registry.benchmarks, ("tpcc", "ycsb"))
+        self.assertEqual(
+            registry.benchmarks,
+            ("tpcc", "ycsb", "ycsb_fractured_read_probe"),
+        )
         self.assertEqual(registry.require("tpcc").benchmark, "tpcc")
         self.assertEqual(registry.require("ycsb").benchmark, "ycsb")
+        self.assertEqual(
+            registry.require("ycsb_fractured_read_probe").benchmark,
+            "ycsb_fractured_read_probe",
+        )
         source = (ROOT / "scripts" / "blackbox_record.py").read_text(encoding="utf-8")
         self.assertNotIn('args.benchmark == "tpcc"', source)
         self.assertNotIn('args.benchmark == "ycsb"', source)

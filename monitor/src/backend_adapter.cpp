@@ -11,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -580,13 +581,403 @@ private:
 
 class CatalogOnlyStartupSchemaDecoder final : public CdcStartupSchemaDecoder {
 public:
-  [[nodiscard]] CdcStartupSchemaObservation
-  accept(const Json &, const Json &) override {
+  [[nodiscard]] CdcStartupSchemaObservation accept(const Json &,
+                                                   const Json &) override {
     schemaError("backend does not admit connector-produced schema records");
   }
 
   [[nodiscard]] bool sawRecord() const noexcept override { return true; }
   [[nodiscard]] bool complete() const noexcept override { return true; }
+};
+
+class PinnedEnvelopeDecoder final : public BackendCdcDecoder {
+public:
+  enum class Profile {
+    MariaDb,
+    YugabytePgoutput,
+  };
+
+  PinnedEnvelopeDecoder(BackendCdcDecoderConfig config, const Profile profile)
+      : source_id_(std::move(config.backend_source_id)),
+        connector_version_(std::move(config.connector_version)),
+        profile_(profile) {
+    const auto add_table = [this](const std::string &name) {
+      const auto parsed = parseQualifiedTable(name);
+      if (!parsed.has_value() || !canonical_tables_.insert(name).second ||
+          !canonical_by_leaf_.emplace(parsed->table, name).second) {
+        throw std::invalid_argument(
+            "backend CDC decoder table roster is invalid or ambiguous");
+      }
+    };
+    for (const auto &table : config.application_tables) {
+      add_table(table);
+    }
+    for (const auto &table : config.control_tables) {
+      add_table(table);
+    }
+    if (source_id_.empty() || source_id_.size() > 256U ||
+        connector_version_.empty() || canonical_tables_.empty()) {
+      throw std::invalid_argument("backend CDC decoder identity is invalid");
+    }
+  }
+
+  [[nodiscard]] BackendCdcRecord decode(const Json &key,
+                                        const Json &envelope) const override {
+    requireObject(envelope, "CDC envelope");
+    const bool metadata = envelope.contains("status");
+    const bool row = envelope.contains("op");
+    if (metadata == row) {
+      if (!metadata && envelope.contains("ddl") &&
+          profile_ == Profile::MariaDb) {
+        BackendCdcRecord result;
+        result.kind = BackendCdcRecordKind::StartupSchema;
+        return result;
+      }
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "raw CDC record is not one pinned envelope kind");
+    }
+    return metadata ? decodeMetadata(key, envelope) : decodeRow(key, envelope);
+  }
+
+private:
+  [[noreturn]] static void decodeError(const CdcErrorCode code,
+                                       const std::string &message) {
+    throw BackendCdcDecodeError(code, message);
+  }
+
+  static void requireObject(const Json &value, const std::string_view label) {
+    if (!value.is_object()) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  std::string(label) + " is not an object");
+    }
+  }
+
+  static void
+  requireExactKeys(const Json &object,
+                   const std::initializer_list<std::string_view> expected,
+                   const std::string_view label) {
+    requireObject(object, label);
+    std::unordered_set<std::string_view> remaining(expected.begin(),
+                                                   expected.end());
+    for (const auto &[name, unused] : object.items()) {
+      (void)unused;
+      if (remaining.erase(name) == 0U) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    std::string(label) + " contains unexpected field " + name);
+      }
+    }
+    if (!remaining.empty()) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  std::string(label) + " is missing a required field");
+    }
+  }
+
+  [[nodiscard]] static const Json &member(const Json &object,
+                                          const std::string_view name,
+                                          const std::string_view label) {
+    requireObject(object, label);
+    const auto found = object.find(name);
+    if (found == object.end()) {
+      decodeError(CdcErrorCode::CdcRecordMalformed, std::string(label) +
+                                                        " is missing field " +
+                                                        std::string(name));
+    }
+    return *found;
+  }
+
+  [[nodiscard]] static std::string
+  stringValue(const Json &value, const std::string_view label,
+              const std::size_t maximum = 512U) {
+    if (!value.is_string()) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  std::string(label) + " is not a string");
+    }
+    auto result = value.get<std::string>();
+    if (result.empty() || result.size() > maximum) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  std::string(label) + " is empty or oversized");
+    }
+    return result;
+  }
+
+  [[nodiscard]] static std::uint64_t uintValue(const Json &value,
+                                               const std::string_view label) {
+    if (value.is_number_unsigned()) {
+      return value.get<std::uint64_t>();
+    }
+    if (value.is_number_integer()) {
+      const auto signed_value = value.get<std::int64_t>();
+      if (signed_value >= 0) {
+        return static_cast<std::uint64_t>(signed_value);
+      }
+    }
+    decodeError(CdcErrorCode::CdcRecordMalformed,
+                std::string(label) + " is not a nonnegative integer");
+  }
+
+  static void requireNullableString(const Json &value,
+                                    const std::string_view label) {
+    if (!value.is_null() && !value.is_string()) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  std::string(label) + " is neither null nor a string");
+    }
+  }
+
+  static void requireNullableInteger(const Json &value,
+                                     const std::string_view label) {
+    if (!value.is_null()) {
+      (void)uintValue(value, label);
+    }
+  }
+
+  [[nodiscard]] static bool snapshotIsFalse(const Json &value) {
+    return (value.is_boolean() && !value.get<bool>()) ||
+           (value.is_string() &&
+            value.get_ref<const std::string &>() == "false");
+  }
+
+  [[nodiscard]] static bool containsSetWrapper(const Json &value) {
+    if (value.is_array()) {
+      return std::any_of(value.begin(), value.end(), containsSetWrapper);
+    }
+    if (!value.is_object()) {
+      return false;
+    }
+    if (value.contains("set")) {
+      return true;
+    }
+    return std::any_of(value.begin(), value.end(), containsSetWrapper);
+  }
+
+  [[nodiscard]] const std::string &
+  canonicalTableFromLeaf(const std::string_view leaf) const {
+    if (!isCanonicalIdentifier(leaf)) {
+      decodeError(CdcErrorCode::UnexpectedTable,
+                  "raw CDC table leaf is not canonical");
+    }
+    const auto found = canonical_by_leaf_.find(std::string(leaf));
+    if (found == canonical_by_leaf_.end()) {
+      decodeError(CdcErrorCode::UnexpectedTable,
+                  "raw CDC table is outside the configured roster");
+    }
+    return found->second;
+  }
+
+  [[nodiscard]] const std::string &
+  canonicalDataCollection(const std::string_view identity) const {
+    const auto found = canonical_tables_.find(std::string(identity));
+    if (found == canonical_tables_.end()) {
+      decodeError(CdcErrorCode::UnexpectedTable,
+                  "raw CDC data collection is outside the configured roster");
+    }
+    return *found;
+  }
+
+  [[nodiscard]] BackendCdcRecord decodeMetadata(const Json &key,
+                                                const Json &envelope) const {
+    requireExactKeys(key, {"id"}, "transaction metadata key");
+    requireExactKeys(
+        envelope, {"status", "id", "event_count", "data_collections", "ts_ms"},
+        "transaction metadata envelope");
+    const auto key_id =
+        stringValue(member(key, "id", "transaction metadata key"),
+                    "transaction metadata key.id");
+    const auto envelope_id =
+        stringValue(member(envelope, "id", "transaction metadata envelope"),
+                    "transaction metadata envelope.id");
+    if (key_id != envelope_id) {
+      decodeError(CdcErrorCode::CdcTransactionIdMismatch,
+                  "transaction metadata key and envelope IDs disagree");
+    }
+    (void)uintValue(member(envelope, "ts_ms", "transaction metadata envelope"),
+                    "transaction metadata ts_ms");
+    const auto status =
+        stringValue(member(envelope, "status", "transaction metadata envelope"),
+                    "transaction metadata status", 16U);
+    BackendCdcRecord result;
+    result.diagnostic_connector_id = envelope_id;
+    if (status == "BEGIN") {
+      if (!member(envelope, "event_count", "BEGIN").is_null() ||
+          !member(envelope, "data_collections", "BEGIN").is_null()) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "BEGIN counts are not null");
+      }
+      result.kind = BackendCdcRecordKind::Begin;
+      return result;
+    }
+    if (status != "END") {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "transaction metadata status is unsupported");
+    }
+    result.kind = BackendCdcRecordKind::End;
+    result.event_count =
+        uintValue(member(envelope, "event_count", "END"), "END.event_count");
+    const auto &collections = member(envelope, "data_collections", "END");
+    if (!collections.is_array()) {
+      decodeError(CdcErrorCode::CdcEventCountMismatch,
+                  "END data_collections is not an array");
+    }
+    for (const auto &collection : collections) {
+      requireExactKeys(collection, {"data_collection", "event_count"},
+                       "END data collection");
+      const auto identity = stringValue(
+          member(collection, "data_collection", "END data collection"),
+          "END data_collection");
+      result.data_collections.push_back(BackendCdcDataCollectionCount{
+          .canonical_table = canonicalDataCollection(identity),
+          .event_count = uintValue(
+              member(collection, "event_count", "END data collection"),
+              "END data_collection.event_count"),
+      });
+    }
+    return result;
+  }
+
+  [[nodiscard]] std::string validateSource(const Json &source) const {
+    if (profile_ == Profile::MariaDb) {
+      requireExactKeys(source,
+                       {"version", "connector", "name", "ts_ms", "snapshot",
+                        "db", "sequence", "ts_us", "ts_ns", "table",
+                        "server_id", "gtid", "file", "pos", "row", "thread",
+                        "query"},
+                       "MariaDB source metadata");
+    } else {
+      requireExactKeys(source,
+                       {"version", "connector", "name", "ts_ms", "snapshot",
+                        "db", "sequence", "schema", "table", "txId", "lsn",
+                        "xmin", "origin", "origin_lsn"},
+                       "YugabyteDB source metadata");
+    }
+    const auto version =
+        stringValue(member(source, "version", "source"), "source.version");
+    const auto connector =
+        stringValue(member(source, "connector", "source"), "source.connector");
+    const auto source_name =
+        stringValue(member(source, "name", "source"), "source.name", 256U);
+    const auto database =
+        stringValue(member(source, "db", "source"), "source.db", 64U);
+    if (version != connector_version_ || source_name != source_id_ ||
+        database != "benchbase" ||
+        connector !=
+            (profile_ == Profile::MariaDb ? "mariadb" : "postgresql")) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "raw CDC source/version identity is unsupported");
+    }
+    if (!snapshotIsFalse(member(source, "snapshot", "source"))) {
+      decodeError(CdcErrorCode::ExternalWriterObserved,
+                  "snapshot row is outside the captured live run");
+    }
+    (void)uintValue(member(source, "ts_ms", "source"), "source.ts_ms");
+    const auto table =
+        stringValue(member(source, "table", "source"), "source.table", 64U);
+    if (profile_ == Profile::MariaDb) {
+      if (!member(source, "sequence", "source").is_null()) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "MariaDB source.sequence is unexpectedly present");
+      }
+      (void)uintValue(member(source, "ts_us", "source"), "source.ts_us");
+      (void)uintValue(member(source, "ts_ns", "source"), "source.ts_ns");
+      (void)uintValue(member(source, "server_id", "source"),
+                      "source.server_id");
+      requireNullableString(member(source, "gtid", "source"), "source.gtid");
+      (void)stringValue(member(source, "file", "source"), "source.file");
+      (void)uintValue(member(source, "pos", "source"), "source.pos");
+      (void)uintValue(member(source, "row", "source"), "source.row");
+      requireNullableInteger(member(source, "thread", "source"),
+                             "source.thread");
+      requireNullableString(member(source, "query", "source"), "source.query");
+    } else {
+      const auto schema =
+          stringValue(member(source, "schema", "source"), "source.schema", 64U);
+      if (schema != "benchbase") {
+        decodeError(CdcErrorCode::UnexpectedTable,
+                    "YugabyteDB source schema is not benchbase");
+      }
+      (void)stringValue(member(source, "sequence", "source"),
+                        "source.sequence");
+      (void)uintValue(member(source, "txId", "source"), "source.txId");
+      (void)uintValue(member(source, "lsn", "source"), "source.lsn");
+      requireNullableInteger(member(source, "xmin", "source"), "source.xmin");
+      requireNullableString(member(source, "origin", "source"),
+                            "source.origin");
+      requireNullableInteger(member(source, "origin_lsn", "source"),
+                             "source.origin_lsn");
+    }
+    return canonicalTableFromLeaf(table);
+  }
+
+  [[nodiscard]] BackendCdcRecord decodeRow(const Json &key,
+                                           const Json &envelope) const {
+    if (profile_ == Profile::MariaDb) {
+      requireExactKeys(envelope,
+                       {"before", "after", "source", "transaction", "op",
+                        "ts_ms", "ts_us", "ts_ns"},
+                       "MariaDB row envelope");
+    } else {
+      requireExactKeys(
+          envelope, {"before", "after", "source", "transaction", "op", "ts_ms"},
+          "YugabyteDB row envelope");
+    }
+    requireObject(key, "row key");
+    if (key.empty()) {
+      decodeError(CdcErrorCode::PrimaryKeyImageIncomplete, "row key is empty");
+    }
+    const auto operation = stringValue(member(envelope, "op", "row envelope"),
+                                       "row operation", 1U);
+    if (operation != "c" && operation != "u" && operation != "d") {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "row operation is unsupported");
+    }
+    const auto &before = member(envelope, "before", "row envelope");
+    const auto &after = member(envelope, "after", "row envelope");
+    if (!(before.is_null() || before.is_object()) ||
+        !(after.is_null() || after.is_object())) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "row before/after image has an unsupported type");
+    }
+    if (profile_ == Profile::YugabytePgoutput &&
+        (containsSetWrapper(key) || containsSetWrapper(before) ||
+         containsSetWrapper(after))) {
+      decodeError(CdcErrorCode::PrimaryKeyImageIncomplete,
+                  "yboutput availability wrapper is not valid pgoutput data");
+    }
+    const auto &transaction = member(envelope, "transaction", "row envelope");
+    requireExactKeys(transaction,
+                     {"id", "total_order", "data_collection_order"},
+                     "row transaction metadata");
+    const auto diagnostic_id = stringValue(
+        member(transaction, "id", "row transaction"), "row transaction.id");
+    (void)uintValue(member(envelope, "ts_ms", "row envelope"),
+                    "row envelope.ts_ms");
+    if (profile_ == Profile::MariaDb) {
+      (void)uintValue(member(envelope, "ts_us", "row envelope"),
+                      "row envelope.ts_us");
+      (void)uintValue(member(envelope, "ts_ns", "row envelope"),
+                      "row envelope.ts_ns");
+    }
+    BackendCdcRecord result;
+    result.kind = BackendCdcRecordKind::Row;
+    result.diagnostic_connector_id = diagnostic_id;
+    result.canonical_table =
+        validateSource(member(envelope, "source", "row envelope"));
+    result.operation = operation;
+    result.key = key;
+    result.before = before;
+    result.after = after;
+    result.total_order =
+        uintValue(member(transaction, "total_order", "row transaction"),
+                  "row transaction.total_order");
+    result.data_collection_order = uintValue(
+        member(transaction, "data_collection_order", "row transaction"),
+        "row transaction.data_collection_order");
+    return result;
+  }
+
+  std::string source_id_;
+  std::string connector_version_;
+  Profile profile_;
+  std::unordered_set<std::string> canonical_tables_;
+  std::unordered_map<std::string, std::string> canonical_by_leaf_;
 };
 
 constexpr auto mariadb_fact_contract = std::to_array<BackendFactRule>({
@@ -622,6 +1013,10 @@ constexpr auto yugabyte_fact_contract = std::to_array<BackendFactRule>({
     {"server_version", BackendFactValueRule::Exact, "2025.2.5.2-b5"},
     {"server_build_hash", BackendFactValueRule::Exact,
      "84b2d0064618859f160408c0ce1cb33985581943"},
+    {"ysql_server_version", BackendFactValueRule::Exact,
+     "PostgreSQL 15.12-YB-2025.2.5.2-b0 on x86_64-pc-linux-gnu, compiled by "
+     "clang version 19.1.0 (https://github.com/yugabyte/llvm-project.git "
+     "a2a6b655e14e7fa1fcf1011a6cb29cb8575249c0), 64-bit"},
     {"client_encoding", BackendFactValueRule::Exact, "UTF8"},
     {"time_zone", BackendFactValueRule::Exact, "UTC"},
     {"search_path", BackendFactValueRule::Exact, "benchbase"},
@@ -637,8 +1032,7 @@ constexpr auto yugabyte_fact_contract = std::to_array<BackendFactRule>({
     {"connector_class", BackendFactValueRule::Exact,
      "io.debezium.connector.postgresql.YugabyteDBConnector"},
     {"connector_source", BackendFactValueRule::Exact, "postgresql"},
-    {"connector_version", BackendFactValueRule::Exact,
-     "dz.2.5.2.yb.2026.1"},
+    {"connector_version", BackendFactValueRule::Exact, "dz.2.5.2.yb.2026.1"},
     {"connector_sha256", BackendFactValueRule::Exact,
      "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"},
     {"connector_tasks", BackendFactValueRule::Exact, "1"},
@@ -721,6 +1115,12 @@ public:
   createCdcStartupSchemaDecoder(CdcStartupSchemaConfig config) const override {
     return std::make_unique<MariaDbStartupSchemaDecoder>(std::move(config));
   }
+
+  [[nodiscard]] std::unique_ptr<BackendCdcDecoder>
+  createCdcDecoder(BackendCdcDecoderConfig config) const override {
+    return std::make_unique<PinnedEnvelopeDecoder>(
+        std::move(config), PinnedEnvelopeDecoder::Profile::MariaDb);
+  }
 };
 
 class YugabyteYsqlBackendAdapter final : public BackendAdapter {
@@ -789,6 +1189,12 @@ public:
   createCdcStartupSchemaDecoder(CdcStartupSchemaConfig) const override {
     return std::make_unique<CatalogOnlyStartupSchemaDecoder>();
   }
+
+  [[nodiscard]] std::unique_ptr<BackendCdcDecoder>
+  createCdcDecoder(BackendCdcDecoderConfig config) const override {
+    return std::make_unique<PinnedEnvelopeDecoder>(
+        std::move(config), PinnedEnvelopeDecoder::Profile::YugabytePgoutput);
+  }
 };
 
 const MariaDbBackendAdapter mariadb_adapter;
@@ -807,32 +1213,33 @@ void BackendAdapter::validateSchemaAttestation(
     throw MonitorError(MonitorErrorCode::SchemaAttestationMismatch,
                        "SchemaAttestation backend differs from adapter");
   }
-  const auto find_table = [&](const std::string_view name) -> const ProtocolSchemaTable * {
-    const auto found = std::find_if(
-        attestation.tables.begin(), attestation.tables.end(),
-        [name](const ProtocolSchemaTable &table) {
-          return table.canonical_table_name == name;
-        });
+  const auto find_table =
+      [&](const std::string_view name) -> const ProtocolSchemaTable * {
+    const auto found =
+        std::find_if(attestation.tables.begin(), attestation.tables.end(),
+                     [name](const ProtocolSchemaTable &table) {
+                       return table.canonical_table_name == name;
+                     });
     return found == attestation.tables.end() ? nullptr : &*found;
   };
-  const auto validate_columns = [](
-                                    const ProtocolSchemaTable &actual,
-                                    const std::span<const AdapterColumnContract> expected) {
-    if (actual.columns.size() != expected.size()) {
-      return false;
-    }
-    for (std::size_t index = 0; index < expected.size(); ++index) {
-      const auto &column = actual.columns[index];
-      const auto &contract = expected[index];
-      if (column.name != contract.name ||
-          column.logical_sql_type != contract.sql_type ||
-          column.nullable != contract.nullable ||
-          column.generated != contract.generated.has_value()) {
-        return false;
-      }
-    }
-    return true;
-  };
+  const auto validate_columns =
+      [](const ProtocolSchemaTable &actual,
+         const std::span<const AdapterColumnContract> expected) {
+        if (actual.columns.size() != expected.size()) {
+          return false;
+        }
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+          const auto &column = actual.columns[index];
+          const auto &contract = expected[index];
+          if (column.name != contract.name ||
+              column.logical_sql_type != contract.sql_type ||
+              column.nullable != contract.nullable ||
+              column.generated != contract.generated.has_value()) {
+            return false;
+          }
+        }
+        return true;
+      };
   if (attestation.tables.size() != benchmark_adapter.tables().size() + 2U) {
     throw MonitorError(MonitorErrorCode::SchemaAttestationMismatch,
                        "SchemaAttestation table roster size differs");
@@ -841,11 +1248,12 @@ void BackendAdapter::validateSchemaAttestation(
     const auto *table = find_table(contract.name);
     if (table == nullptr ||
         !std::equal(table->primary_key_columns.begin(),
-                    table->primary_key_columns.end(), contract.primary_key.begin(),
-                    contract.primary_key.end()) ||
+                    table->primary_key_columns.end(),
+                    contract.primary_key.begin(), contract.primary_key.end()) ||
         !validate_columns(*table, contract.columns)) {
       throw MonitorError(MonitorErrorCode::SchemaAttestationMismatch,
-                         "SchemaAttestation application table differs from benchmark contract");
+                         "SchemaAttestation application table differs from "
+                         "benchmark contract");
     }
   }
   const auto *fence = find_table("benchbase.checker_run_fence");
@@ -867,8 +1275,9 @@ void BackendAdapter::validateSchemaAttestation(
       marker->columns.size() != 2U ||
       !matches_column(marker->columns[0], "session_id", "VARCHAR(64)") ||
       !matches_column(marker->columns[1], "txn_id", "BIGINT")) {
-    throw MonitorError(MonitorErrorCode::SchemaAttestationMismatch,
-                       "SchemaAttestation common control table contract differs");
+    throw MonitorError(
+        MonitorErrorCode::SchemaAttestationMismatch,
+        "SchemaAttestation common control table contract differs");
   }
 
   const auto rules = attestationFactContract();
@@ -908,8 +1317,9 @@ void BackendAdapter::validateSchemaAttestation(
       break;
     }
     if (!valid) {
-      throw MonitorError(MonitorErrorCode::BackendFactMismatch,
-                         "SchemaAttestation backend fact differs from contract");
+      throw MonitorError(
+          MonitorErrorCode::BackendFactMismatch,
+          "SchemaAttestation backend fact differs from contract");
     }
   }
 }

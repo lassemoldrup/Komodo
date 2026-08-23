@@ -7,15 +7,17 @@
     "search_path": "benchbase"
   },
   "session_contract": {
-    "declared_isolations": ["REPEATABLE_READ"],
+    "declared_isolations": ["READ_COMMITTED", "REPEATABLE_READ"],
     "configure_in_autocommit": true,
     "configuration_statements": [
       "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+      "SET client_encoding TO 'UTF8'",
       "SET TIME ZONE 'UTC'",
       "SET search_path TO benchbase",
       "SET yb_read_from_followers = false"
     ],
     "required_observations": [
+      {"name": "ysql_server_version", "expected_value": "PostgreSQL 15.12-YB-2025.2.5.2-b0 on x86_64-pc-linux-gnu, compiled by clang version 19.1.0 (https://github.com/yugabyte/llvm-project.git a2a6b655e14e7fa1fcf1011a6cb29cb8575249c0), 64-bit"},
       {"name": "client_encoding", "expected_value": "UTF8"},
       {"name": "time_zone", "expected_value": "UTC"},
       {"name": "search_path", "expected_value": "benchbase"},
@@ -45,6 +47,7 @@
     {"name": "schema_name", "value_rule": "exact", "expected_value": "benchbase"},
     {"name": "server_version", "value_rule": "exact", "expected_value": "2025.2.5.2-b5"},
     {"name": "server_build_hash", "value_rule": "exact", "expected_value": "84b2d0064618859f160408c0ce1cb33985581943"},
+    {"name": "ysql_server_version", "value_rule": "exact", "expected_value": "PostgreSQL 15.12-YB-2025.2.5.2-b0 on x86_64-pc-linux-gnu, compiled by clang version 19.1.0 (https://github.com/yugabyte/llvm-project.git a2a6b655e14e7fa1fcf1011a6cb29cb8575249c0), 64-bit"},
     {"name": "client_encoding", "value_rule": "exact", "expected_value": "UTF8"},
     {"name": "time_zone", "value_rule": "exact", "expected_value": "UTC"},
     {"name": "search_path", "value_rule": "exact", "expected_value": "benchbase"},

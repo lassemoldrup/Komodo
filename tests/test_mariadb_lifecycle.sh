@@ -222,6 +222,9 @@ start_live_ingest() {
     --redis-host "$BLACKBOX_REDIS_HOST" \
     --redis-port "$BLACKBOX_REDIS_PORT" \
     --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --backend mariadb \
+    --benchmark ycsb \
+    --backend-source-id mariadb-main \
     --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
     >"$output_path" 2>"$error_path" &
   INGEST_PID=$!
@@ -287,11 +290,14 @@ start_live_prefix() {
     --redis-host "$BLACKBOX_REDIS_HOST" \
     --redis-port "$BLACKBOX_REDIS_PORT" \
     --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --backend mariadb \
+    --benchmark ycsb \
+    --backend-source-id mariadb-main \
     --client-cursor "$client_cursor" \
     --expected-session-id ycsb/worker/1 \
     --approved-load-cdc-seq 2 \
     --approved-bootstrap-transactions 1 \
-    --approved-bootstrap-rows "$bootstrap_count" \
+    --approved-bootstrap-table-count "benchbase.usertable=$bootstrap_count" \
     --approved-bootstrap-digest "$bootstrap_digest" \
     --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
     >"$PREFIX_INGEST_PATH" 2>"$PREFIX_ERROR_PATH" &
@@ -966,11 +972,14 @@ main() {
     --redis-host "$BLACKBOX_REDIS_HOST" \
     --redis-port "$BLACKBOX_REDIS_PORT" \
     --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --backend mariadb \
+    --benchmark ycsb \
+    --backend-source-id mariadb-main \
     --client-cursor "$bootstrap_client_cursor" \
     --expected-session-id ycsb/worker/1 \
     --approved-load-cdc-seq 2 \
     --approved-bootstrap-transactions 1 \
-    --approved-bootstrap-rows "$bootstrap_count" \
+    --approved-bootstrap-table-count "benchbase.usertable=$bootstrap_count" \
     --approved-bootstrap-digest "0000000000000000000000000000000000000000000000000000000000000000" \
     --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
     >/dev/null 2>"$BAD_PREFIX_ERROR_PATH"; then
@@ -985,7 +994,9 @@ main() {
   python3 "$ROOT/tests/verify_lifecycle_stream.py" \
     --input "$CAPTURE_PATH" --run-id "$BLACKBOX_ACTIVE_RUN_ID" >/dev/null
   "$BLACKBOX_CDC_REPLAY_BIN" \
-    --input "$CAPTURE_PATH" --run-id "$BLACKBOX_ACTIVE_RUN_ID" >"$REPLAY_PATH"
+    --input "$CAPTURE_PATH" --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+    --backend mariadb --benchmark ycsb --backend-source-id mariadb-main \
+    >"$REPLAY_PATH"
   jq -e '
     .completed_transactions == 11 and
     [.transactions[].kind] == [

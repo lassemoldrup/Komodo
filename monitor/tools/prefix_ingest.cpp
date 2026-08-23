@@ -9,6 +9,7 @@
 #include <hiredis/hiredis.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -46,12 +47,15 @@ struct Options {
   std::string redis_host = "host.docker.internal";
   int redis_port = 6379;
   std::string run_id;
+  std::string backend;
+  std::string benchmark;
+  std::string backend_source_id;
   std::string client_cursor;
   std::vector<std::string> expected_session_ids;
   std::chrono::milliseconds overall_timeout{30000};
   std::optional<std::uint64_t> approved_load_cdc_seq;
   std::optional<std::uint64_t> approved_bootstrap_transactions;
-  std::optional<std::uint64_t> approved_bootstrap_rows;
+  std::vector<BootstrapTableCount> approved_bootstrap_table_counts;
   std::string approved_bootstrap_digest;
 };
 
@@ -89,6 +93,21 @@ parseTimeout(const std::string_view value) {
   return std::chrono::milliseconds(result);
 }
 
+[[nodiscard]] BootstrapTableCount parseTableCount(const std::string &value) {
+  const auto separator = value.find('=');
+  if (separator == std::string::npos || separator == 0U ||
+      separator + 1U == value.size()) {
+    throw std::invalid_argument(
+        "approved bootstrap table count must be table=rows");
+  }
+  return BootstrapTableCount{
+      .table = value.substr(0U, separator),
+      .row_count = parseCounter(
+          std::string_view(value).substr(separator + 1U),
+          "--approved-bootstrap-table-count"),
+  };
+}
+
 [[nodiscard]] Options parseOptions(const int argc, char **argv) {
   Options options;
   for (int index = 1; index < argc; ++index) {
@@ -104,6 +123,12 @@ parseTimeout(const std::string_view value) {
       options.redis_port = parsePort(value);
     } else if (argument == "--run-id") {
       options.run_id = value;
+    } else if (argument == "--backend") {
+      options.backend = value;
+    } else if (argument == "--benchmark") {
+      options.benchmark = value;
+    } else if (argument == "--backend-source-id") {
+      options.backend_source_id = value;
     } else if (argument == "--client-cursor") {
       options.client_cursor = value;
     } else if (argument == "--expected-session-id") {
@@ -114,8 +139,8 @@ parseTimeout(const std::string_view value) {
       options.approved_load_cdc_seq = parseCounter(value, argument);
     } else if (argument == "--approved-bootstrap-transactions") {
       options.approved_bootstrap_transactions = parseCounter(value, argument);
-    } else if (argument == "--approved-bootstrap-rows") {
-      options.approved_bootstrap_rows = parseCounter(value, argument);
+    } else if (argument == "--approved-bootstrap-table-count") {
+      options.approved_bootstrap_table_counts.push_back(parseTableCount(value));
     } else if (argument == "--approved-bootstrap-digest") {
       options.approved_bootstrap_digest = value;
     } else {
@@ -123,14 +148,16 @@ parseTimeout(const std::string_view value) {
     }
   }
   if (options.redis_host.empty() || options.run_id.empty() ||
-      options.client_cursor.empty() || options.expected_session_ids.empty() ||
+      options.backend.empty() || options.benchmark.empty() ||
+      options.backend_source_id.empty() || options.client_cursor.empty() ||
+      options.expected_session_ids.empty() ||
       !options.approved_load_cdc_seq.has_value() ||
       !options.approved_bootstrap_transactions.has_value() ||
-      !options.approved_bootstrap_rows.has_value() ||
+      options.approved_bootstrap_table_counts.empty() ||
       options.approved_bootstrap_digest.empty()) {
     throw std::invalid_argument(
-        "run, client cursor, expected sessions, and exact bootstrap proof "
-        "arguments are required");
+        "backend, benchmark, source, run, client cursor, expected sessions, "
+        "and exact per-table bootstrap proof arguments are required");
   }
   return options;
 }
@@ -201,6 +228,40 @@ using RedisContextPtr = std::unique_ptr<redisContext, RedisContextDeleter>;
 }
 
 int run(const Options &options) {
+  const auto &backend =
+      blackbox::BackendAdapterRegistry::require(options.backend);
+  const auto &benchmark =
+      blackbox::BenchmarkAdapterRegistry::require(options.benchmark);
+  std::vector<std::string> application_tables;
+  application_tables.reserve(benchmark.tables().size());
+  for (const auto &table : benchmark.tables()) {
+    application_tables.emplace_back(table.name);
+  }
+  if (options.approved_bootstrap_table_counts.size() !=
+      application_tables.size()) {
+    throw std::invalid_argument(
+        "bootstrap table-count roster differs from benchmark adapter");
+  }
+  std::vector<BootstrapTableCount> bootstrap_table_counts =
+      options.approved_bootstrap_table_counts;
+  std::sort(bootstrap_table_counts.begin(), bootstrap_table_counts.end(),
+            [](const BootstrapTableCount &left,
+               const BootstrapTableCount &right) {
+              return left.table < right.table;
+            });
+  auto sorted_application_tables = application_tables;
+  std::sort(sorted_application_tables.begin(), sorted_application_tables.end());
+  for (std::size_t index = 0; index < bootstrap_table_counts.size(); ++index) {
+    if (bootstrap_table_counts[index].table !=
+        sorted_application_tables[index]) {
+      throw std::invalid_argument(
+          "bootstrap table-count roster differs from benchmark adapter");
+    }
+    if (index > 0U && bootstrap_table_counts[index - 1U].table ==
+                          bootstrap_table_counts[index].table) {
+      throw std::invalid_argument("bootstrap table-count roster is duplicated");
+    }
+  }
   auto context = connectRedis(options);
   const std::string client_stream = "blackbox:client:" + options.run_id;
   BlockingRedisReader reader(
@@ -214,19 +275,19 @@ int run(const Options &options) {
       1000U, std::chrono::milliseconds(100));
   DebeziumTxnAssembler assembler(DebeziumAssemblerConfig{
       .run_id = options.run_id,
-      .backend_source_id = "mariadb-main",
-      .debezium_version = "3.6.1.Final",
-      .backend_adapter = &blackbox::BackendAdapterRegistry::require("mariadb"),
-      .benchmark_adapter = &blackbox::BenchmarkAdapterRegistry::require("ycsb"),
-      .application_tables = {"benchbase.usertable"},
+      .backend_source_id = options.backend_source_id,
+      .debezium_version = std::string(backend.connectorVersion()),
+      .backend_adapter = &backend,
+      .benchmark_adapter = &benchmark,
+      .application_tables = application_tables,
       .transaction_marker_table = "benchbase.session_txn",
       .run_fence_table = "benchbase.checker_run_fence",
   });
   TransactionJoiner joiner(TransactionJoinerConfig{
       .run_id = options.run_id,
       .expected_session_ids = options.expected_session_ids,
-      .application_tables = {"benchbase.usertable"},
-      .benchmark_adapter = &blackbox::BenchmarkAdapterRegistry::require("ycsb"),
+      .application_tables = application_tables,
+      .benchmark_adapter = &benchmark,
       .client_parser_limits = {},
       .limits = {},
   });
@@ -282,10 +343,7 @@ int run(const Options &options) {
                     .bootstrap_transactions =
                         *options.approved_bootstrap_transactions,
                 },
-            .table_row_counts = {BootstrapTableCount{
-                .table = "benchbase.usertable",
-                .row_count = *options.approved_bootstrap_rows,
-            }},
+            .table_row_counts = bootstrap_table_counts,
             .canonical_state_digest = options.approved_bootstrap_digest,
         });
         bootstrap_proof_submitted = true;

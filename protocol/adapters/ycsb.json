@@ -6,13 +6,12 @@
     "cdc_normalization": true,
     "bootstrap_scan": true
   },
-  "declared_isolations": ["READ_COMMITTED", "REPEATABLE_READ"],
+  "declared_isolations": ["REPEATABLE_READ"],
   "transaction_types": [
     "ycsb_insert",
     "ycsb_read",
     "ycsb_update",
-    "ycsb_delete",
-    "si_fractured_read_probe"
+    "ycsb_delete"
   ],
   "application_tables": ["benchbase.usertable"],
   "projection_policy": {

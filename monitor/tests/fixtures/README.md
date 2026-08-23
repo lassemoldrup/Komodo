@@ -1,4 +1,23 @@
-# MariaDB CDC fixtures
+# CDC fixtures
+
+`yugabytedb_pgoutput_2_5_2_raw_cross_tablet.json` is a content-preserving JSON
+reformat of the six Redis entries captured by the pinned YugabyteDB contract experiment
+`pgoutput_opaque_transaction_id_mismatch_20260822T153917Z`. The source capture
+uses YugabyteDB `2025.2.5.2-b5`, connector `dz.2.5.2.yb.2026.1`, `pgoutput`, and
+a `SEQUENCE` slot. It proves the millisecond-only row envelope and deliberately
+different `BEGIN`, row, and `END` connector IDs. The unedited source capture's
+SHA-256 is `09de81a9da680e1754faa20ebd874553321334e91181a0e05d626995282b47bb`;
+this formatted fixture's SHA-256 is
+`e60dcbf23cb7e97e7fc899a64fa1455c4ffdb8a5cd71551bf6db197448a43729`.
+
+`yugabytedb_pgoutput_2_5_2_lifecycle.json` is a deterministic lifecycle fixture
+using that captured pinned envelope profile. It is not presented as an unedited
+live capture. It supplies legal run fences and benchmark rows so the same
+assembler can compare backend-neutral transactions with the real MariaDB
+lifecycle fixture. Its SHA-256 is
+`e6316f6e839bbb675f8f826f30739cc46f3122a77698666e616e8b9fffbcc7d0`.
+
+## MariaDB
 
 `mariadb_debezium_3_6_1_full_lifecycle.json` is the production replay fixture.
 It is the unedited JSON emitted by:

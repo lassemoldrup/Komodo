@@ -1,5 +1,6 @@
 #include "blackbox/canonical_ycsb_codec.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -11,6 +12,7 @@ namespace {
 
 constexpr std::byte null_field_tag{0};
 constexpr std::byte present_field_tag{1};
+constexpr std::size_t maximum_field_characters = 100U;
 
 [[nodiscard]] bool isCanonicalIdentifier(const std::string_view value) {
   if (value.empty() || value.size() > 64) {
@@ -185,6 +187,13 @@ CanonicalBytes CanonicalYcsbCodec::encodeValue(
     }
     if (!isStrictUtf8(*field)) {
       throw CanonicalEncodingError("YCSB field is not strict UTF-8");
+    }
+    const auto characters = static_cast<std::size_t>(
+        std::count_if(field->begin(), field->end(), [](const char value) {
+          return (static_cast<unsigned char>(value) & 0xc0U) != 0x80U;
+        }));
+    if (characters > maximum_field_characters) {
+      throw CanonicalEncodingError("YCSB field exceeds VARCHAR(100)");
     }
     output.push_back(present_field_tag);
     appendLengthPrefixed(output, *field);

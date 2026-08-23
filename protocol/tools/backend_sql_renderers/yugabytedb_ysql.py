@@ -85,7 +85,8 @@ class YugabyteYsqlRenderer:
             if logical_plan["format"] == "ycsb_tsv":
                 fields = ", ".join(
                     f"CASE WHEN {quote(column['name'])} IS NULL THEN 'N' ELSE "
-                    f"'P' || encode(convert_to({quote(column['name'])}, 'UTF8'), 'base64') END"
+                    f"'P' || replace(replace(encode(convert_to({quote(column['name'])}, 'UTF8'), "
+                    f"'base64'), E'\\n', ''), E'\\r', '') END"
                     for column in plan["columns"][1:]
                 )
                 sql = (

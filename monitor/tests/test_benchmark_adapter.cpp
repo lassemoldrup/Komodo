@@ -264,8 +264,10 @@ void checkExecutableGoldensUseRegisteredTables() {
 }
 
 void checkRegistryValidationAndCapabilities() {
-  BLACKBOX_CHECK(BenchmarkAdapterRegistry::adapters().size() == 2U);
+  BLACKBOX_CHECK(BenchmarkAdapterRegistry::adapters().size() == 3U);
   BLACKBOX_CHECK(BenchmarkAdapterRegistry::find("ycsb") != nullptr);
+  BLACKBOX_CHECK(
+      BenchmarkAdapterRegistry::find("ycsb_fractured_read_probe") != nullptr);
   BLACKBOX_CHECK(BenchmarkAdapterRegistry::find("tpcc") != nullptr);
   BLACKBOX_CHECK(BenchmarkAdapterRegistry::find("unknown") == nullptr);
   BLACKBOX_CHECK(blackbox::isProtocolName("NewOrder"));
@@ -312,14 +314,24 @@ void checkRegistryValidationAndCapabilities() {
   std::vector<std::string> ycsb_roster{"benchbase.usertable"};
   ycsb.validateRunConfiguration("REPEATABLE_READ", ycsb_roster,
                                 all_capabilities);
-  ycsb.validateRunConfiguration("READ_COMMITTED", ycsb_roster,
-                                all_capabilities);
+  expectError(
+      [&] {
+        ycsb.validateRunConfiguration("READ_COMMITTED", ycsb_roster,
+                                      all_capabilities);
+      },
+      MonitorErrorCode::IsolationMismatch);
+  const auto &fractured =
+      BenchmarkAdapterRegistry::require("ycsb_fractured_read_probe");
+  fractured.validateRunConfiguration("READ_COMMITTED", ycsb_roster,
+                                     all_capabilities);
+  fractured.validateRunConfiguration("REPEATABLE_READ", ycsb_roster,
+                                     all_capabilities);
 }
 
 void checkStartupSchemaContracts() {
   const auto &backend = blackbox::BackendAdapterRegistry::require("mariadb");
   const auto requirements = backend.applicationTableRequirements();
-  for (const auto benchmark : {"ycsb", "tpcc"}) {
+  for (const auto benchmark : {"ycsb", "ycsb_fractured_read_probe", "tpcc"}) {
     const auto contract =
         loadJson(std::filesystem::path(BLACKBOX_PROTOCOL_ADAPTER_DIR) /
                  (std::string(benchmark) + ".json"));
@@ -410,6 +422,7 @@ void checkStartupSchemaContracts() {
 
 int runBenchmarkAdapterTests() {
   checkSharedAdapterContract("ycsb");
+  checkSharedAdapterContract("ycsb_fractured_read_probe");
   checkSharedAdapterContract("tpcc");
   checkExecutableGoldensUseRegisteredTables();
   checkRegistryValidationAndCapabilities();

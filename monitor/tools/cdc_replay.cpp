@@ -28,9 +28,9 @@ using Json = nlohmann::json;
 struct Options {
   std::string input;
   std::string run_id;
-  std::string backend = "mariadb";
-  std::string benchmark = "ycsb";
-  std::string backend_source_id = "mariadb-main";
+  std::string backend;
+  std::string benchmark;
+  std::string backend_source_id;
 };
 
 [[nodiscard]] Options parseOptions(const int argc, char **argv) {
@@ -56,8 +56,12 @@ struct Options {
       throw std::invalid_argument("unknown argument: " + std::string(argument));
     }
   }
-  if (options.input.empty() || options.run_id.empty()) {
-    throw std::invalid_argument("--input and --run-id are required");
+  if (options.input.empty() || options.run_id.empty() ||
+      options.backend.empty() || options.benchmark.empty() ||
+      options.backend_source_id.empty()) {
+    throw std::invalid_argument(
+        "--input, --run-id, --backend, --benchmark, and "
+        "--backend-source-id are required");
   }
   return options;
 }
@@ -140,7 +144,7 @@ int run(const Options &options) {
   DebeziumTxnAssembler assembler(DebeziumAssemblerConfig{
       .run_id = options.run_id,
       .backend_source_id = options.backend_source_id,
-      .debezium_version = "3.6.1.Final",
+      .debezium_version = std::string(backend.connectorVersion()),
       .backend_adapter = &backend,
       .benchmark_adapter = &benchmark,
       .application_tables = std::move(application_tables),

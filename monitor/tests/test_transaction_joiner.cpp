@@ -920,16 +920,21 @@ void testBoundsAreCountedWithoutDroppingEvidence() {
 
   TransactionJoiner cdc_with_large_write(config());
   openWorkload(cdc_with_large_write);
-  constexpr std::size_t large_value_size = 1024U * 1024U;
-  const auto large_value = value(std::string(large_value_size, 'x'));
+  std::string maximum_field;
+  for (std::size_t index = 0; index < 100U; ++index) {
+    maximum_field.append("🙂");
+  }
+  std::array<std::optional<std::string>, 10> maximum_fields;
+  maximum_fields.fill(maximum_field);
+  const auto large_value = CanonicalYcsbCodec::encodeValue(maximum_fields);
   cdc_with_large_write.acceptCdcTransaction(
       workload(2U, session_one, 1U,
                {NormalizedWrite{.key = key(1),
                                 .state = NormalizedValueState::Present,
                                 .value = large_value}}));
   BLACKBOX_CHECK(cdc_with_large_write.metrics().pending_cdc_bytes >=
-                 cdc_baseline.metrics().pending_cdc_bytes + large_value_size +
-                     4096U);
+                 cdc_baseline.metrics().pending_cdc_bytes + large_value.size() +
+                     512U);
   limits = TransactionJoinerLimits{};
   limits.max_pending_cdc_bytes = exact_cdc_bytes;
   TransactionJoiner exact_cdc(config(limits));

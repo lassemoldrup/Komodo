@@ -24,7 +24,7 @@ struct CdcStreamRecord {
 struct DebeziumAssemblerConfig {
   std::string run_id;
   std::string backend_source_id;
-  std::string debezium_version = "3.6.1.Final";
+  std::string debezium_version;
   const BackendAdapter *backend_adapter = nullptr;
   const BenchmarkAdapter *benchmark_adapter = nullptr;
   std::vector<std::string> application_tables;
@@ -81,9 +81,9 @@ public:
   DebeziumTxnAssembler(DebeziumTxnAssembler &&) noexcept;
   DebeziumTxnAssembler &operator=(DebeziumTxnAssembler &&) noexcept;
 
-  // Returns a transaction only for a fully validated END. Connector/server
-  // transaction identifiers are retained solely inside the implementation to
-  // validate Debezium structure; they are never exposed as correlation data.
+  // Returns a transaction only for a fully validated END. The active frame is
+  // identified by its BEGIN Redis stream ID; connector/server transaction
+  // identifiers are backend-validated per-record diagnostics only.
   [[nodiscard]] std::optional<CdcTransaction>
   accept(const CdcStreamRecord &record);
 

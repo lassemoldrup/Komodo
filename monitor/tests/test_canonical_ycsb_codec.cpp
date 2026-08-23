@@ -154,6 +154,16 @@ void checkUtf8BoundaryAcceptance() {
   fields[8] = std::string("\xf4\x8f\xbf\xbf", 4);
   fields[9] = "";
   BLACKBOX_CHECK(!CanonicalYcsbCodec::encodeValue(fields).empty());
+
+  fields = {};
+  fields[0] = std::string(101U, 'x');
+  BLACKBOX_CHECK(
+      rejects([&] { (void)CanonicalYcsbCodec::encodeValue(fields); }));
+  fields[0] = std::string();
+  for (std::size_t index = 0; index < 100U; ++index) {
+    fields[0]->append("🙂");
+  }
+  BLACKBOX_CHECK(!CanonicalYcsbCodec::encodeValue(fields).empty());
 }
 
 } // namespace

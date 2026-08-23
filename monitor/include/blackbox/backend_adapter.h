@@ -1,15 +1,19 @@
 #pragma once
 
 #include "blackbox/benchmark_adapter.h"
+#include "blackbox/cdc_error.h"
 #include "blackbox/protocol_records.h"
 
-#include <nlohmann/json_fwd.hpp>
+#include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace blackbox {
@@ -56,6 +60,60 @@ struct CdcStartupSchemaConfig {
 struct CdcStartupSchemaObservation {
   std::optional<StartupTableSchema> application_table_schema;
   bool complete = false;
+};
+
+enum class BackendCdcRecordKind {
+  StartupSchema,
+  Begin,
+  Row,
+  End,
+};
+
+struct BackendCdcDataCollectionCount {
+  std::string canonical_table;
+  std::uint64_t event_count = 0;
+
+  bool operator==(const BackendCdcDataCollectionCount &) const = default;
+};
+
+struct BackendCdcRecord {
+  BackendCdcRecordKind kind = BackendCdcRecordKind::Row;
+  std::string diagnostic_connector_id;
+  std::optional<std::uint64_t> event_count;
+  std::vector<BackendCdcDataCollectionCount> data_collections;
+  std::string canonical_table;
+  std::string operation;
+  nlohmann::json key;
+  nlohmann::json before;
+  nlohmann::json after;
+  std::uint64_t total_order = 0;
+  std::uint64_t data_collection_order = 0;
+};
+
+struct BackendCdcDecoderConfig {
+  std::string backend_source_id;
+  std::string connector_version;
+  std::vector<std::string> application_tables;
+  std::vector<std::string> control_tables;
+};
+
+class BackendCdcDecodeError final : public std::runtime_error {
+public:
+  BackendCdcDecodeError(CdcErrorCode code, std::string message)
+      : std::runtime_error(std::move(message)), code_(code) {}
+
+  [[nodiscard]] CdcErrorCode code() const noexcept { return code_; }
+
+private:
+  CdcErrorCode code_;
+};
+
+class BackendCdcDecoder {
+public:
+  virtual ~BackendCdcDecoder() = default;
+
+  [[nodiscard]] virtual BackendCdcRecord
+  decode(const nlohmann::json &key, const nlohmann::json &envelope) const = 0;
 };
 
 enum class BackendFactValueRule {
@@ -113,11 +171,13 @@ public:
   normalizedCapabilities() const noexcept = 0;
   [[nodiscard]] virtual std::span<const BackendFactRule>
   attestationFactContract() const noexcept = 0;
-  virtual void validateSchemaAttestation(
-      const SchemaAttestation &attestation,
-      const BenchmarkAdapter &benchmark_adapter) const;
+  virtual void
+  validateSchemaAttestation(const SchemaAttestation &attestation,
+                            const BenchmarkAdapter &benchmark_adapter) const;
   [[nodiscard]] virtual std::unique_ptr<CdcStartupSchemaDecoder>
   createCdcStartupSchemaDecoder(CdcStartupSchemaConfig config) const = 0;
+  [[nodiscard]] virtual std::unique_ptr<BackendCdcDecoder>
+  createCdcDecoder(BackendCdcDecoderConfig config) const = 0;
 };
 
 class BackendAdapterRegistry final {

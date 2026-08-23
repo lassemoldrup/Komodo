@@ -69,6 +69,9 @@ target_link_libraries(blackbox_monitor
 add_executable(blackbox_cdc_replay
   tools/cdc_replay.cpp
 )
+add_executable(blackbox_cdc_codec_replay
+  tools/cdc_codec_replay.cpp
+)
 
 add_executable(blackbox_cdc_ingest
   tools/cdc_ingest.cpp
@@ -91,6 +94,15 @@ target_compile_options(blackbox_cdc_ingest
     -Wsign-conversion
 )
 target_link_libraries(blackbox_cdc_replay PRIVATE blackbox_monitor)
+target_link_libraries(blackbox_cdc_codec_replay PRIVATE blackbox_monitor)
+target_compile_options(blackbox_cdc_codec_replay
+  PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wsign-conversion
+)
 target_compile_options(blackbox_cdc_replay
   PRIVATE
     -Wall
@@ -194,6 +206,22 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     PASS_REGULAR_EXPRESSION "4be5e5dbb70beffd2acb558708e52482d348a0b0e19983dc34c4e775f38f1301"
   )
   add_test(
+    NAME blackbox_yugabytedb_raw_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/yugabytedb_pgoutput_2_5_2_raw_cross_tablet.json
+  )
+  set_tests_properties(blackbox_yugabytedb_raw_fixture_checksum PROPERTIES
+    PASS_REGULAR_EXPRESSION "e60dcbf23cb7e97e7fc899a64fa1455c4ffdb8a5cd71551bf6db197448a43729"
+  )
+  add_test(
+    NAME blackbox_yugabytedb_lifecycle_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/yugabytedb_pgoutput_2_5_2_lifecycle.json
+  )
+  set_tests_properties(blackbox_yugabytedb_lifecycle_fixture_checksum PROPERTIES
+    PASS_REGULAR_EXPRESSION "e6316f6e839bbb675f8f826f30739cc46f3122a77698666e616e8b9fffbcc7d0"
+  )
+  add_test(
     NAME blackbox_tpcc_typed_cdc_fixture_checksum
     COMMAND ${CMAKE_COMMAND} -E sha256sum
             ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures/mariadb_tpcc_typed_rows.json
@@ -224,6 +252,12 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_snapshot_schema.json
             --run-id
             084cc5a1-3cbe-4fef-bb5c-43559a1c13a0
+            --backend
+            mariadb
+            --benchmark
+            ycsb
+            --backend-source-id
+            mariadb-main
   )
   set_tests_properties(blackbox_cdc_replay_snapshot_schema_fixture PROPERTIES
     FIXTURES_REQUIRED captured_mariadb_snapshot_schema_fixture
@@ -240,10 +274,29 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             mariadb
             --benchmark
             ycsb
+            --backend-source-id
+            mariadb-main
   )
   set_tests_properties(blackbox_cdc_replay_fixture PROPERTIES
     FIXTURES_REQUIRED captured_mariadb_full_lifecycle_fixture
     PASS_REGULAR_EXPRESSION "\"completed_transactions\": 11"
+  )
+  add_test(
+    NAME blackbox_cdc_replay_yugabytedb_fixture
+    COMMAND blackbox_cdc_replay
+            --input
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/yugabytedb_pgoutput_2_5_2_lifecycle.json
+            --run-id
+            084cc5a1-3cbe-4fef-bb5c-43559a1c13a0
+            --backend
+            yugabytedb_ysql
+            --benchmark
+            ycsb
+            --backend-source-id
+            yugabytedb_ysql_main
+  )
+  set_tests_properties(blackbox_cdc_replay_yugabytedb_fixture PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"completed_transactions\": 5"
   )
   add_test(
     NAME blackbox_tpcc_cdc_replay_contract

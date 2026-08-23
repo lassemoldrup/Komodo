@@ -17,11 +17,12 @@
 
 namespace {
 
-using blackbox::BackendAdapterRegistry;
 using blackbox::BackendAdapterCatalog;
+using blackbox::BackendAdapterRegistry;
 using blackbox::BackendFactValueRule;
 using blackbox::MonitorError;
 using blackbox::MonitorErrorCode;
+using blackbox::ProtocolRecordParser;
 using Json = nlohmann::json;
 
 [[nodiscard]] Json loadBackendContract(const std::string_view backend) {
@@ -61,14 +62,16 @@ void checkSharedContract(const std::string_view backend) {
   const auto capabilities = adapter.normalizedCapabilities();
   const auto &expected_capabilities = contract.at("normalized_capabilities");
   BLACKBOX_CHECK(capabilities.connector_startup_schema_evidence ==
-                 (expected_capabilities.at("connector_startup_schema_evidence") ==
-                  "required"));
-  BLACKBOX_CHECK(capabilities.full_before_after_images ==
-                 expected_capabilities.at("full_before_after_images").get<bool>());
+                 (expected_capabilities.at(
+                      "connector_startup_schema_evidence") == "required"));
+  BLACKBOX_CHECK(
+      capabilities.full_before_after_images ==
+      expected_capabilities.at("full_before_after_images").get<bool>());
   BLACKBOX_CHECK(capabilities.marker_last ==
                  expected_capabilities.at("marker_last").get<bool>());
-  BLACKBOX_CHECK(capabilities.transaction_framing ==
-                 expected_capabilities.at("transaction_framing").get<std::string>());
+  BLACKBOX_CHECK(
+      capabilities.transaction_framing ==
+      expected_capabilities.at("transaction_framing").get<std::string>());
   BLACKBOX_CHECK(capabilities.commit_order ==
                  expected_capabilities.at("commit_order").get<std::string>());
 
@@ -78,8 +81,9 @@ void checkSharedContract(const std::string_view backend) {
   for (std::size_t index = 0; index < rules.size(); ++index) {
     BLACKBOX_CHECK(rules[index].name ==
                    expected_rules.at(index).at("name").get<std::string>());
-    BLACKBOX_CHECK(ruleName(rules[index].value_rule) ==
-                   expected_rules.at(index).at("value_rule").get<std::string>());
+    BLACKBOX_CHECK(
+        ruleName(rules[index].value_rule) ==
+        expected_rules.at(index).at("value_rule").get<std::string>());
     if (rules[index].value_rule == BackendFactValueRule::Exact) {
       BLACKBOX_CHECK(
           rules[index].expected_value ==
@@ -115,6 +119,47 @@ void checkCatalogOnlySchemaCapability() {
     BLACKBOX_CHECK(false);
   } catch (const blackbox::AdapterSchemaError &) {
   }
+}
+
+void checkYugabyteSchemaAttestationFailures() {
+  const auto backend_directory =
+      std::filesystem::path(BLACKBOX_PROTOCOL_BACKEND_DIR);
+  const auto example_path = backend_directory.parent_path() / "examples" /
+                            "backends" /
+                            "yugabytedb-ysql-schema-attestation.json";
+  std::ifstream input(example_path, std::ios::binary);
+  BLACKBOX_REQUIRE(input.good());
+  Json document;
+  input >> document;
+  const auto parsed =
+      ProtocolRecordParser{}.parseSchemaAttestation(document.dump());
+  const auto &adapter = BackendAdapterRegistry::require("yugabytedb_ysql");
+  const auto &benchmark = blackbox::BenchmarkAdapterRegistry::require("ycsb");
+  adapter.validateSchemaAttestation(parsed, benchmark);
+
+  const auto expect = [&](auto invalid, const MonitorErrorCode expected) {
+    try {
+      adapter.validateSchemaAttestation(invalid, benchmark);
+      BLACKBOX_CHECK(false);
+    } catch (const MonitorError &error) {
+      BLACKBOX_CHECK(error.code() == expected);
+    }
+  };
+  auto missing_fact = parsed;
+  missing_fact.backend_facts.pop_back();
+  expect(std::move(missing_fact), MonitorErrorCode::BackendFactMismatch);
+  auto wrong_fact = parsed;
+  wrong_fact.backend_facts[0].canonical_value = "other";
+  expect(std::move(wrong_fact), MonitorErrorCode::BackendFactMismatch);
+  auto extra_fact = parsed;
+  extra_fact.backend_facts.push_back({.name = "extra", .canonical_value = "x"});
+  expect(std::move(extra_fact), MonitorErrorCode::BackendFactMismatch);
+  auto wrong_table = parsed;
+  wrong_table.tables[0].canonical_table_name = "benchbase.unknown_table";
+  expect(std::move(wrong_table), MonitorErrorCode::SchemaAttestationMismatch);
+  auto wrong_column = parsed;
+  wrong_column.tables[0].columns[0].logical_sql_type = "BIGINT";
+  expect(std::move(wrong_column), MonitorErrorCode::SchemaAttestationMismatch);
 }
 
 class SyntheticBackendAdapter final : public blackbox::BackendAdapter {
@@ -153,8 +198,13 @@ public:
     return delegate_.attestationFactContract();
   }
   [[nodiscard]] std::unique_ptr<blackbox::CdcStartupSchemaDecoder>
-  createCdcStartupSchemaDecoder(blackbox::CdcStartupSchemaConfig) const override {
+  createCdcStartupSchemaDecoder(
+      blackbox::CdcStartupSchemaConfig) const override {
     throw std::runtime_error("injected synthetic decoder failure");
+  }
+  [[nodiscard]] std::unique_ptr<blackbox::BackendCdcDecoder>
+  createCdcDecoder(blackbox::BackendCdcDecoderConfig) const override {
+    throw std::runtime_error("injected synthetic raw decoder failure");
   }
 
 private:
@@ -164,14 +214,21 @@ private:
 void checkSyntheticCatalogSelectionAndFailurePropagation() {
   const auto &mariadb = BackendAdapterRegistry::require("mariadb");
   SyntheticBackendAdapter synthetic(mariadb);
-  const std::array<const blackbox::BackendAdapter *, 2> adapters = {
-      &mariadb, &synthetic};
+  const std::array<const blackbox::BackendAdapter *, 2> adapters = {&mariadb,
+                                                                    &synthetic};
   const BackendAdapterCatalog catalog(adapters);
   BLACKBOX_CHECK(catalog.require("synthetic_backend").name() ==
                  "synthetic_backend");
   try {
     (void)catalog.require("synthetic_backend")
         .createCdcStartupSchemaDecoder({});
+    BLACKBOX_CHECK(false);
+  } catch (const std::runtime_error &error) {
+    BLACKBOX_CHECK(std::string_view(error.what()).find("injected") !=
+                   std::string_view::npos);
+  }
+  try {
+    (void)catalog.require("synthetic_backend").createCdcDecoder({});
     BLACKBOX_CHECK(false);
   } catch (const std::runtime_error &error) {
     BLACKBOX_CHECK(std::string_view(error.what()).find("injected") !=
@@ -186,6 +243,7 @@ int runBackendAdapterTests() {
   checkSharedContract("yugabytedb_ysql");
   checkRegistry();
   checkCatalogOnlySchemaCapability();
+  checkYugabyteSchemaAttestationFailures();
   checkSyntheticCatalogSelectionAndFailurePropagation();
   return 0;
 }

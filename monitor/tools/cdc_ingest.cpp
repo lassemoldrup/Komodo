@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -34,6 +35,9 @@ struct Options {
   std::string redis_host = "host.docker.internal";
   int redis_port = 6379;
   std::string run_id;
+  std::string backend;
+  std::string benchmark;
+  std::string backend_source_id;
   std::chrono::milliseconds overall_timeout{30000};
 };
 
@@ -75,15 +79,24 @@ parseTimeout(const std::string_view value) {
       options.redis_port = parsePort(value);
     } else if (argument == "--run-id") {
       options.run_id = value;
+    } else if (argument == "--backend") {
+      options.backend = value;
+    } else if (argument == "--benchmark") {
+      options.benchmark = value;
+    } else if (argument == "--backend-source-id") {
+      options.backend_source_id = value;
     } else if (argument == "--overall-timeout-ms") {
       options.overall_timeout = parseTimeout(value);
     } else {
       throw std::invalid_argument("unknown argument: " + std::string(argument));
     }
   }
-  if (options.redis_host.empty() || options.run_id.empty()) {
+  if (options.redis_host.empty() || options.run_id.empty() ||
+      options.backend.empty() || options.benchmark.empty() ||
+      options.backend_source_id.empty()) {
     throw std::invalid_argument(
-        "--run-id and a nonempty Redis host are required");
+        "--run-id, --backend, --benchmark, --backend-source-id, and a "
+        "nonempty Redis host are required");
   }
   return options;
 }
@@ -130,6 +143,15 @@ using RedisContextPtr = std::unique_ptr<redisContext, RedisContextDeleter>;
 }
 
 int run(const Options &options) {
+  const auto &backend =
+      blackbox::BackendAdapterRegistry::require(options.backend);
+  const auto &benchmark =
+      blackbox::BenchmarkAdapterRegistry::require(options.benchmark);
+  std::vector<std::string> application_tables;
+  application_tables.reserve(benchmark.tables().size());
+  for (const auto &table : benchmark.tables()) {
+    application_tables.emplace_back(table.name);
+  }
   auto context = connectRedis(options);
   const std::string client_stream = "blackbox:client:" + options.run_id;
   BlockingRedisReader reader(
@@ -143,11 +165,11 @@ int run(const Options &options) {
       1000U, std::chrono::milliseconds(100));
   DebeziumTxnAssembler assembler(DebeziumAssemblerConfig{
       .run_id = options.run_id,
-      .backend_source_id = "mariadb-main",
-      .debezium_version = "3.6.1.Final",
-      .backend_adapter = &blackbox::BackendAdapterRegistry::require("mariadb"),
-      .benchmark_adapter = &blackbox::BenchmarkAdapterRegistry::require("ycsb"),
-      .application_tables = {"benchbase.usertable"},
+      .backend_source_id = options.backend_source_id,
+      .debezium_version = std::string(backend.connectorVersion()),
+      .backend_adapter = &backend,
+      .benchmark_adapter = &benchmark,
+      .application_tables = std::move(application_tables),
       .transaction_marker_table = "benchbase.session_txn",
       .run_fence_table = "benchbase.checker_run_fence",
   });

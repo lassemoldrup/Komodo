@@ -37,6 +37,7 @@ class BackendSqlRendererTest(unittest.TestCase):
         )[0]["sql"]
         self.assertIn("TO_BASE64", mariadb)
         self.assertIn("convert_to", yugabyte)
+        self.assertIn("replace(replace(encode", yugabyte)
         self.assertIn('FROM "benchbase"."usertable"', yugabyte)
         self.assertNotIn("TO_BASE64", yugabyte)
         logical_source = (

@@ -294,6 +294,7 @@ def encode_ycsb_value(fields: list[Any]) -> bytes:
             result.extend(u8(0))
             continue
         require(isinstance(field, str), f"FIELD{index} is not string/null")
+        require(len(field) <= 100, f"FIELD{index} exceeds VARCHAR(100)")
         encoded = field.encode("utf-8", "strict")
         result.extend(u8(1))
         result.extend(lp(encoded))
