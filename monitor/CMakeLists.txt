@@ -82,9 +82,13 @@ add_executable(blackbox_prefix_ingest
 add_executable(blackbox_run_monitor
   tools/monitor.cpp
 )
+add_executable(blackbox_evidence_replay
+  tools/evidence_replay.cpp
+)
 target_link_libraries(blackbox_cdc_ingest PRIVATE blackbox_monitor)
 target_link_libraries(blackbox_prefix_ingest PRIVATE blackbox_monitor)
 target_link_libraries(blackbox_run_monitor PRIVATE blackbox_monitor)
+target_link_libraries(blackbox_evidence_replay PRIVATE blackbox_monitor)
 target_compile_options(blackbox_cdc_ingest
   PRIVATE
     -Wall
@@ -120,6 +124,14 @@ target_compile_options(blackbox_prefix_ingest
     -Wsign-conversion
 )
 target_compile_options(blackbox_run_monitor
+  PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wconversion
+    -Wsign-conversion
+)
+target_compile_options(blackbox_evidence_replay
   PRIVATE
     -Wall
     -Wextra

@@ -1445,6 +1445,20 @@ int run(const Options &options) {
         publishPending(controller, status_writer, terminal_payload);
       }
     } catch (const RedisReaderError &error) {
+      if (std::chrono::steady_clock::now() >= evidence_deadline) {
+        try {
+          assembler.finish();
+        } catch (const CdcAssemblerError &assembler_error) {
+          controller.noteExternalFailure(
+              DiagnosticCategory::Protocol,
+              std::string(blackbox::toString(assembler_error.code())),
+              assembler_error.what());
+        }
+        controller.forceTimeoutFinal();
+        measurement.capture(assembler, controller);
+        publishPending(controller, status_writer, terminal_payload);
+        continue;
+      }
       const auto failure = classifyReaderFailure(error);
       controller.noteExternalFailure(failure.category, failure.code,
                                      failure.message);

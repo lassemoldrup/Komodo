@@ -82,7 +82,8 @@ test-lifecycle: test-monitor
 	python3 protocol/tools/verify_protocol.py
 	shellcheck scripts/*.sh tests/*.sh
 	bash -n scripts/*.sh tests/*.sh
-	python3 -m unittest discover -s tests -p 'test_*.py' -v
+	BLACKBOX_EVIDENCE_REPLAY_BIN=$(MONITOR_BUILD_DIR)/blackbox_evidence_replay \
+		python3 -m unittest discover -s tests -p 'test_*.py' -v
 	./tests/test_live_lock.sh
 	bash ./tests/test_backend_driver_contract.sh
 	./tests/test_e2e_lifecycle.sh

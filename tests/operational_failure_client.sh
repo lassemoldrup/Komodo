@@ -6,6 +6,32 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/scripts/blackbox_lifecycle.sh"
 
 case "${1:-}" in
+  restore_redis)
+    lifecycle_log=${2:?lifecycle log is required}
+    evidence_file=${3:?OOM evidence file is required}
+    payload_file=${4:?RunFailed payload file is required}
+    expected_maxmemory=${5:?restored maxmemory is required}
+    deadline=$((SECONDS + 30))
+    while ! grep -Eq \
+        'Redis (rejected required publication|returned an invalid stream ID)' \
+        "$lifecycle_log" 2>/dev/null; do
+      (( SECONDS < deadline )) || {
+        printf 'restore_error=lifecycle Redis OOM was not observed\n' >>"$evidence_file"
+        exit 1
+      }
+      sleep 0.05
+    done
+    printf 'lifecycle_oom_observed_ns=%s\n' "$(date +%s%N)" >>"$evidence_file"
+    blackbox_redis --raw CONFIG SET maxmemory "$expected_maxmemory" \
+      >>"$evidence_file" 2>&1
+    printf 'restored_maxmemory=%s\n' \
+      "$(blackbox_redis_config_value maxmemory)" >>"$evidence_file"
+    run_failed_payload=$(<"$payload_file")
+    printf 'run_failed_stream_id=%s\n' \
+      "$(blackbox_publish_record "$(blackbox_client_stream)" "$run_failed_payload")" \
+      >>"$evidence_file"
+    printf 'restore_completed_ns=%s\n' "$(date +%s%N)" >>"$evidence_file"
+    ;;
   load)
     exec "$ROOT/tests/semantic_client.sh" load
     ;;
@@ -53,6 +79,45 @@ case "${1:-}" in
           "$("$BLACKBOX_DOCKER" inspect --format '{{.State.Paused}}' "$BLACKBOX_CONNECTOR_CONTAINER")" \
           >>"$stall_evidence"
         printf 'pause_completed_ns=%s\n' "$(date +%s%N)" >>"$stall_evidence"
+        ;;
+      redis_oom)
+        [[ $BLACKBOX_BACKEND == yugabytedb_ysql ]]
+        : "${BLACKBOX_CORRECTNESS_RUN_OUTPUT:?missing correctness output directory}"
+        : "${BLACKBOX_ACTIVE_RUN_ID:?missing active run ID}"
+        expected_maxmemory=268435456
+        evidence_file="$BLACKBOX_CORRECTNESS_RUN_OUTPUT/redis_oom_invalid-operation.txt"
+        payload_file="$BLACKBOX_CORRECTNESS_RUN_OUTPUT/redis_oom_invalid-run-failed.json"
+        lifecycle_log="$BLACKBOX_CORRECTNESS_RUN_OUTPUT/redis_oom_invalid.log"
+        policy=$(blackbox_redis_config_value maxmemory-policy)
+        [[ $policy == noeviction ]]
+        used_memory=$(blackbox_redis --raw INFO memory | tr -d '\r' |
+          awk -F: '$1 == "used_memory" {print $2}')
+        [[ $used_memory =~ ^[1-9][0-9]*$ ]]
+        python3 "$BLACKBOX_RECORD_TOOL" run-failed \
+          --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
+          --phase COORDINATOR \
+          --reason-code RESOURCE_EXHAUSTED \
+          --diagnostic "Redis server rejected an audited lifecycle XADD under noeviction" \
+          >"$payload_file"
+        {
+          printf 'maxmemory_policy=%s\n' "$policy"
+          printf 'used_memory_before_oom=%s\n' "$used_memory"
+          printf 'oom_maxmemory=1\n'
+          printf 'oom_injected_ns=%s\n' "$(date +%s%N)"
+        } >"$evidence_file"
+        blackbox_redis --raw CONFIG SET maxmemory 1 >>"$evidence_file" 2>&1
+        set +e
+        blackbox_redis --raw XADD "blackbox:oom-probe:$BLACKBOX_ACTIVE_RUN_ID" \
+          '*' payload audited-lifecycle-oom \
+          >>"$evidence_file" 2>&1
+        probe_status=$?
+        set -e
+        printf 'probe_exit_status=%s\n' "$probe_status" >>"$evidence_file"
+        grep -q 'OOM command not allowed' "$evidence_file"
+        setsid bash "$ROOT/tests/operational_failure_client.sh" restore_redis \
+          "$lifecycle_log" "$evidence_file" "$payload_file" "$expected_maxmemory" \
+          >"$BLACKBOX_CORRECTNESS_RUN_OUTPUT/redis_oom_invalid-restore.log" 2>&1 &
+        printf 'restore_helper_pid=%s\n' "$!" >>"$evidence_file"
         ;;
       *)
         echo "unsupported operational failure kind: $failure" >&2

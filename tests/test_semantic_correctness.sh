@@ -15,6 +15,7 @@ COMPOSE=(
 CLIENT="$ROOT/tests/semantic_client.sh"
 OPERATIONAL_CLIENT="$ROOT/tests/operational_failure_client.sh"
 YUGABYTEDB_YCSB_VALIDATOR="$ROOT/tests/verify_yugabytedb_ysql_ycsb_semantic.py"
+BLACKBOX_EVIDENCE_REPLAY_BIN=${BLACKBOX_EVIDENCE_REPLAY_BIN:-}
 OUTPUT_ROOT=${BLACKBOX_CORRECTNESS_OUTPUT_ROOT:-/tmp}
 CASE_TIMEOUT_SECONDS=${BLACKBOX_CORRECTNESS_CASE_TIMEOUT_SECONDS:-600}
 CASE_KILL_AFTER_SECONDS=${BLACKBOX_CORRECTNESS_CASE_KILL_AFTER_SECONDS:-10}
@@ -43,6 +44,10 @@ require_positive_integer() {
 require_harness_configuration() {
   : "${BLACKBOX_MONITOR_BIN:?set BLACKBOX_MONITOR_BIN to blackbox_run_monitor}"
   [[ -x $BLACKBOX_MONITOR_BIN ]]
+  if [[ -z $BLACKBOX_EVIDENCE_REPLAY_BIN ]]; then
+    BLACKBOX_EVIDENCE_REPLAY_BIN="$(dirname "$BLACKBOX_MONITOR_BIN")/blackbox_evidence_replay"
+  fi
+  [[ -x $BLACKBOX_EVIDENCE_REPLAY_BIN ]]
   [[ -x $CLIENT ]]
   [[ -f $OPERATIONAL_CLIENT ]]
   if [[ -n ${BLACKBOX_BENCHBASE_DIST:-} ]]; then
@@ -517,6 +522,32 @@ assert_terminal_status() {
             (["RECONCILIATION_MISMATCH", "SCHEMA_ATTESTATION_MISSING",
               "UNMARKED_APPLICATION_TRANSACTION"] | sort)
         ' <<<"$final_status" >/dev/null
+      elif [[ $failure_kind == connector_stall ]]; then
+        jq -e '
+          .checker_observation != "VIOLATION_OBSERVED" and
+          .reconciliation.evidence_reconciled == false and
+          .reconciliation.startup_schema_attested == true and
+          .reconciliation.final_schema_attested == true and
+          .reconciliation.end_fence_seen == false and
+          .reconciliation.accepted_client_transactions == 2 and
+          .reconciliation.joined_workload_transactions == 2 and
+          .reconciliation.ambiguous_attempts == 0 and
+          any(.diagnostics[]; .code == "FENCE_MISSING") and
+          any(.diagnostics[]; .code == "RECONCILIATION_MISMATCH")
+        ' <<<"$final_status" >/dev/null
+      elif [[ $failure_kind == redis_oom ]]; then
+        jq -e '
+          .checker_observation != "VIOLATION_OBSERVED" and
+          .reconciliation.evidence_reconciled == false and
+          .reconciliation.startup_schema_attested == true and
+          .reconciliation.final_schema_attested == false and
+          .reconciliation.accepted_client_transactions == 2 and
+          .reconciliation.joined_workload_transactions == 2 and
+          .reconciliation.ambiguous_attempts == 0 and
+          any(.diagnostics[]; .code == "RESOURCE_EXHAUSTED") and
+          any(.diagnostics[]; .code == "SCHEMA_ATTESTATION_MISSING") and
+          any(.diagnostics[]; .code == "RECONCILIATION_MISMATCH")
+        ' <<<"$final_status" >/dev/null
       else
         jq -e '
           .checker_observation != "VIOLATION_OBSERVED" and
@@ -581,9 +612,15 @@ run_case_body() {
     printf -v workload_command '%q run' "$CLIENT"
   fi
 
-  local status status_timeout_seconds=120 stall_run_id=
+  local status status_timeout_seconds=120 monitor_timeout_seconds='' stall_run_id=''
+  local require_terminal_invalid=0
   if [[ $failure_kind == connector_stall ]]; then
-    status_timeout_seconds=8
+    status_timeout_seconds=40
+    monitor_timeout_seconds=20
+  elif [[ $failure_kind == redis_oom ]]; then
+    status_timeout_seconds=50
+    monitor_timeout_seconds=30
+    require_terminal_invalid=1
   fi
   trap 'terminate_case_session HUP 129' HUP
   trap 'terminate_case_session INT 130' INT
@@ -607,6 +644,8 @@ run_case_body() {
   BLACKBOX_LOADER_TIMEOUT_SECONDS=30 \
   BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=60 \
   BLACKBOX_STATUS_TIMEOUT_SECONDS=$status_timeout_seconds \
+  BLACKBOX_MONITOR_TIMEOUT_SECONDS=$monitor_timeout_seconds \
+  BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE=$require_terminal_invalid \
   BLACKBOX_MONITOR_BIN=$BLACKBOX_MONITOR_BIN \
     setsid "$ROOT/scripts/e2e.sh" >"$log_file" 2>&1 &
   ACTIVE_CASE_SESSION=$!
@@ -632,6 +671,19 @@ run_case_body() {
       >>"$RUN_OUTPUT/connector_stall_invalid-operation.txt"
     printf 'unpause_completed_ns=%s\n' "$(date +%s%N)" \
       >>"$RUN_OUTPUT/connector_stall_invalid-operation.txt"
+  elif [[ $failure_kind == redis_oom ]]; then
+    grep -q '^maxmemory_policy=noeviction$' \
+      "$RUN_OUTPUT/redis_oom_invalid-operation.txt"
+    grep -q 'OOM command not allowed' \
+      "$RUN_OUTPUT/redis_oom_invalid-operation.txt"
+    grep -q '^lifecycle_oom_observed_ns=' \
+      "$RUN_OUTPUT/redis_oom_invalid-operation.txt"
+    grep -q '^restored_maxmemory=268435456$' \
+      "$RUN_OUTPUT/redis_oom_invalid-operation.txt"
+    grep -Eq '^run_failed_stream_id=[0-9]+-[0-9]+$' \
+      "$RUN_OUTPUT/redis_oom_invalid-operation.txt"
+    grep -q '^restore_completed_ns=' \
+      "$RUN_OUTPUT/redis_oom_invalid-operation.txt"
   fi
 
   if (( status != expected_exit )); then
@@ -689,31 +741,6 @@ run_case_body() {
       >"$RUN_OUTPUT/$case_name-connector-identity.txt"
   fi
   if ! final_status=$(extract_final_status "$log_file" 2>/dev/null); then
-    if [[ $failure_kind == connector_stall ]]; then
-      local final_count
-      final_count=$(jq \
-        '[.[] | (.[1][1] | fromjson) | select(.lifecycle_state == "FINAL")] | length' \
-        "$status_file")
-      [[ $final_count == 0 ]]
-      jq -e '
-        [.[] | (.[1][1] | fromjson) | .lifecycle_state] as $states |
-        ($states | index("START_FENCE_SEEN")) != null and
-        ($states | index("LOAD_FINISHED_SEEN")) != null
-      ' "$status_file" >/dev/null
-      grep -q 'timed out waiting for monitor lifecycle state FINAL' "$log_file"
-      grep -q '^admitted_slot_active=1$' \
-        "$RUN_OUTPUT/connector_stall_invalid-operation.txt"
-      grep -q '^paused_state=true$' \
-        "$RUN_OUTPUT/connector_stall_invalid-operation.txt"
-      grep -q '^unpause_completed_ns=' \
-        "$RUN_OUTPUT/connector_stall_invalid-operation.txt"
-      assert_client_evidence \
-        "$client_file" "$mode" "$expected_first" "$expected_second" false
-      assert_database_state "$mode"
-      printf 'semantic case %s: outcome=INVALID reason=post-admission-connector-stall run_id=%s\n' \
-        "$case_name" "$run_id"
-      return 0
-    fi
     final_status=$(jq -cer '
       [.[] | (.[1][1] | fromjson) | select(.lifecycle_state == "FINAL")] |
       if length == 1 then .[0]
@@ -807,11 +834,14 @@ run_all_cases() {
       ycsb_fractured_read_probe external_writer
     run_case live_ddl_invalid REPEATABLE_READ clean '' INVALID 1 old old \
       ycsb_fractured_read_probe live_ddl
-    run_case connector_stall_invalid REPEATABLE_READ clean '' INVALID 1 old old \
+    run_case connector_stall_invalid REPEATABLE_READ clean '' INVALID 4 old old \
       ycsb_fractured_read_probe connector_stall
+    run_case redis_oom_invalid REPEATABLE_READ clean '' INVALID 1 old old \
+      ycsb_fractured_read_probe redis_oom
     run_bounded_diagnostic python3 "$YUGABYTEDB_YCSB_VALIDATOR" \
       --directory "$RUN_OUTPUT" \
       --provenance "$RUN_OUTPUT/provenance.lock.json" \
+      --evidence-replay-bin "$BLACKBOX_EVIDENCE_REPLAY_BIN" \
       --output "$RUN_OUTPUT/yugabytedb-ysql-ycsb-semantic-report.json"
   else
     run_case clean_repeatable_read REPEATABLE_READ clean '' PASS 0 old old \

@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import struct
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,7 @@ TEST_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(TEST_ROOT.parent / "protocol" / "tools"))
 sys.path.insert(0, str(TEST_ROOT.parent / "scripts"))
 
-from blackbox_record import canonical_attestation_digest  # noqa: E402
+from blackbox_record import bootstrap_digest, canonical_attestation_digest  # noqa: E402
 from tpcc_client_fixture import read_digest, rolling_digest  # noqa: E402
 from yugabytedb_ysql_acceptance_evidence import (
     cdc_frames,
@@ -41,6 +43,206 @@ def records(path: Path, *, named_payload: bool = True) -> list[dict[str, Any]]:
             require(fields[0] == "payload", f"malformed payload in {path}")
         result.append(json.loads(fields[1]))
     return result
+
+
+def canonical_ycsb_key(key: int) -> bytes:
+    def length_prefixed(value: bytes) -> bytes:
+        return struct.pack(">I", len(value)) + value
+
+    return (
+        length_prefixed(b"benchbase")
+        + length_prefixed(b"usertable")
+        + struct.pack(">i", key)
+    )
+
+
+def canonical_ycsb_value(image: dict[str, Any]) -> bytes:
+    expected = {"ycsb_key", *(f"field{index}" for index in range(1, 11))}
+    require(set(image) == expected, "bootstrap YCSB row shape differs")
+    result = bytearray()
+    for index in range(1, 11):
+        value = image[f"field{index}"]
+        if value is None:
+            result.append(0)
+            continue
+        require(isinstance(value, str) and len(value) <= 100,
+                "bootstrap YCSB field differs")
+        encoded = value.encode("utf-8", "strict")
+        result.append(1)
+        result.extend(struct.pack(">I", len(encoded)))
+        result.extend(encoded)
+    return bytes(result)
+
+
+def validate_bootstrap_and_sessions(
+    case: str,
+    run_id: str,
+    client_records: list[dict[str, Any]],
+    raw_frames: list[list[dict[str, Any]]],
+    expected_sessions: list[str],
+) -> dict[str, Any]:
+    bootstrap = [
+        record for record in client_records if record.get("kind") == "bootstrap_manifest"
+    ]
+    require(len(bootstrap) == 1 and bootstrap[0].get("run_id") == run_id,
+            f"{case} BootstrapManifest identity differs")
+    snapshot_rows: list[dict[str, Any]] = []
+    bootstrap_open = False
+    for frame in raw_frames:
+        fence_phases = [
+            row.get("after", {}).get("phase")
+            for row in frame
+            if row.get("source", {}).get("table") == "checker_run_fence"
+            and isinstance(row.get("after"), dict)
+        ]
+        if fence_phases == ["RUN_START"]:
+            bootstrap_open = True
+            continue
+        if fence_phases == ["LOAD_FINISHED"]:
+            bootstrap_open = False
+            continue
+        if bootstrap_open:
+            require(
+                all(
+                    row.get("source", {}).get("schema") == "benchbase"
+                    and row.get("source", {}).get("table") == "usertable"
+                    and row.get("op") in {"c", "r"}
+                    for row in frame
+                ),
+                f"{case} bootstrap CDC transaction differs",
+            )
+            snapshot_rows.extend(frame)
+    canonical_rows: list[tuple[bytes, bytes]] = []
+    for row in snapshot_rows:
+        after = row.get("after")
+        require(isinstance(after, dict) and type(after.get("ycsb_key")) is int,
+                f"{case} bootstrap row image differs")
+        canonical_rows.append(
+            (canonical_ycsb_key(after["ycsb_key"]), canonical_ycsb_value(after))
+        )
+    row_count, state_digest = bootstrap_digest(canonical_rows)
+    require(
+        row_count > 0
+        and bootstrap[0].get("table_row_counts")
+        == [{"table": "benchbase.usertable", "row_count": row_count}]
+        and bootstrap[0].get("canonical_state_digest") == state_digest,
+        f"{case} BootstrapManifest count or digest differs from raw CDC",
+    )
+
+    clients = [record for record in client_records if record.get("kind") == "client_txn"]
+    done_records = [
+        record for record in client_records if record.get("kind") == "session_done"
+    ]
+    require(len(done_records) == len(expected_sessions), f"{case} SessionDone count differs")
+    done_by_session = {record.get("session_id"): record for record in done_records}
+    require(len(done_by_session) == len(done_records)
+            and set(done_by_session) == set(expected_sessions),
+            f"{case} SessionDone roster differs")
+    for session in expected_sessions:
+        done = done_by_session[session]
+        session_clients = [
+            record for record in clients if record.get("session_id") == session
+        ]
+        client_indexes = [
+            index for index, record in enumerate(client_records)
+            if record.get("kind") == "client_txn" and record.get("session_id") == session
+        ]
+        done_index = next(
+            index for index, record in enumerate(client_records)
+            if record.get("kind") == "session_done" and record.get("session_id") == session
+        )
+        require(all(index < done_index for index in client_indexes),
+                f"{case} ClientTxn occurs after SessionDone for {session}")
+        sequences = [record.get("session_seq") for record in session_clients]
+        require(
+            all(type(sequence) is int and sequence > 0 for sequence in sequences)
+            and sequences == sorted(set(sequences))
+            and all(sequence <= done.get("final_session_seq", 0) for sequence in sequences)
+            and done.get("run_id") == run_id
+            and done.get("final_session_seq") == done.get("logical_transactions_started")
+            and done.get("published_transactions") == len(session_clients)
+            and done.get("published_transactions") == done.get("successful_transactions")
+            and done.get("logical_transactions_started")
+            == done.get("successful_transactions") + done.get("terminal_aborted_transactions")
+            and done.get("physical_attempts_started")
+            == done.get("successful_transactions")
+            + done.get("definitively_aborted_attempts")
+            + done.get("ambiguous_attempts")
+            and done.get("definitively_aborted_attempts")
+            == done.get("retry_attempts") + done.get("terminal_aborted_transactions")
+            and done.get("retry_attempts")
+            == done.get("physical_attempts_started")
+            - done.get("logical_transactions_started")
+            - done.get("ambiguous_attempts")
+            and done.get("ambiguous_attempts") == 0
+            and rolling_digest(run_id, session, session_clients)
+            == done.get("rolling_correlation_digest"),
+            f"{case} complete SessionDone ledger differs for {session}",
+        )
+    return {
+        "bootstrap_row_count": row_count,
+        "bootstrap_state_digest": state_digest,
+        "completed_sessions": len(done_records),
+    }
+
+
+def production_replay(
+    replay_bin: Path,
+    directory: Path,
+    case: str,
+    captured_final: dict[str, Any],
+    *,
+    cdc_name: str | None = None,
+) -> dict[str, Any]:
+    client_path = directory / f"{case}-client.json"
+    cdc_path = directory / (cdc_name or f"{case}-cdc.json")
+    client_records = records(client_path)
+    manifests = [record for record in client_records if record.get("kind") == "run_manifest"]
+    require(len(manifests) == 1, f"{case} RunManifest count differs before replay")
+    manifest = manifests[0]
+    run_id = manifest.get("run_id")
+    require(isinstance(run_id, str), f"{case} RunManifest run ID differs before replay")
+    tables = sorted(
+        [*manifest.get("application_table_allowlist", []),
+         *manifest.get("control_table_allowlist", []),
+         manifest.get("transaction_marker_table")]
+    )
+    membership_digest = hashlib.sha256(
+        "".join(f"{table}\n" for table in tables).encode("ascii")
+    ).hexdigest()
+    replica_digest = hashlib.sha256(
+        "".join(f"{table}\tf\n" for table in tables).encode("ascii")
+    ).hexdigest()
+    compact_run_id = run_id.replace("-", "")
+    command = [
+        str(replay_bin),
+        "--client-input", str(client_path),
+        "--cdc-input", str(cdc_path),
+        "--expected-backend-fact",
+        f"publication_name=blackbox_{compact_run_id}_publication",
+        "--expected-backend-fact",
+        f"slot_name=blackbox_{compact_run_id}_slot",
+        "--expected-backend-fact",
+        f"publication_membership_sha256={membership_digest}",
+        "--expected-backend-fact",
+        f"replica_identity_full_tables_sha256={replica_digest}",
+    ]
+    result = subprocess.run(command, text=True, capture_output=True)
+    require(result.returncode == 0,
+            f"{case} production evidence replay failed: {result.stderr.strip()}")
+    replay = json.loads(result.stdout)
+    require(
+        replay.get("kind") == "production_evidence_replay"
+        and replay.get("run_id") == run_id
+        and replay.get("final_status") == captured_final,
+        f"{case} captured FINAL differs from production decoder/checker replay",
+    )
+    return {
+        "outcome": replay["final_status"]["outcome"],
+        "checker_observation": replay["final_status"]["checker_observation"],
+        "reconciliation": replay["final_status"]["reconciliation"],
+        "completed_transactions": len(replay["transactions"]),
+    }
 
 
 def independently_reconcile_case(
@@ -140,6 +342,9 @@ def independently_reconcile_case(
         )
 
     raw_frames = cdc_frames(directory / f"{case}-cdc.json")
+    ledger_audit = validate_bootstrap_and_sessions(
+        case, run_id, client_records, raw_frames, expected_sessions
+    )
     fence_phases: list[str] = []
     marker_correlations: list[tuple[str, int]] = []
     for frame in raw_frames:
@@ -174,7 +379,8 @@ def independently_reconcile_case(
         and reconciliation.get("schema_attestation_digest")
         == startup["canonical_attestation_digest"]
         and reconciliation.get("end_fence_seen") is True
-        and reconciliation.get("evidence_reconciled") is expect_reconciled,
+        and reconciliation.get("evidence_reconciled") is expect_reconciled
+        and reconciliation.get("ambiguous_attempts") == 0,
         f"{case} independent/final reconciliation differs",
     )
     if expect_reconciled:
@@ -192,6 +398,7 @@ def independently_reconcile_case(
         "client_correlations": client_correlations,
         "marker_correlations": marker_correlations,
         "schema_attestation_digest": startup["canonical_attestation_digest"],
+        "bootstrap_and_session_ledger": ledger_audit,
     }
 
 
@@ -204,6 +411,12 @@ def case_final_status(directory: Path, case: str, outcome: str) -> dict[str, Any
     require(len(finals) == 1, f"{case} final-status count differs")
     final = finals[0]
     require(final.get("outcome") == outcome, f"{case} outcome differs")
+    expected_diagnostics = set() if outcome == "PASS" else {"VIOLATION_OBSERVED"}
+    require(
+        {item.get("code") for item in final.get("diagnostics", [])}
+        == expected_diagnostics,
+        f"{case} final diagnostic priority differs",
+    )
     reconciliation = final.get("reconciliation", {})
     require(reconciliation.get("evidence_reconciled") is True, f"{case} did not reconcile")
     require(reconciliation.get("bootstrap_manifest_validated") is True, f"{case} bootstrap differs")
@@ -215,6 +428,7 @@ def case_final_status(directory: Path, case: str, outcome: str) -> dict[str, Any
     require(reconciliation.get("joined_workload_transactions") == 2, f"{case} joins differ")
     require(reconciliation.get("unmatched_client_records") == 0, f"{case} unmatched clients")
     require(reconciliation.get("unmatched_workload_cdc_slots") == 0, f"{case} unmatched CDC")
+    require(reconciliation.get("ambiguous_attempts") == 0, f"{case} ambiguity differs")
     return final
 
 
@@ -367,18 +581,40 @@ def operational_invalid_status(
 def connector_stall_status(directory: Path) -> dict[str, Any]:
     case = "connector_stall_invalid"
     status_records = records(directory / f"{case}-stalled-status.json")
+    captured_status_records = records(directory / f"{case}-status.json")
+    finals = [
+        record for record in status_records if record.get("lifecycle_state") == "FINAL"
+    ]
+    captured_finals = [
+        record
+        for record in captured_status_records
+        if record.get("lifecycle_state") == "FINAL"
+    ]
     require(
-        not any(record.get("lifecycle_state") == "FINAL" for record in status_records),
-        "connector-stall case unexpectedly reached a final verdict",
+        len(finals) == len(captured_finals) == 1 and finals[0] == captured_finals[0],
+        "connector-stall case lacks one authoritative captured FINAL",
+    )
+    final = finals[0]
+    reconciliation = final.get("reconciliation", {})
+    diagnostic_codes = {item.get("code") for item in final.get("diagnostics", [])}
+    require(
+        final.get("outcome") == "INVALID"
+        and final.get("checker_observation") != "VIOLATION_OBSERVED"
+        and reconciliation.get("evidence_reconciled") is False
+        and reconciliation.get("startup_schema_attested") is True
+        and reconciliation.get("final_schema_attested") is True
+        and reconciliation.get("end_fence_seen") is False
+        and reconciliation.get("accepted_client_transactions") == 2
+        and reconciliation.get("joined_workload_transactions") == 2
+        and reconciliation.get("ambiguous_attempts") == 0
+        and "FENCE_MISSING" in diagnostic_codes
+        and "RECONCILIATION_MISMATCH" in diagnostic_codes,
+        "connector-stall authoritative INVALID differs",
     )
     lifecycle_states = [record.get("lifecycle_state") for record in status_records]
     require(
         "START_FENCE_SEEN" in lifecycle_states and "LOAD_FINISHED_SEEN" in lifecycle_states,
         "connector stall did not occur after connector admission and bootstrap",
-    )
-    require(
-        all(record.get("outcome") == "RUNNING" for record in status_records),
-        "connector-stall status stream contains an unsupported terminal outcome",
     )
 
     operation: dict[str, str] = {}
@@ -402,8 +638,9 @@ def connector_stall_status(directory: Path) -> dict[str, Any]:
     log = (directory / f"{case}.log").read_text(encoding="utf-8")
     require(
         "waiting for final monitor result" in log
-        and "timed out waiting for monitor lifecycle state FINAL" in log,
-        "connector-stall run did not fail closed at the final boundary",
+        and '"lifecycle_state":"FINAL"' in log
+        and '"outcome":"INVALID"' in log,
+        "connector-stall run did not emit its authoritative FINAL INVALID",
     )
 
     client_records = records(directory / f"{case}-client.json")
@@ -454,7 +691,57 @@ def connector_stall_status(directory: Path) -> dict[str, Any]:
         fence_phases == ["RUN_START", "LOAD_FINISHED"],
         "connector-stall capture did not stop before the committed END fence",
     )
-    return {"run_id": run_id, "outcome": "INVALID", "reason": "CONNECTOR_STALL"}
+    return final
+
+
+def redis_oom_status(directory: Path) -> dict[str, Any]:
+    case = "redis_oom_invalid"
+    finals = [
+        record
+        for record in records(directory / f"{case}-status.json")
+        if record.get("lifecycle_state") == "FINAL"
+    ]
+    require(len(finals) == 1, "Redis OOM case lacks one authoritative FINAL")
+    final = finals[0]
+    reconciliation = final.get("reconciliation", {})
+    diagnostic_codes = {item.get("code") for item in final.get("diagnostics", [])}
+    require(
+        final.get("outcome") == "INVALID"
+        and final.get("checker_observation") != "VIOLATION_OBSERVED"
+        and reconciliation.get("evidence_reconciled") is False
+        and reconciliation.get("startup_schema_attested") is True
+        and reconciliation.get("final_schema_attested") is False
+        and reconciliation.get("accepted_client_transactions") == 2
+        and reconciliation.get("joined_workload_transactions") == 2
+        and reconciliation.get("ambiguous_attempts") == 0
+        and {"RESOURCE_EXHAUSTED", "SCHEMA_ATTESTATION_MISSING",
+             "RECONCILIATION_MISMATCH"} <= diagnostic_codes,
+        "Redis OOM authoritative INVALID differs",
+    )
+    operation = (directory / f"{case}-operation.txt").read_text(encoding="utf-8")
+    require(
+        "maxmemory_policy=noeviction\n" in operation
+        and "oom_maxmemory=1\n" in operation
+        and "OOM command not allowed when used memory > 'maxmemory'." in operation
+        and "lifecycle_oom_observed_ns=" in operation
+        and "restored_maxmemory=268435456\n" in operation
+        and "run_failed_stream_id=" in operation
+        and "restore_completed_ns=" in operation,
+        "Redis OOM server/lifecycle evidence differs",
+    )
+    failures = [
+        record
+        for record in records(directory / f"{case}-client.json")
+        if record.get("kind") == "run_failed"
+    ]
+    require(
+        len(failures) == 2
+        and all(record.get("run_id") == final.get("run_id") for record in failures)
+        and {record.get("reason_code") for record in failures}
+        == {"RESOURCE_EXHAUSTED", "SCHEMA_ATTESTATION_MISSING"},
+        "Redis OOM RunFailed evidence differs",
+    )
+    return final
 
 
 def first_field(record: dict[str, Any]) -> str:
@@ -473,6 +760,66 @@ def reader_values(directory: Path, case: str) -> list[str]:
     ]
     require(len(clients) == 1, f"{case} reader ClientTxn count differs")
     return [first_field(read) for read in clients[0]["reads"]]
+
+
+def validate_probe_reads(directory: Path, case: str) -> None:
+    clients = {
+        record["session_id"]: record
+        for record in records(directory / f"{case}-client.json")
+        if record.get("kind") == "client_txn"
+    }
+    if case == "definitive_retry":
+        expected = {
+            "ycsb/worker/1": ([1], ["old"], "ycsb_update"),
+            "ycsb/worker/2": ([1], ["winner"], "ycsb_update"),
+        }
+    elif case == "fractured_repeatable_read":
+        expected = {
+            "ycsb/worker/1": ([1, 2, 2], ["old", "old", "old"],
+                              "si_fractured_read_probe"),
+            "ycsb/worker/2": ([], [], "si_fractured_read_probe"),
+        }
+    elif case == "fractured_read_committed":
+        expected = {
+            "ycsb/worker/1": ([1, 2, 2], ["old", "old", "new"],
+                              "si_fractured_read_probe"),
+            "ycsb/worker/2": ([], [], "si_fractured_read_probe"),
+        }
+    elif case == "dropped_client_record":
+        expected = {
+            "ycsb/worker/2": ([1, 2], ["old", "old"],
+                              "si_fractured_read_probe"),
+        }
+    else:
+        expected = {
+            "ycsb/worker/1": ([1, 2], ["old", "old"],
+                              "si_fractured_read_probe"),
+            "ycsb/worker/2": ([1, 2], ["old", "old"],
+                              "si_fractured_read_probe"),
+        }
+    require(set(clients) == set(expected), f"{case} probe client roster differs")
+    for session, (expected_keys, expected_values, expected_type) in expected.items():
+        client = clients[session]
+        reads = client.get("reads")
+        require(
+            client.get("txn_type") == expected_type
+            and isinstance(reads, list)
+            and client.get("read_count") == len(reads) == len(expected_keys),
+            f"{case} probe read roster differs for {session}",
+        )
+        observed_values: list[str] = []
+        for event_seq, (read, key) in enumerate(zip(reads, expected_keys, strict=True)):
+            require(
+                read.get("event_seq") == event_seq
+                and read.get("source") == "snapshot"
+                and read.get("value_state") == "present"
+                and base64.b64decode(read.get("key_bytes_base64", ""), validate=True)
+                == canonical_ycsb_key(key),
+                f"{case} read source or canonical key differs for {session}",
+            )
+            observed_values.append(first_field(read))
+        require(observed_values == expected_values,
+                f"{case} probe values differ for {session}")
 
 
 def verify_retry(directory: Path) -> dict[str, Any]:
@@ -545,8 +892,10 @@ def main() -> None:
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--provenance", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--evidence-replay-bin", type=Path, required=True)
     args = parser.parse_args()
     directory = args.directory
+    require(args.evidence_replay_bin.is_file(), "production evidence replay binary is missing")
 
     cases = (
         "definitive_retry",
@@ -556,6 +905,7 @@ def main() -> None:
         "external_writer_invalid",
         "live_ddl_invalid",
         "connector_stall_invalid",
+        "redis_oom_invalid",
     )
     connector_image_id = validate_runtime_provenance(
         args.provenance,
@@ -577,6 +927,45 @@ def main() -> None:
         directory, "live_ddl_invalid", "CDC_RECORD_MALFORMED"
     )
     connector_stall = connector_stall_status(directory)
+    redis_oom = redis_oom_status(directory)
+    finals_by_case = {
+        "definitive_retry": retry_final,
+        "fractured_repeatable_read": repeatable,
+        "fractured_read_committed": committed,
+        "dropped_client_record": dropped,
+        "external_writer_invalid": external_writer,
+        "live_ddl_invalid": live_ddl,
+        "connector_stall_invalid": connector_stall,
+        "redis_oom_invalid": redis_oom,
+    }
+    production_replays: dict[str, dict[str, Any]] = {}
+    for case, final in finals_by_case.items():
+        validate_probe_reads(directory, case)
+        raw_name = (
+            f"{case}-stalled-cdc.json"
+            if case == "connector_stall_invalid"
+            else f"{case}-cdc.json"
+        )
+        if case not in {
+            "definitive_retry",
+            "fractured_repeatable_read",
+            "fractured_read_committed",
+            "dropped_client_record",
+        }:
+            validate_bootstrap_and_sessions(
+                case,
+                final["run_id"],
+                records(directory / f"{case}-client.json"),
+                cdc_frames(directory / raw_name),
+                ["ycsb/worker/1", "ycsb/worker/2"],
+            )
+        production_replays[case] = production_replay(
+            args.evidence_replay_bin,
+            directory,
+            case,
+            final,
+            cdc_name=raw_name,
+        )
     reconciled_audits = {
         case: independently_reconcile_case(
             directory,
@@ -640,7 +1029,12 @@ def main() -> None:
         path = directory / f"dropped_client_record-{suffix}"
         require(path.is_file() and path.stat().st_size > 0,
                 f"missing dropped-client raw evidence: {path.name}")
-    for case in ("external_writer_invalid", "live_ddl_invalid", "connector_stall_invalid"):
+    for case in (
+        "external_writer_invalid",
+        "live_ddl_invalid",
+        "connector_stall_invalid",
+        "redis_oom_invalid",
+    ):
         for suffix in ("cdc.raw.txt", "client.raw.txt", "status.raw.txt", "compose.log"):
             path = directory / f"{case}-{suffix}"
             require(path.is_file() and path.stat().st_size > 0,
@@ -676,12 +1070,20 @@ def main() -> None:
             "diagnostic": "CDC_RECORD_MALFORMED",
         },
         "connector_stall_invalid": connector_stall,
+        "redis_oom_invalid": {
+            "run_id": redis_oom["run_id"],
+            "outcome": "INVALID",
+            "diagnostic": "RESOURCE_EXHAUSTED",
+            "authoritative_final": True,
+            "actual_server_xadd_oom": True,
+        },
         "repeatable_read_values": ["old", "old", "old"],
         "read_committed_values": ["old", "old", "new"],
         "null_empty_utf8_validated": True,
         "aborted_attempt_emitted_no_marker": True,
         "runtime_connector_image_id": connector_image_id,
         "independently_reconciled_verdict_cases": reconciled_audits,
+        "production_decoder_checker_replays": production_replays,
         "all_expected_outcomes_validated": True,
     }
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

@@ -19,6 +19,7 @@ BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=${BLACKBOX_WORKLOAD_TIMEOUT_SECONDS:-900}
 BLACKBOX_TERMINATION_GRACE_SECONDS=${BLACKBOX_TERMINATION_GRACE_SECONDS:-5}
 BLACKBOX_COORDINATOR_MARGIN_SECONDS=${BLACKBOX_COORDINATOR_MARGIN_SECONDS:-1800}
 BLACKBOX_PROCESSING_MODE=${BLACKBOX_PROCESSING_MODE:-audited}
+BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE=${BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE:-0}
 BLACKBOX_MONITOR_METRICS_PATH=${BLACKBOX_MONITOR_METRICS_PATH:-}
 BLACKBOX_RUN_ID_PATH=${BLACKBOX_RUN_ID_PATH:-}
 BLACKBOX_BOOTSTRAP_MANIFEST_PATH=${BLACKBOX_BOOTSTRAP_MANIFEST_PATH:-}
@@ -125,6 +126,8 @@ require_configuration() {
   [[ $BLACKBOX_TERMINATION_GRACE_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_COORDINATOR_MARGIN_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_MONITOR_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
+  [[ $BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE == 0 ||
+     $BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE == 1 ]]
   [[ $BLACKBOX_LOADER_BATCH_SIZE =~ ^[1-9][0-9]*$ ]] ||
     blackbox_die "BLACKBOX_LOADER_BATCH_SIZE must be a positive integer"
   [[ $BLACKBOX_BOOTSTRAP_MAX_ROWS =~ ^[1-9][0-9]*$ ]] ||
@@ -657,6 +660,11 @@ stop_monitor_without_fence() {
     blackbox_log "completion_status=failed reason_code=$reason_code diagnostic=$diagnostic"
   else
     blackbox_log "timeout-invalid outcome=INVALID reason_code=$reason_code diagnostic=$diagnostic"
+    if (( BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE == 1 )); then
+      blackbox_log "waiting for authoritative final INVALID after coordinator failure"
+      wait_for_failed_final
+      return
+    fi
   fi
 
   if [[ -z $MONITOR_SESSION_ID ]]; then
