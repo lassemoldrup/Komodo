@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "connector-contract" / "yugabytedb_ysql"
 sys.path.insert(0, str(CONTRACT))
 
+from evidence_archive import archived_bundle  # noqa: E402
+from verify_distributed_evidence_index import replay_bundle  # noqa: E402
 from verify_distributed_experiment import verify_conflicts  # noqa: E402
 from verify_resilience_experiment import (  # noqa: E402
     cdc_state,
@@ -24,6 +27,13 @@ from verify_resilience_experiment import (  # noqa: E402
 
 
 class YugabyteYsqlDistributedEvidenceTest(unittest.TestCase):
+    @staticmethod
+    def indexed_bundle(purpose: str) -> dict[str, object]:
+        index = json.loads(
+            (CONTRACT / "evidence" / "distributed_correctness_bundles.json").read_text()
+        )
+        return next(bundle for bundle in index["bundles"] if bundle["purpose"] == purpose)
+
     def test_complete_evidence_index_shape(self) -> None:
         result = subprocess.run(
             [sys.executable, str(CONTRACT / "verify_distributed_evidence_index.py")],
@@ -286,6 +296,34 @@ class YugabyteYsqlDistributedEvidenceTest(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("did not saturate", result.stderr)
+
+    def test_index_replay_rejects_resealed_partial_delivery(self) -> None:
+        bundle = self.indexed_bundle("cross_tablet_marker_last")
+        with archived_bundle(CONTRACT, bundle) as archived:
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary) / "evidence"
+                shutil.copytree(archived, directory)
+                capture = directory / "redis-stream.json"
+                entries = json.loads(capture.read_text())
+                self.assertEqual(json.loads(entries[-1][1][1]).get("status"), "END")
+                entries.pop()
+                capture.write_text(json.dumps(entries))
+                with self.assertRaisesRegex(SystemExit, "raw replay failed"):
+                    replay_bundle(
+                        directory,
+                        "cross_tablet_marker_last",
+                        directory / "experiment-report.json",
+                    )
+
+    def test_index_replay_binds_purpose_to_exact_scenario(self) -> None:
+        bundle = self.indexed_bundle("commit_order_realtime")
+        with archived_bundle(CONTRACT, bundle) as directory:
+            with self.assertRaisesRegex(SystemExit, "purpose/scenario differs"):
+                replay_bundle(
+                    directory,
+                    "cross_tablet_marker_last",
+                    directory / "experiment-report.json",
+                )
 
 
 if __name__ == "__main__":

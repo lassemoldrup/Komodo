@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from evidence_archive import archived_bundle, digest
@@ -39,7 +42,137 @@ def verify_manifest(directory: Path, manifest: Path) -> None:
             f"evidence manifest file roster differs: {directory}")
 
 
-def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
+def run_command(command: list[str], label: str) -> None:
+    result = subprocess.run(command, text=True, capture_output=True)
+    require(result.returncode == 0, f"{label} failed: {result.stderr.strip()}")
+
+
+def production_replay(
+    replay_bin: Path, client: Path, cdc: Path, captured_final: dict[str, object]
+) -> dict[str, object]:
+    result = subprocess.run(
+        [
+            str(replay_bin),
+            "--client-input", str(client),
+            "--cdc-input", str(cdc),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    require(result.returncode == 0,
+            f"production decoder/checker replay failed: {result.stderr.strip()}")
+    replay = json.loads(result.stdout)
+    require(
+        replay.get("kind") == "production_evidence_replay"
+        and replay.get("final_status") == captured_final,
+        "captured FINAL differs from production decoder/checker replay",
+    )
+    return replay
+
+
+def replay_bundle(
+    directory: Path,
+    purpose: str,
+    saved_report: Path,
+    replay_bin: Path,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="yugabytedb-acceptance-replay-") as temporary:
+        output = Path(temporary) / "report.json"
+        if purpose == "complete_value_normalization":
+            command = [
+                sys.executable,
+                str(ROOT / "verify_ycsb_value_normalization.py"),
+                "--redis-stream", str(directory / "redis-stream.json"),
+                "--bootstrap-scan", str(directory / "bootstrap-scan.tsv"),
+                "--jdbc-capture", str(directory / "jdbc-capture.json"),
+                "--cpp-codec-replay", str(directory / "cpp-codec-replay.json"),
+                "--report", str(output),
+            ]
+            run_command(command, "normalization raw replay")
+        elif purpose == "ordinary_two_session_workload":
+            outcomes = list((directory / "workload-results").glob("*.outcomes.json"))
+            require(len(outcomes) == 1, "ordinary outcome artifact roster differs")
+            command = [
+                sys.executable,
+                str(ROOT.parents[1] / "tests" / "verify_yugabytedb_ysql_ycsb_ordinary.py"),
+                "--monitor", str(directory / "monitor-metrics.json"),
+                "--client", str(directory / "redis-client.json"),
+                "--cdc", str(directory / "redis-cdc.json"),
+                "--status", str(directory / "redis-status.json"),
+                "--outcomes", str(outcomes[0]),
+                "--bootstrap", str(directory / "bootstrap-manifest.json"),
+                "--loader-validation", str(directory / "loader-validation.json"),
+                "--tablet-count", str(directory / "usertable-tablet-count.txt"),
+                "--provenance", str(directory / "provenance.lock.json"),
+                "--connector-container",
+                str(directory / "cdc-debezium-yugabytedb-ysql-inspect.json"),
+                "--connector-image", str(directory / "connector-image.json"),
+                "--connector-identity", str(directory / "connector-identity.txt"),
+                "--output", str(output),
+            ]
+            run_command(command, "ordinary raw replay")
+            statuses = json.loads((directory / "redis-status.json").read_text())
+            finals = [
+                json.loads(entry[1][1])
+                for entry in statuses
+                if json.loads(entry[1][1]).get("lifecycle_state") == "FINAL"
+            ]
+            require(len(finals) == 1, "ordinary FINAL roster differs")
+            production_replay(
+                replay_bin,
+                directory / "redis-client.json",
+                directory / "redis-cdc.json",
+                finals[0],
+            )
+        elif purpose == "retry_and_isolation_semantics":
+            command = [
+                sys.executable,
+                str(ROOT.parents[1] / "tests" / "verify_yugabytedb_ysql_ycsb_semantic.py"),
+                "--directory", str(directory),
+                "--provenance", str(directory / "provenance.lock.json"),
+                "--evidence-replay-bin", str(replay_bin),
+                "--output", str(output),
+            ]
+            run_command(command, "semantic raw replay")
+        elif purpose == "redis_server_operational_failures":
+            saved = json.loads(saved_report.read_text(encoding="utf-8"))
+            require(
+                saved.get("kind") == "redis_audited_failure_acceptance"
+                and saved.get("status") == "PASSED"
+                and saved.get("wrong_noeviction_policy_rejected") is True
+                and saved.get("actual_server_xadd_oom_observed") is True
+                and saved.get("consistency_verdict_claimed") is False,
+                "Redis audited report identity differs",
+            )
+            final = saved.get("authoritative_final")
+            require(isinstance(final, dict) and final.get("outcome") == "INVALID",
+                    "Redis report lacks authoritative FINAL INVALID")
+            production_replay(
+                replay_bin,
+                directory / "redis_oom_invalid-client.json",
+                directory / "redis_oom_invalid-cdc.json",
+                final,
+            )
+            require(
+                "OOM command not allowed"
+                in (directory / "redis_oom_invalid-operation.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "Redis raw evidence lacks the server OOM",
+            )
+            return
+        else:
+            raise SystemExit(f"unsupported acceptance evidence purpose: {purpose}")
+        require(
+            json.loads(output.read_text(encoding="utf-8"))
+            == json.loads(saved_report.read_text(encoding="utf-8")),
+            f"saved acceptance report differs from raw replay: {purpose}",
+        )
+
+
+def verify_bundle(
+    directory: Path, bundle: dict[str, object], replay_bin: Path
+) -> None:
     purpose = bundle["purpose"]
     manifest = directory / str(bundle["manifest"])
     report = directory / str(bundle["report"])
@@ -48,6 +181,7 @@ def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
     verify_manifest(directory, manifest)
     require(digest(report) == bundle["report_sha256"],
             f"report digest differs: {purpose}")
+    replay_bundle(directory, str(purpose), report, replay_bin)
     regular_files = [item for item in directory.rglob("*") if item.is_file()]
     require(
         len(regular_files) == bundle["regular_file_count"] + 1,
@@ -60,8 +194,10 @@ def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
             dropped.get("outcome") == "INVALID"
             and dropped.get("diagnostic") == "CLIENT_HALF_MISSING"
             and dropped.get("evidence_reconciled") is False
-            and document.get("connector_stall_invalid", {}).get("outcome") == "INVALID",
-            "semantic evidence lacks the dropped-client or connector-stall INVALID gate",
+            and document.get("connector_stall_invalid", {}).get("outcome") == "INVALID"
+            and document.get("redis_oom_invalid", {}).get("outcome") == "INVALID"
+            and document.get("redis_oom_invalid", {}).get("authoritative_final") is True,
+            "semantic evidence lacks a required authoritative INVALID gate",
         )
     if purpose == "ordinary_two_session_workload":
         provenance = json.loads(
@@ -94,18 +230,20 @@ def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
             document.get("status") == "PASSED"
             and document.get("wrong_noeviction_policy_rejected") is True
             and document.get("actual_server_xadd_oom_observed") is True
-            and document.get("stream_length_after_rejected_xadd") == 0
-            and str(document.get("oom_response", "")).startswith(
-                "OOM command not allowed"
-            ),
-            "Redis evidence lacks actual policy rejection or server XADD OOM",
+            and document.get("authoritative_final", {}).get("outcome") == "INVALID"
+            and document.get("authoritative_final", {})
+            .get("reconciliation", {})
+            .get("evidence_reconciled") is False,
+            "Redis evidence lacks policy rejection, server OOM, or FINAL INVALID",
         )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-local", action="store_true")
+    parser.add_argument("--evidence-replay-bin", type=Path, required=True)
     args = parser.parse_args()
+    require(args.evidence_replay_bin.is_file(), "production evidence replay binary is missing")
     index = json.loads(
         (ROOT / "evidence" / "ycsb_acceptance_bundles.json").read_text(
             encoding="utf-8"
@@ -124,9 +262,9 @@ def main() -> int:
         require(not args.require_local or path.is_dir(),
                 f"local evidence bundle is missing: {path}")
         with archived_bundle(ROOT, bundle) as archived:
-            verify_bundle(archived, bundle)
+            verify_bundle(archived, bundle, args.evidence_replay_bin)
         if path.is_dir():
-            verify_bundle(path, bundle)
+            verify_bundle(path, bundle, args.evidence_replay_bin)
     require(
         purposes
         == {

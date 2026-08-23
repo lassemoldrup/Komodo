@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from evidence_archive import archived_bundle, digest
@@ -21,6 +24,18 @@ EXPECTED_PURPOSES = {
     "redis_backpressure_order",
     "connector_queue_saturation_order",
     "tablet_split_leader_movement_tserver_loss",
+}
+PURPOSE_SCENARIOS = {
+    "cross_tablet_marker_last": "cross_tablet_marker_last",
+    "cross_table_test_and_tpcc": "cross_table_transaction",
+    "commit_order_reversal": "commit_order_reversal",
+    "commit_order_realtime": "commit_order_realtime",
+    "concurrent_four_tablets": "concurrent_tablet_commits",
+    "large_transaction_boundaries": "large_transaction",
+    "write_shape_predecessors": "write_shape_matrix",
+    "serialization_deadlock_retries": "conflict_retry_matrix",
+    "redis_backpressure_order": "redis_backpressure_reversal",
+    "connector_queue_saturation_order": "queue_saturation_order",
 }
 
 
@@ -48,6 +63,60 @@ def verify_manifest(directory: Path, manifest: Path) -> None:
             f"manifest file roster differs: {directory}")
 
 
+def replay_bundle(directory: Path, purpose: str, saved_report: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="yugabytedb-distributed-replay-") as temporary:
+        output = Path(temporary) / "report.json"
+        if purpose == "tablet_split_leader_movement_tserver_loss":
+            command = [
+                sys.executable,
+                str(ROOT / "verify_resilience_experiment.py"),
+                "--directory",
+                str(directory),
+                "--report",
+                str(output),
+            ]
+        else:
+            scenario = PURPOSE_SCENARIOS.get(purpose)
+            require(scenario is not None, f"distributed replay purpose is unsupported: {purpose}")
+            metadata = json.loads(
+                (directory / "capture-metadata.json").read_text(encoding="utf-8")
+            )
+            require(
+                metadata.get("scenario") == scenario,
+                f"distributed evidence purpose/scenario differs: {purpose}",
+            )
+            command = [
+                sys.executable,
+                str(ROOT / "verify_distributed_experiment.py"),
+                "--scenario",
+                scenario,
+                "--capture",
+                str(directory / "redis-stream.json"),
+                "--placement",
+                str(directory / "tablet-placement.json"),
+                "--redis-batch-size",
+                str(metadata["redis_sink_batch_size"]),
+                "--source-batch-size",
+                str(metadata["source_max_batch_size"]),
+                "--report",
+                str(output),
+            ]
+            if scenario == "conflict_retry_matrix":
+                command.extend(["--attempt-ledger", str(directory / "attempt-ledger.json")])
+            if scenario == "queue_saturation_order":
+                command.extend(
+                    ["--queue-evidence", str(directory / "queue-saturation-evidence.json")]
+                )
+        result = subprocess.run(command, text=True, capture_output=True)
+        require(result.returncode == 0,
+                f"distributed raw replay failed for {purpose}: {result.stderr.strip()}")
+        require(
+            json.loads(output.read_text(encoding="utf-8"))
+            == json.loads(saved_report.read_text(encoding="utf-8")),
+            f"distributed saved report differs from raw replay: {purpose}",
+        )
+
+
 def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
     purpose = bundle["purpose"]
     manifest = directory / "SHA256SUMS"
@@ -57,6 +126,7 @@ def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
     verify_manifest(directory, manifest)
     require(digest(report) == bundle["report_sha256"],
             f"report digest differs: {purpose}")
+    replay_bundle(directory, str(purpose), report)
     regular_files = [item for item in directory.rglob("*") if item.is_file()]
     require(len(regular_files) == bundle["regular_file_count"] + 1,
             f"bundle file count differs: {purpose}")

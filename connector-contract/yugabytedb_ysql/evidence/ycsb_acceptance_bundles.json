@@ -27,13 +27,13 @@
     },
     {
       "purpose": "retry_and_isolation_semantics",
-      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_failure_injection_reconciled_gate/blackbox-correctness.accepted",
+      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_production_replay_gate/blackbox-correctness.accepted",
       "archive_path": "evidence/archives/retry_and_isolation_semantics.tar.gz",
-      "archive_sha256": "b7fdf1f0aa8dff515ff10e4eec259317da95a0e9f7b0d035b088e55a7dd13f62",
+      "archive_sha256": "3b0251bb8a546a997af54c18fcd2d36a55dde9c0a87d6897d9472cb2cadaa018",
       "manifest": "SHA256SUMS",
-      "manifest_sha256": "93fd79f30a29a6de5e26c41a449521b4d5ccd8f260a92ef1102e62dcfda70655",
+      "manifest_sha256": "06e43eb5a71582526a13698a1ca02e50c25f6811adf4c53d75480d93a5917de3",
       "report": "yugabytedb-ysql-ycsb-semantic-report.json",
-      "report_sha256": "dc249873ccb21bda61e8f58ba1f621e74bcc63d20674730046baccb82e7c46fc",
+      "report_sha256": "dc469061f881e3b4a9c435821072070dc5b0b5ca6d9d23555911eb1d660c08a0",
       "run_ids": [
         "082b7c59-74d5-4c54-98de-c054417fa5d9",
         "a3aafc73-9904-48db-89a4-b97a0ca18b38",
@@ -41,20 +41,21 @@
         "267b25cf-a9d6-4101-9425-f0abad57deca",
         "6c55b185-316b-478e-9a13-751f63f14b71",
         "2d35e565-6d01-4cb8-9238-7c8dece6f501",
-        "1071c942-8609-475f-9398-667ec33c9a8f"
+        "6f60637f-4aed-496d-875a-3baef5cc1daf",
+        "1e1157a0-7e09-49a9-b39a-84debc979a7a"
       ],
-      "regular_file_count": 179
+      "regular_file_count": 207
     },
     {
       "purpose": "redis_server_operational_failures",
-      "bundle_path": "fixtures/redis_server_failure_provenance_gate",
+      "bundle_path": "fixtures/redis_audited_failure_provenance_gate",
       "archive_path": "evidence/archives/redis_server_operational_failures.tar.gz",
-      "archive_sha256": "731020e5a2acf14d51cd4b20b6112833324cc568c7bab5341f5ef047331d7199",
+      "archive_sha256": "cc0f25481ce379718365618d820536cc10eb7613c041cdb93924ed4e98131e38",
       "manifest": "SHA256SUMS",
-      "manifest_sha256": "308f24ed6b70fde52adf0f418536cd9724fff10ac5c131a65ed05b7e56db3a82",
+      "manifest_sha256": "118e3a9465e3dc74da70d65967c89edda63f1ec508287e3b91f0eca3e2153862",
       "report": "redis-failure-report.json",
-      "report_sha256": "ac784f2cd87c825c077de635ec5732f00310fe18fa4faedefd8ef0b36c5fcbf6",
-      "regular_file_count": 18
+      "report_sha256": "5c46ec8185303817055ca247b86d2db1e9a8e697ccf2cfd62b781678a07a271f",
+      "regular_file_count": 36
     }
   ]
 }
