@@ -73,6 +73,7 @@ def parse(text: str) -> dict[str, Any]:
                     "precision": fields[6],
                     "scale": fields[7],
                     "length": fields[8],
+                    "datetime_precision": fields[9],
                     "identity": fields[12] == "identity",
                 }
             )
@@ -93,7 +94,9 @@ def physical_type(logical: str) -> tuple[str, str | None]:
     if logical == "FLOAT":
         return "real", None
     if logical == "TIMESTAMP":
-        return "timestamp without time zone", None
+        # Logical TPC-C timestamps are frozen as UTC whole seconds; the YSQL
+        # physical mapping is TIMESTAMPTZ(0) so pgoutput emits ISO UTC text.
+        return "timestamp with time zone", "datetime:0"
     match = re.fullmatch(r"(VARCHAR|CHAR)\(([1-9][0-9]*)\)", logical)
     if match:
         return ("character varying" if match.group(1) == "VARCHAR" else "character"), match.group(2)
@@ -132,7 +135,12 @@ def validate(benchmark: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
             )
             if modifier and ":" not in modifier:
                 require(observed["length"] == modifier, f"{contract['name']}: character length differs")
-            if modifier and ":" in modifier:
+            if modifier and modifier.startswith("datetime:"):
+                require(
+                    observed["datetime_precision"] == modifier.partition(":")[2],
+                    f"{contract['name']}: timestamp precision differs",
+                )
+            elif modifier and ":" in modifier:
                 precision, scale = modifier.split(":")
                 require(
                     observed["precision"] == precision and observed["scale"] == scale,

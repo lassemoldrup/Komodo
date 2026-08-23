@@ -143,6 +143,57 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
             ).read_text(encoding="utf-8"),
         )
 
+    def test_tpcc_adapter_schema_maps_the_logical_contract_exactly(self) -> None:
+        schema_text = (YSQL / "initdb" / "adapters" / "tpcc.sql").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotRegex(schema_text, r"(?im)^\s*INSERT\s+INTO")
+        self.assertNotIn("`", schema_text)
+        self.assertNotIn("AUTO_INCREMENT", schema_text.upper())
+        self.assertNotIn("ENGINE", schema_text.upper())
+        self.assertEqual(schema_text.upper().count("REPLICA IDENTITY FULL"), 9)
+
+        adapter = json.loads(
+            (ROOT / "protocol" / "adapters" / "tpcc.json").read_text(encoding="utf-8")
+        )
+        expected_leaves = [
+            name.partition(".")[2] for name in adapter["application_tables"]
+        ]
+        created = re.findall(r"(?m)^CREATE TABLE ([a-z_]+) \(", schema_text)
+        self.assertEqual(sorted(created), sorted(expected_leaves))
+        for leaf in expected_leaves:
+            self.assertIn(f"ALTER TABLE {leaf} REPLICA IDENTITY FULL;", schema_text)
+        self.assertEqual(len(re.findall(r"SPLIT INTO [0-9]+ TABLETS", schema_text)), 9)
+
+        # The evidence-only history key is generated and never client-supplied.
+        self.assertIn("h_id     BIGINT GENERATED ALWAYS AS IDENTITY", schema_text)
+
+        # Frozen physical type mapping for the shared logical contract.
+        self.assertNotIn("DOUBLE", schema_text.upper())
+        self.assertNotIn("FLOAT8", schema_text.upper())
+        self.assertNotRegex(schema_text, r"(?i)\bTIMESTAMP\b(?!TZ)")
+        self.assertNotIn("TIMESTAMPTZ(6)", schema_text)
+        for table in adapter["tables"]:
+            for column in table["columns"]:
+                sql_type = column["sql_type"]
+                if sql_type.startswith("DECIMAL("):
+                    self.assertIn(
+                        f"NUMERIC{sql_type[len('DECIMAL'):]}",
+                        schema_text,
+                        f"{table['name']}.{column['name']}",
+                    )
+                elif sql_type == "FLOAT":
+                    self.assertRegex(schema_text, rf"(?m)^\s+{column['name']}\s+REAL\b")
+                elif sql_type == "TIMESTAMP":
+                    self.assertRegex(
+                        schema_text, rf"(?m)^\s+{column['name']}\s+TIMESTAMPTZ\(0\)"
+                    )
+                elif sql_type.startswith(("CHAR(", "VARCHAR(")):
+                    self.assertRegex(
+                        schema_text,
+                        rf"(?m)^\s+{column['name']}\s+{re.escape(sql_type)}",
+                    )
+
     def test_privilege_attestation_covers_effective_ddl_authority(self) -> None:
         driver = (
             ROOT / "scripts" / "backends" / "yugabytedb_ysql.sh"
