@@ -5,6 +5,8 @@
     {
       "purpose": "cross_tablet_marker_last",
       "bundle_path": "fixtures/pgoutput_cross_tablet_complete_gate",
+      "archive_path": "evidence/archives/cross_tablet_marker_last.tar.gz",
+      "archive_sha256": "94e37fd5b01587a277a230f8b93c540f58bd8dc535ba8678c719335d2c3a6003",
       "manifest_sha256": "c353681170b69f846e4acb90179c0ec98358548546f928f8542ae03b515d5725",
       "report": "experiment-report.json",
       "report_sha256": "e2aa811ab9520e53ad59b98b2ae9ccd2bd88e056121e492ff5a3f46988fdd8c2",
@@ -13,6 +15,8 @@
     {
       "purpose": "cross_table_test_and_tpcc",
       "bundle_path": "fixtures/pgoutput_cross_table_complete_gate",
+      "archive_path": "evidence/archives/cross_table_test_and_tpcc.tar.gz",
+      "archive_sha256": "c542b3c73e49b8a04fd8445fac29b563dd2b72e03de2e88ab5bcc1e9998d0c88",
       "manifest_sha256": "eafa0f60ba33cfad19c3200bc797ee8d9a704493807c16df13c902c7e61ffd7e",
       "report": "experiment-report.json",
       "report_sha256": "e040694a4665d8ad61e50b1cd3ede36ecb9d409d8b9303feccc608990c667301",
@@ -21,6 +25,8 @@
     {
       "purpose": "commit_order_reversal",
       "bundle_path": "fixtures/pgoutput_commit_order_reversal_repaired_gate",
+      "archive_path": "evidence/archives/commit_order_reversal.tar.gz",
+      "archive_sha256": "1f0e9a0ddd623c029203849b418e9bb7815c5daa9b94d8d1da53c412ba4ffc57",
       "manifest_sha256": "3d6421b39f0b215c90d0a06d1aeff9a6c006cb798d58bd2c977878a6770f2a04",
       "report": "experiment-report.json",
       "report_sha256": "04e260e105608d8a6571c774bc3da360699c716b6a6ab55d2cb070631e481219",
@@ -29,6 +35,8 @@
     {
       "purpose": "commit_order_realtime",
       "bundle_path": "fixtures/pgoutput_commit_order_realtime_complete_gate",
+      "archive_path": "evidence/archives/commit_order_realtime.tar.gz",
+      "archive_sha256": "a9b8a0cf6f1d809f098c234827243c11eeddfdf96303c9dbeb6c1ba651fbde4f",
       "manifest_sha256": "fa6eb179ffd42cabd1342fd4b6d00a7ef5e3031c013f4000162288a2cc18c8b0",
       "report": "experiment-report.json",
       "report_sha256": "e4615e5dd950017be3fd2cc8d1cb3c36cb4965330e630195c61d89849980997c",
@@ -37,6 +45,8 @@
     {
       "purpose": "concurrent_four_tablets",
       "bundle_path": "fixtures/pgoutput_concurrent_four_tablet_complete_gate",
+      "archive_path": "evidence/archives/concurrent_four_tablets.tar.gz",
+      "archive_sha256": "cd3e75ee188858a3c17f4b59ee54ceb6838bab03c382bf7cc792ef722dc41602",
       "manifest_sha256": "f8d05973a5aecda617c802f2533431826f8d76b51c19bc47f3a9fd45dfd6f5c2",
       "report": "experiment-report.json",
       "report_sha256": "b8822ed0a4f9effb40c961f4b483749d7a1026a10b7edc1ef6258db3c8a0ca1c",
@@ -45,6 +55,8 @@
     {
       "purpose": "large_transaction_boundaries",
       "bundle_path": "fixtures/pgoutput_large_transaction_boundaries_complete_gate",
+      "archive_path": "evidence/archives/large_transaction_boundaries.tar.gz",
+      "archive_sha256": "f49506cfc6ac739a76cda613649e45d577acdf949fa419f65b51ed304c2d7de9",
       "manifest_sha256": "077b7afc7be0f063e29d6c72450d78a3ef32020270e1e6865cbf9c8aad54ac93",
       "report": "experiment-report.json",
       "report_sha256": "ae9c3c56e049e1dd21e4fbf337129d1793c0ce8997239946120ca131e589ef04",
@@ -53,6 +65,8 @@
     {
       "purpose": "write_shape_predecessors",
       "bundle_path": "fixtures/pgoutput_write_shape_matrix_complete_gate",
+      "archive_path": "evidence/archives/write_shape_predecessors.tar.gz",
+      "archive_sha256": "b930e779d8c2775a28100fdd5d1ce5a33eb346b2ef744e1639fe37f99422855b",
       "manifest_sha256": "7e16440cc9d4f084dc670ba04e98b5c1fca868f9c3d178a64238be545fe3f529",
       "report": "experiment-report.json",
       "report_sha256": "c5882c85eb929b5573b12930e952aa262d408e8f46a6a68f8ccd6ddcf8c94fc4",
@@ -61,6 +75,8 @@
     {
       "purpose": "serialization_deadlock_retries",
       "bundle_path": "fixtures/pgoutput_conflict_retry_snapshot_gate",
+      "archive_path": "evidence/archives/serialization_deadlock_retries.tar.gz",
+      "archive_sha256": "0571cd1c9f9a374e1dce82eaf93065b7795f0ea07a11928e82ff16d211b89b6e",
       "manifest_sha256": "c6b3fef46fac29defa2d9fa49ca247bc36a91db2727bb06ec782291a023bbbed",
       "report": "experiment-report.json",
       "report_sha256": "cea3d6db64f8130dc6d63695be8c4cc70153cde49faa8fb4f34c042a2559fe32",
@@ -69,6 +85,8 @@
     {
       "purpose": "redis_backpressure_order",
       "bundle_path": "fixtures/pgoutput_backpressure_order_complete_gate",
+      "archive_path": "evidence/archives/redis_backpressure_order.tar.gz",
+      "archive_sha256": "db327a0cbdc83e65fdbe32ea986dfc08d406f5cc6feb1f2f0967f9495e80ca85",
       "manifest_sha256": "49a85d5d111077efd103bd09f4fe0db7ae64712b73f6c5f1c543dc9bbfb2bef8",
       "report": "experiment-report.json",
       "report_sha256": "9e12f53188e0324a3efc0e17ec2da742d090a94bc26ecc27c4b44a939f76f5c8",
@@ -77,6 +95,8 @@
     {
       "purpose": "connector_queue_saturation_order",
       "bundle_path": "fixtures/pgoutput_queue_saturation_jmx_gate",
+      "archive_path": "evidence/archives/connector_queue_saturation_order.tar.gz",
+      "archive_sha256": "31788588cdea23e2f0011e07cfcd395064c24f0818babd07d69662995dc753ac",
       "manifest_sha256": "1c8e6c0ebea80b4219d4d828cc947810e745fabce77dc79aefd07471b237bd6a",
       "report": "experiment-report.json",
       "report_sha256": "6fd90faa4a80b03a62564f5a669121cc6b7723cdf4559e994670b1f2a035649d",
@@ -85,6 +105,8 @@
     {
       "purpose": "tablet_split_leader_movement_tserver_loss",
       "bundle_path": "fixtures/pgoutput_resilience_overlap_exact_gate",
+      "archive_path": "evidence/archives/tablet_split_leader_movement_tserver_loss.tar.gz",
+      "archive_sha256": "f71e7d4d5dbc5f228c3c5e89b66f4c610edcbf5fddf90b92f81480b79e44e335",
       "manifest_sha256": "bd7e7bf16360526b190117b5bc07c2d12798df300ac8368351e8d690eda0ea8d",
       "report": "resilience-report.json",
       "report_sha256": "dc67ba1880144650b922a5b5f034cbb31f3cc106f2ee23f5da53e966c43d4042",

@@ -5,6 +5,8 @@
     {
       "purpose": "complete_value_normalization",
       "bundle_path": "fixtures/pgoutput_ycsb_value_normalization_cpp_codec_gate",
+      "archive_path": "evidence/archives/complete_value_normalization.tar.gz",
+      "archive_sha256": "8c3315edaa0815876a19204ac8a1ad157eb9528fc7db0f3beb12c72926854753",
       "manifest": "SHA256SUMS",
       "manifest_sha256": "2bf04163f923b4dcc344e18ffa16a373faa850fa9c76f65d01c0c83176b43b57",
       "report": "normalization-report.json",
@@ -13,28 +15,46 @@
     },
     {
       "purpose": "ordinary_two_session_workload",
-      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_ordinary_identity_attested_gate",
+      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_ordinary_portable_gate",
+      "archive_path": "evidence/archives/ordinary_two_session_workload.tar.gz",
+      "archive_sha256": "e673e08a6e3aa05d4615c35d59cc07a208b52e16f6a1308f545d28000ba40254",
       "manifest": "SHA256SUMS",
-      "manifest_sha256": "2a3259ac240de1f6e49efe1c70c98a1ebf5a02a8ad7f80b9503c6022c9e09937",
+      "manifest_sha256": "9ebf4c7517ac08057174c68b5ed1fa6516bc48188b7d671a50f576d1451e0ded",
       "report": "acceptance-report.json",
       "report_sha256": "65b4a045f5b3560c77d47c25c3fe8ce9485a94807f87933cd013751931b8d4ed",
       "run_ids": ["b12d6751-3327-44f2-b4ad-86e2ee107ebc"],
-      "regular_file_count": 53
+      "regular_file_count": 52
     },
     {
       "purpose": "retry_and_isolation_semantics",
-      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_failure_matrix_complete_gate",
+      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_failure_injection_reconciled_gate/blackbox-correctness.accepted",
+      "archive_path": "evidence/archives/retry_and_isolation_semantics.tar.gz",
+      "archive_sha256": "b7fdf1f0aa8dff515ff10e4eec259317da95a0e9f7b0d035b088e55a7dd13f62",
       "manifest": "SHA256SUMS",
-      "manifest_sha256": "df7461e62b0b5fddd074970255a0cb39aa24f358060f216e189c13bd169e8481",
-      "report": "blackbox-correctness.rdJREO/yugabytedb-ysql-ycsb-semantic-report.json",
-      "report_sha256": "0124e7088c2bbdbd50d6096597eed90b66e6825713aabb8102c0d5518f380fc0",
+      "manifest_sha256": "93fd79f30a29a6de5e26c41a449521b4d5ccd8f260a92ef1102e62dcfda70655",
+      "report": "yugabytedb-ysql-ycsb-semantic-report.json",
+      "report_sha256": "dc249873ccb21bda61e8f58ba1f621e74bcc63d20674730046baccb82e7c46fc",
       "run_ids": [
-        "087d1fde-cb6c-47f4-994a-bace46e71691",
-        "e1319484-f99f-4f4f-9c1f-e35c74fa0bb8",
-        "cbdf8df8-a497-4922-852b-9a159860c11a",
-        "643318d5-e861-4f85-80dd-fda410351913"
+        "082b7c59-74d5-4c54-98de-c054417fa5d9",
+        "a3aafc73-9904-48db-89a4-b97a0ca18b38",
+        "04449dac-b6aa-41c2-a286-679665605970",
+        "267b25cf-a9d6-4101-9425-f0abad57deca",
+        "6c55b185-316b-478e-9a13-751f63f14b71",
+        "2d35e565-6d01-4cb8-9238-7c8dece6f501",
+        "1071c942-8609-475f-9398-667ec33c9a8f"
       ],
-      "regular_file_count": 90
+      "regular_file_count": 179
+    },
+    {
+      "purpose": "redis_server_operational_failures",
+      "bundle_path": "fixtures/redis_server_failure_provenance_gate",
+      "archive_path": "evidence/archives/redis_server_operational_failures.tar.gz",
+      "archive_sha256": "731020e5a2acf14d51cd4b20b6112833324cc568c7bab5341f5ef047331d7199",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "308f24ed6b70fde52adf0f418536cd9724fff10ac5c131a65ed05b7e56db3a82",
+      "report": "redis-failure-report.json",
+      "report_sha256": "ac784f2cd87c825c077de635ec5732f00310fe18fa4faedefd8ef0b36c5fcbf6",
+      "regular_file_count": 18
     }
   ]
 }
