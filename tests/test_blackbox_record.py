@@ -394,6 +394,25 @@ class BlackboxRecordTest(unittest.TestCase):
             "ycsb_fractured_read_probe",
         )
 
+        maria_admitted = self.run_tool(
+            "run-manifest",
+            "--run-id",
+            RUN_ID,
+            "--backend",
+            "mariadb",
+            "--backend-source-id",
+            "mariadb-main",
+            "--declared-isolation",
+            "READ_COMMITTED",
+            "--benchmark",
+            "ycsb_fractured_read_probe",
+            "--session-id",
+            "ycsb/worker/1",
+            "--session-id",
+            "ycsb/worker/2",
+        )
+        self.assertEqual(json.loads(maria_admitted.stdout)["backend"], "mariadb")
+
     def test_schema_check_accepts_ycsb_and_tpcc_contracts(self) -> None:
         for benchmark in ("ycsb", "ycsb_fractured_read_probe", "tpcc"):
             with self.subTest(benchmark=benchmark):

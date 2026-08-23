@@ -7,7 +7,7 @@
     "search_path": null
   },
   "session_contract": {
-    "declared_isolations": ["REPEATABLE_READ"],
+    "declared_isolations": ["READ_COMMITTED", "REPEATABLE_READ"],
     "configure_in_autocommit": true,
     "configuration_statements": [
       "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
