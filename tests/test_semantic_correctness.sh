@@ -13,6 +13,7 @@ COMPOSE=(
   --profile "$BLACKBOX_COMPOSE_PROFILE"
 )
 CLIENT="$ROOT/tests/semantic_client.sh"
+OPERATIONAL_CLIENT="$ROOT/tests/operational_failure_client.sh"
 YUGABYTEDB_YCSB_VALIDATOR="$ROOT/tests/verify_yugabytedb_ysql_ycsb_semantic.py"
 OUTPUT_ROOT=${BLACKBOX_CORRECTNESS_OUTPUT_ROOT:-/tmp}
 CASE_TIMEOUT_SECONDS=${BLACKBOX_CORRECTNESS_CASE_TIMEOUT_SECONDS:-600}
@@ -43,6 +44,7 @@ require_harness_configuration() {
   : "${BLACKBOX_MONITOR_BIN:?set BLACKBOX_MONITOR_BIN to blackbox_run_monitor}"
   [[ -x $BLACKBOX_MONITOR_BIN ]]
   [[ -x $CLIENT ]]
+  [[ -f $OPERATIONAL_CLIENT ]]
   if [[ -n ${BLACKBOX_BENCHBASE_DIST:-} ]]; then
     [[ -f $BLACKBOX_BENCHBASE_DIST/benchbase.jar ]]
     [[ -d $BLACKBOX_BENCHBASE_DIST/lib ]]
@@ -431,17 +433,32 @@ assert_database_state() {
 assert_terminal_status() {
   local final_status=$1
   local expected_outcome=$2
-  jq -e --arg outcome "$expected_outcome" '
-    .outcome == $outcome and
-    .lifecycle_state == "FINAL" and
-    .assembled_cdc_transactions == 6 and
-    .reconciliation.bootstrap_manifest_validated == true and
-    .reconciliation.expected_sessions == 2 and
-    .reconciliation.completed_sessions == 2 and
-    .reconciliation.bootstrap_cdc_transactions == 1 and
-    .reconciliation.bootstrap_checker_transactions == 1 and
-    .reconciliation.phase_anchor_transactions == 2
-  ' <<<"$final_status" >/dev/null
+  local failure_kind=${3:-}
+  if [[ -z $failure_kind ]]; then
+    jq -e --arg outcome "$expected_outcome" '
+      .outcome == $outcome and
+      .lifecycle_state == "FINAL" and
+      .assembled_cdc_transactions == 6 and
+      .reconciliation.bootstrap_manifest_validated == true and
+      .reconciliation.expected_sessions == 2 and
+      .reconciliation.completed_sessions == 2 and
+      .reconciliation.bootstrap_cdc_transactions == 1 and
+      .reconciliation.bootstrap_checker_transactions == 1 and
+      .reconciliation.phase_anchor_transactions == 2
+    ' <<<"$final_status" >/dev/null
+  else
+    jq -e --arg outcome "$expected_outcome" '
+      .outcome == $outcome and
+      .lifecycle_state == "FINAL" and
+      .reconciliation.bootstrap_manifest_validated == true and
+      .reconciliation.startup_schema_attested == true and
+      .reconciliation.expected_sessions == 2 and
+      .reconciliation.completed_sessions == 2 and
+      .reconciliation.bootstrap_cdc_transactions == 1 and
+      .reconciliation.bootstrap_checker_transactions == 1 and
+      .reconciliation.phase_anchor_transactions == 2
+    ' <<<"$final_status" >/dev/null
+  fi
 
   case "$expected_outcome" in
     PASS)
@@ -472,20 +489,44 @@ assert_terminal_status() {
       ' <<<"$final_status" >/dev/null
       ;;
     INVALID)
-      jq -e '
-        .checker_observation != "VIOLATION_OBSERVED" and
-        .reconciliation.evidence_reconciled == false and
-        .reconciliation.end_fence_seen == true and
-        .reconciliation.accepted_client_transactions == 1 and
-        .reconciliation.joined_workload_transactions == 0 and
-        .reconciliation.checker_consumed_transactions == 3 and
-        .reconciliation.unmatched_client_records == 0 and
-        .reconciliation.unmatched_workload_cdc_slots == 1 and
-        all(.diagnostics[]; .code != "CDC_ORDER_INVALID") and
-        any(.diagnostics[];
-          .category == "PROTOCOL" and
-          .code == "CLIENT_HALF_MISSING")
-      ' <<<"$final_status" >/dev/null
+      if [[ -z $failure_kind ]]; then
+        jq -e '
+          .checker_observation != "VIOLATION_OBSERVED" and
+          .reconciliation.evidence_reconciled == false and
+          .reconciliation.end_fence_seen == true and
+          .reconciliation.accepted_client_transactions == 1 and
+          .reconciliation.joined_workload_transactions == 0 and
+          .reconciliation.checker_consumed_transactions == 3 and
+          .reconciliation.unmatched_client_records == 0 and
+          .reconciliation.unmatched_workload_cdc_slots == 1 and
+          all(.diagnostics[]; .code != "CDC_ORDER_INVALID") and
+          any(.diagnostics[];
+            .category == "PROTOCOL" and
+            .code == "CLIENT_HALF_MISSING")
+        ' <<<"$final_status" >/dev/null
+      elif [[ $failure_kind == external_writer ]]; then
+        jq -e '
+          .checker_observation != "VIOLATION_OBSERVED" and
+          .reconciliation.evidence_reconciled == false and
+          .reconciliation.accepted_client_transactions == 2 and
+          .reconciliation.joined_workload_transactions == 2 and
+          .reconciliation.unmatched_client_records == 0 and
+          .reconciliation.unmatched_workload_cdc_slots == 0 and
+          all(.diagnostics[]; .code != "CDC_ORDER_INVALID") and
+          ([.diagnostics[].code] | sort) ==
+            (["RECONCILIATION_MISMATCH", "SCHEMA_ATTESTATION_MISSING",
+              "UNMARKED_APPLICATION_TRANSACTION"] | sort)
+        ' <<<"$final_status" >/dev/null
+      else
+        jq -e '
+          .checker_observation != "VIOLATION_OBSERVED" and
+          .reconciliation.evidence_reconciled == false and
+          all(.diagnostics[]; .code != "CDC_ORDER_INVALID") and
+          (any(.diagnostics[]; .code == "CDC_RECORD_MALFORMED") or
+           any(.diagnostics[]; .code == "SCHEMA_ATTESTATION_DRIFT") or
+           any(.diagnostics[]; .code == "SCHEMA_ATTESTATION_MISSING"))
+        ' <<<"$final_status" >/dev/null
+      fi
       ;;
     *) return 1 ;;
   esac
@@ -514,8 +555,8 @@ terminate_case_session() {
 
 
 run_case_body() {
-  (( $# == 9 )) || {
-    echo 'internal semantic case invocation requires nine arguments' >&2
+  (( $# == 9 || $# == 10 )) || {
+    echo 'internal semantic case invocation requires nine or ten arguments' >&2
     return 2
   }
   local case_name=$1
@@ -527,15 +568,23 @@ run_case_body() {
   local expected_first=$7
   local expected_second=$8
   local benchmark=$9
+  local failure_kind=${10:-}
   [[ $case_name =~ ^[a-z0-9_]+$ ]]
   local log_file="$RUN_OUTPUT/$case_name.log"
   local client_file="$RUN_OUTPUT/$case_name-client.json"
   local status_file="$RUN_OUTPUT/$case_name-status.json"
   local loader_command workload_command
   printf -v loader_command '%q load' "$CLIENT"
-  printf -v workload_command '%q run' "$CLIENT"
+  if [[ -n $failure_kind ]]; then
+    printf -v workload_command 'bash %q run %q' "$OPERATIONAL_CLIENT" "$failure_kind"
+  else
+    printf -v workload_command '%q run' "$CLIENT"
+  fi
 
-  local status
+  local status status_timeout_seconds=120
+  if [[ $failure_kind == connector_stall ]]; then
+    status_timeout_seconds=8
+  fi
   trap 'terminate_case_session HUP 129' HUP
   trap 'terminate_case_session INT 130' INT
   trap 'terminate_case_session TERM 143' TERM
@@ -557,7 +606,7 @@ run_case_body() {
   BLACKBOX_STACK_TIMEOUT_SECONDS=180 \
   BLACKBOX_LOADER_TIMEOUT_SECONDS=30 \
   BLACKBOX_WORKLOAD_TIMEOUT_SECONDS=60 \
-  BLACKBOX_STATUS_TIMEOUT_SECONDS=120 \
+  BLACKBOX_STATUS_TIMEOUT_SECONDS=$status_timeout_seconds \
   BLACKBOX_MONITOR_BIN=$BLACKBOX_MONITOR_BIN \
     setsid "$ROOT/scripts/e2e.sh" >"$log_file" 2>&1 &
   ACTIVE_CASE_SESSION=$!
@@ -566,6 +615,13 @@ run_case_body() {
   ACTIVE_CASE_SESSION=
   set -e
   trap - HUP INT TERM
+
+  if [[ $failure_kind == connector_stall ]]; then
+    "$BLACKBOX_DOCKER" unpause "$BLACKBOX_CONNECTOR_CONTAINER" \
+      >>"$RUN_OUTPUT/connector_stall_invalid-operation.txt" 2>&1
+    printf 'unpause_completed_ns=%s\n' "$(date +%s%N)" \
+      >>"$RUN_OUTPUT/connector_stall_invalid-operation.txt"
+  fi
 
   if (( status != expected_exit )); then
     echo "$case_name exited $status, expected $expected_exit" >&2
@@ -620,8 +676,39 @@ run_case_body() {
       'sha256sum /debezium/lib/yugabytedb-source-connector-*.jar; sed -n "1,240p" /debezium/conf/application.properties' \
       >"$RUN_OUTPUT/$case_name-connector-identity.txt"
   fi
-  final_status=$(extract_final_status "$log_file")
-  assert_terminal_status "$final_status" "$expected_outcome"
+  if ! final_status=$(extract_final_status "$log_file" 2>/dev/null); then
+    if [[ $failure_kind == connector_stall ]]; then
+      local final_count
+      final_count=$(jq \
+        '[.[] | (.[1][1] | fromjson) | select(.lifecycle_state == "FINAL")] | length' \
+        "$status_file")
+      [[ $final_count == 0 ]]
+      jq -e '
+        [.[] | (.[1][1] | fromjson) | .lifecycle_state] as $states |
+        ($states | index("START_FENCE_SEEN")) != null and
+        ($states | index("LOAD_FINISHED_SEEN")) != null
+      ' "$status_file" >/dev/null
+      grep -q 'timed out waiting for monitor lifecycle state FINAL' "$log_file"
+      grep -q '^admitted_slot_active=1$' \
+        "$RUN_OUTPUT/connector_stall_invalid-operation.txt"
+      grep -q '^paused_state=true$' \
+        "$RUN_OUTPUT/connector_stall_invalid-operation.txt"
+      grep -q '^unpause_completed_ns=' \
+        "$RUN_OUTPUT/connector_stall_invalid-operation.txt"
+      assert_client_evidence \
+        "$client_file" "$mode" "$expected_first" "$expected_second" false
+      assert_database_state "$mode"
+      printf 'semantic case %s: outcome=INVALID reason=post-admission-connector-stall run_id=%s\n' \
+        "$case_name" "$run_id"
+      return 0
+    fi
+    final_status=$(jq -cer '
+      [.[] | (.[1][1] | fromjson) | select(.lifecycle_state == "FINAL")] |
+      if length == 1 then .[0]
+      else error("expected exactly one captured final status") end
+    ' "$status_file")
+  fi
+  assert_terminal_status "$final_status" "$expected_outcome" "$failure_kind"
   status_run_id=$(jq -er '.run_id' <<<"$final_status")
   [[ $status_run_id == "$run_id" ]]
   if [[ -n $drop_session ]]; then
@@ -704,6 +791,12 @@ run_all_cases() {
       ycsb_fractured_read_probe
     run_case dropped_client_record REPEATABLE_READ clean ycsb/worker/1 INVALID 4 old old \
       ycsb_fractured_read_probe
+    run_case external_writer_invalid REPEATABLE_READ clean '' INVALID 4 old old \
+      ycsb_fractured_read_probe external_writer
+    run_case live_ddl_invalid REPEATABLE_READ clean '' INVALID 1 old old \
+      ycsb_fractured_read_probe live_ddl
+    run_case connector_stall_invalid REPEATABLE_READ clean '' INVALID 1 old old \
+      ycsb_fractured_read_probe connector_stall
     run_bounded_diagnostic python3 "$YUGABYTEDB_YCSB_VALIDATOR" \
       --directory "$RUN_OUTPUT" \
       --provenance "$RUN_OUTPUT/provenance.lock.json" \

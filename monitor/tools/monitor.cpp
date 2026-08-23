@@ -67,6 +67,7 @@ struct Options {
   std::chrono::milliseconds overall_timeout{120000};
   ProcessingMode processing_mode = ProcessingMode::Audited;
   std::optional<std::string> metrics_output;
+  std::vector<blackbox::ProtocolBackendFact> expected_backend_facts;
   std::size_t max_assembler_active_transactions =
       blackbox::DebeziumAssemblerConfig{}.max_active_transactions;
   std::size_t max_assembler_events_per_transaction =
@@ -154,6 +155,30 @@ parseTimeout(const std::string_view value) {
   return result;
 }
 
+[[nodiscard]] blackbox::ProtocolBackendFact
+parseExpectedBackendFact(const std::string_view value) {
+  const auto separator = value.find('=');
+  if (separator == std::string_view::npos || separator == 0U ||
+      separator + 1U == value.size() || separator > 63U ||
+      value.size() - separator - 1U > 4096U) {
+    throw std::invalid_argument("expected backend fact must be name=value");
+  }
+  const auto name = value.substr(0U, separator);
+  if (!((name.front() >= 'A' && name.front() <= 'Z') ||
+        (name.front() >= 'a' && name.front() <= 'z')) ||
+      std::any_of(name.begin() + 1, name.end(), [](const char character) {
+        return !((character >= 'A' && character <= 'Z') ||
+                 (character >= 'a' && character <= 'z') ||
+                 (character >= '0' && character <= '9') || character == '_');
+      })) {
+    throw std::invalid_argument("expected backend fact name is invalid");
+  }
+  return blackbox::ProtocolBackendFact{
+      .name = std::string(name),
+      .canonical_value = std::string(value.substr(separator + 1U)),
+  };
+}
+
 [[nodiscard]] Options parseOptions(const int argc, char **argv) {
   Options options;
   for (int index = 1; index < argc; ++index) {
@@ -185,6 +210,8 @@ parseTimeout(const std::string_view value) {
         throw std::invalid_argument("metrics output path is invalid");
       }
       options.metrics_output = value;
+    } else if (argument == "--expected-backend-fact") {
+      options.expected_backend_facts.push_back(parseExpectedBackendFact(value));
     } else if (argument == "--max-assembler-active-transactions") {
       options.max_assembler_active_transactions =
           parsePositiveSize(value, "max assembler active transactions");
@@ -1264,6 +1291,7 @@ int run(const Options &options) {
   try {
     blackbox::RunControllerConfig controller_config;
     controller_config.processing_mode = options.processing_mode;
+    controller_config.expected_backend_facts = options.expected_backend_facts;
     controller_config.joiner_limits.max_pending_client_records =
         options.max_pending_client_records;
     controller_config.joiner_limits.max_pending_client_bytes =

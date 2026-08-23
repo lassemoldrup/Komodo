@@ -378,16 +378,19 @@ donePayload(const std::uint64_t count,
 [[nodiscard]] std::string attestationPayload(
     const std::string_view benchmark, const SchemaAttestationPhase phase,
     const std::string_view attestation_run_id = run_id,
-    const bool drift = false) {
+    const bool drift = false,
+    const std::string_view backend = "mariadb",
+    const std::map<std::string, std::string> &fact_overrides = {}) {
   const auto &benchmark_adapter =
       blackbox::BenchmarkAdapterRegistry::require(benchmark);
   const auto &backend_adapter =
-      blackbox::BackendAdapterRegistry::require("mariadb");
+      blackbox::BackendAdapterRegistry::require(backend);
   SchemaAttestation attestation{
       .run_id = std::string(attestation_run_id),
       .phase = phase,
-      .backend = "mariadb",
-      .backend_source_id = "mariadb-main",
+      .backend = std::string(backend),
+      .backend_source_id = backend == "mariadb" ? "mariadb-main"
+                                                  : "yugabytedb_ysql_main",
       .tables = {},
       .backend_facts = {},
       .canonical_attestation_digest = {},
@@ -448,6 +451,10 @@ donePayload(const std::uint64_t count,
     case blackbox::BackendFactValueRule::PositiveInteger:
       value = "1";
       break;
+    }
+    if (const auto override = fact_overrides.find(std::string(rule.name));
+        override != fact_overrides.end()) {
+      value = override->second;
     }
     attestation.backend_facts.push_back(
         {.name = std::string(rule.name), .canonical_value = std::move(value)});
@@ -656,6 +663,41 @@ void testSchemaAttestationGatesAndDrift() {
     controller.forceTimeoutFinal();
     BLACKBOX_CHECK(controller.terminal());
     BLACKBOX_CHECK(hasDiagnostic(controller, "SCHEMA_ATTESTATION_MISSING"));
+  }
+}
+
+void testRunOwnedYugabyteFactsRejectValidDrift() {
+  auto yugabyte_manifest = manifest();
+  yugabyte_manifest.backend = "yugabytedb_ysql";
+  yugabyte_manifest.backend_source_id = "yugabytedb_ysql_main";
+  const std::map<std::string, std::string> expected_values = {
+      {"publication_name", "expected_publication"},
+      {"slot_name", "expected_slot"},
+      {"publication_membership_sha256", std::string(64U, 'a')},
+      {"replica_identity_full_tables_sha256", std::string(64U, 'b')},
+  };
+  blackbox::RunControllerConfig config;
+  for (const auto &[name, value] : expected_values) {
+    config.expected_backend_facts.push_back(
+        {.name = name, .canonical_value = value});
+  }
+  {
+    RunController controller(yugabyte_manifest, config);
+    controller.acceptClientPayload(attestationPayload(
+        "ycsb", SchemaAttestationPhase::Startup, run_id, false,
+        "yugabytedb_ysql", expected_values));
+    BLACKBOX_CHECK(!hasDiagnostic(controller, "BACKEND_FACT_MISMATCH"));
+  }
+  for (const auto &[name, value] : expected_values) {
+    auto drifted = expected_values;
+    drifted[name] = name.find("sha256") == std::string::npos
+                        ? "other_valid_identifier"
+                        : std::string(64U, value.front() == 'f' ? 'e' : 'f');
+    RunController controller(yugabyte_manifest, config);
+    controller.acceptClientPayload(attestationPayload(
+        "ycsb", SchemaAttestationPhase::Startup, run_id, false,
+        "yugabytedb_ysql", drifted));
+    BLACKBOX_CHECK(hasDiagnostic(controller, "BACKEND_FACT_MISMATCH"));
   }
 }
 
@@ -1993,6 +2035,7 @@ int runRunControllerTests() {
   testCleanPassRequiresDoneEndAndIdle();
   testFinalAttestationMayPrecedeEndFenceObservation();
   testSchemaAttestationGatesAndDrift();
+  testRunOwnedYugabyteFactsRejectValidDrift();
   testEndWithoutDoneIsInvalid();
   testOtherwiseCleanRunWithoutEndFenceIsInvalid();
   testTimeoutAndDuplicateControlRecordsAreInvalid();

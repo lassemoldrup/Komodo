@@ -11,6 +11,7 @@ blackbox_backend_initialize() {
   BLACKBOX_DB_USER=${BLACKBOX_DB_USER:-blackbox_application}
   BLACKBOX_DB_PASSWORD=${BLACKBOX_DB_PASSWORD:-blackbox_application_password}
   BLACKBOX_BACKEND_SOURCE_ID=${BLACKBOX_BACKEND_SOURCE_ID:-yugabytedb_ysql_main}
+  BLACKBOX_BACKEND_MONITOR_ARGUMENTS=()
   BLACKBOX_BENCHBASE_DATABASE_PROFILE=postgres
   BLACKBOX_JDBC_URL=${BLACKBOX_JDBC_URL:-jdbc:postgresql://${BLACKBOX_DB_HOST}:${BLACKBOX_DB_PORT}/benchbase?sslmode=disable\&ApplicationName=blackbox-fractured-read-probe}
   export BLACKBOX_COMPOSE_PROFILE BLACKBOX_DATABASE_SERVICE
@@ -33,6 +34,25 @@ blackbox_backend_prepare_run() {
     <<<"$BLACKBOX_ADAPTER_CONTRACT") || return 1
   export BLACKBOX_YSQL_SLOT_NAME BLACKBOX_YSQL_PUBLICATION_NAME
   export BLACKBOX_YSQL_CAPTURE_TABLES BLACKBOX_ADAPTER_SCHEMA_FILE
+  local -a sorted_capture_tables=()
+  mapfile -t sorted_capture_tables < <(
+    tr ',' '\n' <<<"$BLACKBOX_YSQL_CAPTURE_TABLES" | LC_ALL=C sort
+  )
+  local expected_membership_digest expected_replica_digest
+  expected_membership_digest=$(
+    printf '%s\n' "${sorted_capture_tables[@]}" | sha256sum | cut -d' ' -f1
+  )
+  expected_replica_digest=$(
+    printf '%s\tf\n' "${sorted_capture_tables[@]}" | sha256sum | cut -d' ' -f1
+  )
+  # Consumed by the generic coordinator after this sourced driver returns.
+  # shellcheck disable=SC2034
+  BLACKBOX_BACKEND_MONITOR_ARGUMENTS=(
+    --expected-backend-fact "publication_name=$BLACKBOX_YSQL_PUBLICATION_NAME"
+    --expected-backend-fact "slot_name=$BLACKBOX_YSQL_SLOT_NAME"
+    --expected-backend-fact "publication_membership_sha256=$expected_membership_digest"
+    --expected-backend-fact "replica_identity_full_tables_sha256=$expected_replica_digest"
+  )
 }
 
 blackbox_backend_require_commands() {

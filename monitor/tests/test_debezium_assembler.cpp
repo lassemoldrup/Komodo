@@ -2,6 +2,8 @@
 #include "blackbox/canonical_ycsb_codec.h"
 #include "blackbox/cdc_error.h"
 #include "blackbox/cdc_types.h"
+#include "blackbox/checker_adapter.h"
+#include "blackbox/client_txn.h"
 #include "blackbox/debezium_assembler.h"
 #include "test_support.h"
 
@@ -469,6 +471,42 @@ void checkCapturedYugabyteLifecycleAndRawFailures() {
   checkEquivalentBackendNeutralTransaction(mariadb[2], transactions[2]);
   checkEquivalentBackendNeutralTransaction(mariadb[3], transactions[3]);
   checkEquivalentBackendNeutralTransaction(mariadb[10], transactions[4]);
+
+  const auto checker_observation = [&](const CdcTransaction &workload) {
+    blackbox::CheckerAdapter checker(blackbox::CheckerAdapterConfig{
+        .run_id = std::string(kFixtureRunId),
+        .expected_session_ids = {"ycsb/worker/1"},
+    });
+    checker.consumeBootstrap(0U, transactions[1].cdc_seq,
+                             transactions[1].writes);
+    checker.consumePhaseAnchor(1U, "ycsb/worker/1");
+    blackbox::ClientTxn client{
+        .run_id = std::string(kFixtureRunId),
+        .session_id = "ycsb/worker/1",
+        .session_seq = 1U,
+        .logical_txn_id = "00112233-4455-6677-8899-aabbccddeeff",
+        .attempt_id = "10213243-5465-7687-98a9-bacbdcedfe0f",
+        .txn_type = "ycsb_update",
+        .correlation_id = *workload.correlation_id,
+        .read_digest = {},
+        .reads = {blackbox::ClientRead{
+            .event_seq = 0U,
+            .key = workload.writes.front().key,
+            .state = blackbox::ClientValueState::Present,
+            .value = CanonicalYcsbCodec::encodeValue(
+                fields(std::string("impossible"))),
+            .source = blackbox::ClientReadSource::Snapshot,
+        }},
+    };
+    client.read_digest = blackbox::computeClientReadDigest(client.reads);
+    checker.consumeWorkload(2U, client, workload.writes);
+    return checker.observation();
+  };
+  const auto mariadb_observation = checker_observation(mariadb[3]);
+  const auto yugabyte_observation = checker_observation(transactions[3]);
+  BLACKBOX_CHECK(mariadb_observation == yugabyte_observation);
+  BLACKBOX_CHECK(yugabyte_observation ==
+                 blackbox::CheckerObservation::ViolationObserved);
 
   const auto expect_yugabyte_error = [&](Json invalid,
                                          const CdcErrorCode expected) {

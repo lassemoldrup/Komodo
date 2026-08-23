@@ -235,7 +235,9 @@ require_configuration() {
     write_provenance_file "$BLACKBOX_RUN_ID_PATH" "$BLACKBOX_ACTIVE_RUN_ID"
   fi
 
-  local -a monitor_measurement_arguments=()
+  local -a monitor_measurement_arguments=(
+    "${BLACKBOX_BACKEND_MONITOR_ARGUMENTS[@]}"
+  )
   if [[ $BLACKBOX_PROCESSING_MODE == join-only ]]; then
     monitor_measurement_arguments+=(--processing-mode join-only)
   fi
@@ -366,8 +368,14 @@ wait_for_healthy_container() {
 wait_for_cdc_streaming() {
   local deadline=$(( $(date +%s) + BLACKBOX_STACK_TIMEOUT_SECONDS ))
   while (( $(date +%s) <= deadline )); do
-    if blackbox_backend_wait_for_connector_progress; then
+    local progress_status=0
+    blackbox_backend_wait_for_connector_progress || progress_status=$?
+    if ((progress_status == 0)); then
       return 0
+    fi
+    if ((progress_status == 2)); then
+      blackbox_die "backend reported terminal connector-progress failure"
+      return 1
     fi
     local state
     state=$("$BLACKBOX_DOCKER" inspect --format '{{.State.Status}}' \

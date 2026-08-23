@@ -561,6 +561,7 @@ blackbox_backend_initialize() {
   BLACKBOX_DB_USER=application
   BLACKBOX_DB_PASSWORD=password
   BLACKBOX_BACKEND_SOURCE_ID=$MOCK_SOURCE_ID
+  BLACKBOX_BACKEND_MONITOR_ARGUMENTS=()
 }
 blackbox_backend_prepare_run() { mock_driver_gate prepare_run; }
 blackbox_backend_require_commands() { mock_driver_gate require_commands; }
@@ -595,7 +596,10 @@ blackbox_backend_active_external_connections() {
   cat "$ACTIVE_CONNECTIONS_FILE"
 }
 blackbox_backend_wait_for_connector_progress() {
-  mock_driver_gate wait_for_connector_progress
+  if ! mock_driver_gate wait_for_connector_progress; then
+    [[ ${FAIL_DRIVER_OPERATION:-} == wait_for_connector_progress ]] && return 2
+    return 1
+  fi
 }
 blackbox_backend_capture_attestation_inputs() {
   mock_driver_gate capture_attestation_inputs || return 1

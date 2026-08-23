@@ -190,6 +190,11 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
         assert isinstance(fields, list)
         fields[1] = json.dumps(value, separators=(",", ":"))
 
+    @staticmethod
+    def renumber(capture: list[list[object]]) -> None:
+        for index, entry in enumerate(capture, start=1):
+            entry[0] = f"{index}-0"
+
     def test_provenance_is_immutable_and_single_slot(self) -> None:
         subprocess.run([sys.executable, str(ROOT / "verify_provenance.py")], check=True)
 
@@ -355,6 +360,33 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
 
     def test_partial_delivery_without_end_fails(self) -> None:
         self.mutated_capture(lambda capture: capture.pop(), "PARTIAL_DELIVERY")
+
+    def test_missing_row_fails_from_the_raw_yugabyte_frame(self) -> None:
+        def mutate(capture: list[list[object]]) -> None:
+            capture.pop(2)
+            self.renumber(capture)
+
+        self.mutated_capture(mutate, "ROW_ORDINAL_INVALID")
+
+    def test_duplicate_row_fails_from_the_raw_yugabyte_frame(self) -> None:
+        def mutate(capture: list[list[object]]) -> None:
+            capture.insert(2, copy.deepcopy(capture[1]))
+            self.renumber(capture)
+
+        self.mutated_capture(mutate, "ROW_ORDINAL_INVALID")
+
+    def test_reordered_rows_fail_without_changing_stream_id_order(self) -> None:
+        def mutate(capture: list[list[object]]) -> None:
+            capture[1][1], capture[2][1] = capture[2][1], capture[1][1]
+
+        self.mutated_capture(mutate, "ROW_ORDINAL_INVALID")
+
+    def test_duplicate_end_fails_outside_the_completed_frame(self) -> None:
+        def mutate(capture: list[list[object]]) -> None:
+            capture.append(copy.deepcopy(capture[-1]))
+            self.renumber(capture)
+
+        self.mutated_capture(mutate, "TRANSACTION_FRAMING_INVALID")
 
     def test_noncontiguous_total_order_fails(self) -> None:
         def mutate(capture: list[list[object]]) -> None:

@@ -7,11 +7,19 @@ import argparse
 import base64
 import json
 import struct
+import sys
 from pathlib import Path
 from typing import Any
 
+TEST_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(TEST_ROOT.parent / "protocol" / "tools"))
+sys.path.insert(0, str(TEST_ROOT.parent / "scripts"))
+
+from blackbox_record import canonical_attestation_digest  # noqa: E402
+from tpcc_client_fixture import read_digest, rolling_digest  # noqa: E402
 from yugabytedb_ysql_acceptance_evidence import (
     cdc_frames,
+    marker_identity,
     validate_client_cdc_correlations,
     validate_runtime_provenance,
 )
@@ -33,6 +41,158 @@ def records(path: Path, *, named_payload: bool = True) -> list[dict[str, Any]]:
             require(fields[0] == "payload", f"malformed payload in {path}")
         result.append(json.loads(fields[1]))
     return result
+
+
+def independently_reconcile_case(
+    directory: Path,
+    case: str,
+    final: dict[str, Any],
+    *,
+    expected_client_count: int,
+    expect_reconciled: bool,
+) -> dict[str, Any]:
+    client_records = records(directory / f"{case}-client.json")
+    manifests = [record for record in client_records if record.get("kind") == "run_manifest"]
+    require(len(manifests) == 1, f"{case} RunManifest count differs")
+    manifest = manifests[0]
+    run_id = final["run_id"]
+    require(manifest.get("run_id") == run_id, f"{case} RunManifest run ID differs")
+    expected_sessions = manifest.get("expected_session_ids")
+    require(expected_sessions == ["ycsb/worker/1", "ycsb/worker/2"],
+            f"{case} expected-session roster differs")
+
+    attestations = [
+        record for record in client_records if record.get("kind") == "schema_attestation"
+    ]
+    require(
+        len(attestations) == 2
+        and [record.get("phase") for record in attestations] == ["STARTUP", "FINAL"],
+        f"{case} schema-attestation phase roster differs",
+    )
+    for attestation in attestations:
+        require(
+            attestation.get("run_id") == run_id
+            and attestation.get("backend") == manifest.get("backend")
+            and attestation.get("backend_source_id") == manifest.get("backend_source_id")
+            and canonical_attestation_digest(attestation)
+            == attestation.get("canonical_attestation_digest"),
+            f"{case} schema-attestation identity or digest differs",
+        )
+    startup, final_attestation = attestations
+    require(
+        startup["tables"] == final_attestation["tables"]
+        and startup["backend_facts"] == final_attestation["backend_facts"]
+        and startup["canonical_attestation_digest"]
+        == final_attestation["canonical_attestation_digest"],
+        f"{case} STARTUP/FINAL schema or capture evidence differs",
+    )
+    bootstrap = [
+        record for record in client_records if record.get("kind") == "bootstrap_manifest"
+    ]
+    require(len(bootstrap) == 1 and bootstrap[0].get("run_id") == run_id,
+            f"{case} BootstrapManifest differs")
+
+    clients = [record for record in client_records if record.get("kind") == "client_txn"]
+    require(len(clients) == expected_client_count, f"{case} ClientTxn count differs")
+    clients_by_session: dict[str, list[dict[str, Any]]] = {
+        session: [] for session in expected_sessions
+    }
+    client_correlations: list[tuple[str, int]] = []
+    for client in clients:
+        correlation = client.get("correlation_id")
+        require(
+            client.get("run_id") == run_id
+            and client.get("session_id") in clients_by_session
+            and isinstance(correlation, dict)
+            and correlation.get("run_id") == run_id
+            and correlation.get("session_id") == client.get("session_id")
+            and read_digest(client.get("reads", [])) == client.get("read_digest")
+            and client.get("read_count") == len(client.get("reads", [])),
+            f"{case} ClientTxn identity or read digest differs",
+        )
+        clients_by_session[client["session_id"]].append(client)
+        client_correlations.append((correlation["session_id"], correlation["txn_id"]))
+
+    done_records = [
+        record for record in client_records if record.get("kind") == "session_done"
+    ]
+    require(len(done_records) == 2, f"{case} SessionDone count differs")
+    done_by_session = {record.get("session_id"): record for record in done_records}
+    require(set(done_by_session) == set(expected_sessions), f"{case} SessionDone roster differs")
+    for session in expected_sessions:
+        done = done_by_session[session]
+        session_clients = sorted(
+            clients_by_session[session], key=lambda record: record["session_seq"]
+        )
+        require(
+            done.get("run_id") == run_id
+            and done.get("published_transactions") == len(session_clients)
+            and done.get("logical_transactions_started")
+            == done.get("successful_transactions") + done.get("terminal_aborted_transactions")
+            and done.get("physical_attempts_started")
+            == done.get("successful_transactions")
+            + done.get("definitively_aborted_attempts")
+            + done.get("ambiguous_attempts")
+            and done.get("ambiguous_attempts") == 0
+            and rolling_digest(run_id, session, session_clients)
+            == done.get("rolling_correlation_digest"),
+            f"{case} SessionDone counters or digest differ for {session}",
+        )
+
+    raw_frames = cdc_frames(directory / f"{case}-cdc.json")
+    fence_phases: list[str] = []
+    marker_correlations: list[tuple[str, int]] = []
+    for frame in raw_frames:
+        if len(frame) == 1 and frame[0].get("source", {}).get("table") == "checker_run_fence":
+            after = frame[0].get("after")
+            require(isinstance(after, dict) and after.get("run_id") == run_id,
+                    f"{case} fence run ID differs")
+            fence_phases.append(after.get("phase"))
+        if frame and frame[-1].get("source", {}).get("table") == "session_txn":
+            marker_correlations.append(marker_identity(frame[-1]))
+    require(fence_phases == ["RUN_START", "LOAD_FINISHED", "END_FENCE"],
+            f"{case} fence order differs")
+    require(len(raw_frames) == final.get("assembled_cdc_transactions") == 6,
+            f"{case} raw/assembled CDC transaction count differs")
+    require(
+        len(marker_correlations) == 2
+        and {session for session, _ in marker_correlations} == set(expected_sessions),
+        f"{case} marker correlation roster differs",
+    )
+
+    reconciliation = final.get("reconciliation", {})
+    require(
+        reconciliation.get("expected_sessions") == len(expected_sessions)
+        and reconciliation.get("completed_sessions") == len(done_records)
+        and reconciliation.get("accepted_client_transactions") == len(clients)
+        and reconciliation.get("phase_anchor_transactions") == len(expected_sessions)
+        and reconciliation.get("bootstrap_cdc_transactions") == 1
+        and reconciliation.get("bootstrap_checker_transactions") == 1
+        and reconciliation.get("bootstrap_manifest_validated") is True
+        and reconciliation.get("startup_schema_attested") is True
+        and reconciliation.get("final_schema_attested") is True
+        and reconciliation.get("schema_attestation_digest")
+        == startup["canonical_attestation_digest"]
+        and reconciliation.get("end_fence_seen") is True
+        and reconciliation.get("evidence_reconciled") is expect_reconciled,
+        f"{case} independent/final reconciliation differs",
+    )
+    if expect_reconciled:
+        require(
+            sorted(client_correlations) == sorted(marker_correlations)
+            and reconciliation.get("joined_workload_transactions") == len(clients)
+            and reconciliation.get("unmatched_client_records") == 0
+            and reconciliation.get("unmatched_workload_cdc_slots") == 0
+            and reconciliation.get("checker_consumed_transactions")
+            == 1 + len(expected_sessions) + len(clients),
+            f"{case} complete correlation reconciliation differs",
+        )
+    return {
+        "run_id": run_id,
+        "client_correlations": client_correlations,
+        "marker_correlations": marker_correlations,
+        "schema_attestation_digest": startup["canonical_attestation_digest"],
+    }
 
 
 def case_final_status(directory: Path, case: str, outcome: str) -> dict[str, Any]:
@@ -86,6 +246,11 @@ def dropped_client_final_status(directory: Path) -> dict[str, Any]:
             "dropped-client diagnostic is absent")
     require(all(item.get("code") != "CDC_ORDER_INVALID" for item in diagnostics),
             "dropped-client run invented a CDC-order failure")
+    require(
+        {item.get("code") for item in diagnostics}
+        == {"CLIENT_HALF_MISSING", "RECONCILIATION_MISMATCH"},
+        "dropped-client run contains an unrelated operational diagnostic",
+    )
 
     client_records = records(directory / f"{case}-client.json")
     manifests = [record for record in client_records if record.get("kind") == "run_manifest"]
@@ -106,7 +271,177 @@ def dropped_client_final_status(directory: Path) -> dict[str, Any]:
     ]
     require(len(marker_frames) == 2,
             "dropped-client raw marker-bearing frame count differs")
+    audit = independently_reconcile_case(
+        directory,
+        case,
+        final,
+        expected_client_count=1,
+        expect_reconciled=False,
+    )
+    surviving = set(audit["client_correlations"])
+    committed = set(audit["marker_correlations"])
+    require(
+        surviving == {("ycsb/worker/2", 1)}
+        and committed == {("ycsb/worker/1", 1), ("ycsb/worker/2", 1)}
+        and committed - surviving == {("ycsb/worker/1", 1)},
+        "dropped-client missing correlation is not the injected transaction",
+    )
     return final
+
+
+def operational_invalid_status(
+    directory: Path, case: str, expected_code: str
+) -> dict[str, Any]:
+    finals = [
+        record
+        for record in records(directory / f"{case}-status.json")
+        if record.get("lifecycle_state") == "FINAL"
+    ]
+    require(len(finals) == 1, f"{case} final-status count differs")
+    final = finals[0]
+    reconciliation = final.get("reconciliation", {})
+    require(
+        final.get("outcome") == "INVALID"
+        and final.get("checker_observation") != "VIOLATION_OBSERVED"
+        and reconciliation.get("evidence_reconciled") is False
+        and reconciliation.get("startup_schema_attested") is True
+        and reconciliation.get("final_schema_attested") is False
+        and reconciliation.get("accepted_client_transactions") == 2
+        and reconciliation.get("joined_workload_transactions") == 2
+        and reconciliation.get("unmatched_client_records") == 0
+        and reconciliation.get("unmatched_workload_cdc_slots") == 0,
+        f"{case} final invalid reconciliation differs",
+    )
+    require(
+        {item.get("code") for item in final.get("diagnostics", [])}
+        == {expected_code, "SCHEMA_ATTESTATION_MISSING", "RECONCILIATION_MISMATCH"},
+        f"{case} diagnostic roster differs",
+    )
+
+    client_records = records(directory / f"{case}-client.json")
+    manifests = [record for record in client_records if record.get("kind") == "run_manifest"]
+    startup = [
+        record
+        for record in client_records
+        if record.get("kind") == "schema_attestation" and record.get("phase") == "STARTUP"
+    ]
+    clients = [record for record in client_records if record.get("kind") == "client_txn"]
+    done = [record for record in client_records if record.get("kind") == "session_done"]
+    require(
+        len(manifests) == len(startup) == 1
+        and len(clients) == len(done) == 2
+        and manifests[0].get("run_id") == startup[0].get("run_id") == final.get("run_id")
+        and canonical_attestation_digest(startup[0])
+        == startup[0].get("canonical_attestation_digest")
+        and reconciliation.get("schema_attestation_digest")
+        == startup[0].get("canonical_attestation_digest"),
+        f"{case} startup/client evidence differs",
+    )
+    raw_frames = cdc_frames(directory / f"{case}-cdc.json")
+    if expected_code == "UNMARKED_APPLICATION_TRANSACTION":
+        injected = [
+            row
+            for frame in raw_frames
+            for row in frame
+            if row.get("source", {}).get("table") == "usertable"
+            and (row.get("after") or {}).get("ycsb_key") == 9001
+        ]
+        require(
+            len(injected) == 1
+            and all(row.get("source", {}).get("table") != "session_txn"
+                    for row in next(frame for frame in raw_frames if injected[0] in frame)),
+            "external-writer raw transaction is absent or marked",
+        )
+    else:
+        injected = [
+            row
+            for frame in raw_frames
+            for row in frame
+            if row.get("source", {}).get("table") == "usertable"
+            and "injected_ddl_value" in (row.get("after") or {})
+        ]
+        require(len(injected) == 1, "live-DDL changed row shape is absent")
+    return final
+
+
+def connector_stall_status(directory: Path) -> dict[str, Any]:
+    case = "connector_stall_invalid"
+    status_records = records(directory / f"{case}-status.json")
+    require(
+        not any(record.get("lifecycle_state") == "FINAL" for record in status_records),
+        "connector-stall case unexpectedly reached a final verdict",
+    )
+    lifecycle_states = [record.get("lifecycle_state") for record in status_records]
+    require(
+        "START_FENCE_SEEN" in lifecycle_states and "LOAD_FINISHED_SEEN" in lifecycle_states,
+        "connector stall did not occur after connector admission and bootstrap",
+    )
+    require(
+        all(record.get("outcome") == "RUNNING" for record in status_records),
+        "connector-stall status stream contains an unsupported terminal outcome",
+    )
+
+    operation: dict[str, str] = {}
+    for line in (directory / f"{case}-operation.txt").read_text(encoding="utf-8").splitlines():
+        name, separator, value = line.partition("=")
+        require(bool(separator) and name not in operation, "connector-stall evidence is malformed")
+        operation[name] = value
+    require(
+        operation.get("admitted_slot_active") == "1"
+        and operation.get("paused_state") == "true"
+        and operation.get("pause_requested_ns", "").isdigit()
+        and operation.get("pause_completed_ns", "").isdigit()
+        and operation.get("unpause_completed_ns", "").isdigit()
+        and int(operation["pause_requested_ns"])
+        <= int(operation["pause_completed_ns"])
+        < int(operation["unpause_completed_ns"]),
+        "connector-stall pause provenance differs",
+    )
+    log = (directory / f"{case}.log").read_text(encoding="utf-8")
+    require(
+        "waiting for final monitor result" in log
+        and "timed out waiting for monitor lifecycle state FINAL" in log,
+        "connector-stall run did not fail closed at the final boundary",
+    )
+
+    client_records = records(directory / f"{case}-client.json")
+    manifests = [record for record in client_records if record.get("kind") == "run_manifest"]
+    attestations = [
+        record for record in client_records if record.get("kind") == "schema_attestation"
+    ]
+    done = [record for record in client_records if record.get("kind") == "session_done"]
+    clients = [record for record in client_records if record.get("kind") == "client_txn"]
+    require(
+        len(manifests) == 1
+        and [record.get("phase") for record in attestations] == ["STARTUP", "FINAL"]
+        and len(done) == len(clients) == 2,
+        "connector-stall client evidence roster differs",
+    )
+    run_id = manifests[0].get("run_id")
+    require(
+        isinstance(run_id, str)
+        and all(record.get("run_id") == run_id for record in status_records)
+        and all(record.get("run_id") == run_id for record in attestations + done + clients),
+        "connector-stall run identity differs",
+    )
+    for attestation in attestations:
+        require(
+            canonical_attestation_digest(attestation)
+            == attestation.get("canonical_attestation_digest"),
+            "connector-stall attestation digest differs",
+        )
+    frames = cdc_frames(directory / f"{case}-cdc.json")
+    fence_phases = [
+        frame[0].get("after", {}).get("phase")
+        for frame in frames
+        if len(frame) == 1
+        and frame[0].get("source", {}).get("table") == "checker_run_fence"
+    ]
+    require(
+        fence_phases == ["RUN_START", "LOAD_FINISHED"],
+        "connector-stall capture did not stop before the committed END fence",
+    )
+    return {"run_id": run_id, "outcome": "INVALID", "reason": "CONNECTOR_STALL"}
 
 
 def first_field(record: dict[str, Any]) -> str:
@@ -205,6 +540,9 @@ def main() -> None:
         "fractured_repeatable_read",
         "fractured_read_committed",
         "dropped_client_record",
+        "external_writer_invalid",
+        "live_ddl_invalid",
+        "connector_stall_invalid",
     )
     connector_image_id = validate_runtime_provenance(
         args.provenance,
@@ -214,10 +552,32 @@ def main() -> None:
         ],
     )
 
+    retry_final = case_final_status(directory, "definitive_retry", "PASS")
     retry = verify_retry(directory)
     repeatable = case_final_status(directory, "fractured_repeatable_read", "PASS")
     committed = case_final_status(directory, "fractured_read_committed", "VIOLATION")
     dropped = dropped_client_final_status(directory)
+    external_writer = operational_invalid_status(
+        directory, "external_writer_invalid", "UNMARKED_APPLICATION_TRANSACTION"
+    )
+    live_ddl = operational_invalid_status(
+        directory, "live_ddl_invalid", "CDC_RECORD_MALFORMED"
+    )
+    connector_stall = connector_stall_status(directory)
+    reconciled_audits = {
+        case: independently_reconcile_case(
+            directory,
+            case,
+            final,
+            expected_client_count=2,
+            expect_reconciled=True,
+        )
+        for case, final in (
+            ("definitive_retry", retry_final),
+            ("fractured_repeatable_read", repeatable),
+            ("fractured_read_committed", committed),
+        )
+    }
     for case, final, benchmark, isolation in (
         ("definitive_retry", retry, "ycsb", "REPEATABLE_READ"),
         (
@@ -267,6 +627,11 @@ def main() -> None:
         path = directory / f"dropped_client_record-{suffix}"
         require(path.is_file() and path.stat().st_size > 0,
                 f"missing dropped-client raw evidence: {path.name}")
+    for case in ("external_writer_invalid", "live_ddl_invalid", "connector_stall_invalid"):
+        for suffix in ("cdc.raw.txt", "client.raw.txt", "status.raw.txt", "compose.log"):
+            path = directory / f"{case}-{suffix}"
+            require(path.is_file() and path.stat().st_size > 0,
+                    f"missing operational raw evidence: {path.name}")
 
     report = {
         "kind": "yugabytedb_ysql_ycsb_semantic_acceptance",
@@ -283,12 +648,24 @@ def main() -> None:
             "diagnostic": "CLIENT_HALF_MISSING",
             "evidence_reconciled": False,
         },
+        "external_writer_invalid": {
+            "run_id": external_writer["run_id"],
+            "outcome": "INVALID",
+            "diagnostic": "UNMARKED_APPLICATION_TRANSACTION",
+        },
+        "live_ddl_invalid": {
+            "run_id": live_ddl["run_id"],
+            "outcome": "INVALID",
+            "diagnostic": "CDC_RECORD_MALFORMED",
+        },
+        "connector_stall_invalid": connector_stall,
         "repeatable_read_values": ["old", "old", "old"],
         "read_committed_values": ["old", "old", "new"],
         "null_empty_utf8_validated": True,
         "aborted_attempt_emitted_no_marker": True,
         "runtime_connector_image_id": connector_image_id,
-        "evidence_reconciled": True,
+        "independently_reconciled_verdict_cases": reconciled_audits,
+        "all_expected_outcomes_validated": True,
     }
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))

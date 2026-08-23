@@ -419,6 +419,14 @@ private:
     if (sessions.size() != manifest_.expected_session_ids.size()) {
       throw std::invalid_argument("RunManifest session roster is duplicated");
     }
+    std::set<std::string> expected_fact_names;
+    for (const auto &fact : config_.expected_backend_facts) {
+      if (fact.name.empty() || fact.canonical_value.empty() ||
+          !expected_fact_names.insert(fact.name).second) {
+        throw std::invalid_argument(
+            "expected backend fact configuration is invalid");
+      }
+    }
   }
 
   static void requireStreamId(const std::string_view stream_id,
@@ -452,6 +460,17 @@ private:
     } catch (const MonitorError &error) {
       invalidate(error.code(), error.what());
       return;
+    }
+    for (const auto &expected : config_.expected_backend_facts) {
+      const auto observed = std::find_if(
+          attestation.backend_facts.begin(), attestation.backend_facts.end(),
+          [&](const auto &fact) { return fact.name == expected.name; });
+      if (observed == attestation.backend_facts.end() ||
+          observed->canonical_value != expected.canonical_value) {
+        invalidate(MonitorErrorCode::BackendFactMismatch,
+                   "SchemaAttestation run-owned backend fact differs");
+        return;
+      }
     }
     if (attestation.phase == SchemaAttestationPhase::Startup) {
       if (startup_schema_attestation_.has_value()) {

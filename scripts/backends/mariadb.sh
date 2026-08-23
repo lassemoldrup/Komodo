@@ -15,6 +15,9 @@ blackbox_backend_initialize() {
   BLACKBOX_JDBC_URL=${BLACKBOX_JDBC_URL:-jdbc:mariadb://${BLACKBOX_DB_HOST}:${BLACKBOX_DB_PORT}/benchbase?sslMode=disable\&useServerPrepStmts=true}
   BLACKBOX_MARIADB_CLI=${BLACKBOX_MARIADB_CLI:-mariadb}
   BLACKBOX_ADAPTER_SCHEMA_FILE=
+  # Consumed by the generic coordinator after this sourced driver returns.
+  # shellcheck disable=SC2034
+  BLACKBOX_BACKEND_MONITOR_ARGUMENTS=()
   export BLACKBOX_COMPOSE_PROFILE BLACKBOX_DATABASE_SERVICE
   export BLACKBOX_DATABASE_CONTAINER BLACKBOX_CONNECTOR_SERVICE
   export BLACKBOX_CONNECTOR_CONTAINER BLACKBOX_DB_PORT

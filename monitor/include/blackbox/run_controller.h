@@ -73,6 +73,9 @@ struct RunControllerConfig {
   ProtocolRecordParserLimits record_parser_limits;
   TransactionJoinerLimits joiner_limits;
   RunControllerLimits limits;
+  // Run-owned dynamic capture facts supplied by the coordinator. The backend
+  // adapter still validates the complete fact roster and value shapes.
+  std::vector<ProtocolBackendFact> expected_backend_facts;
   ProcessingMode processing_mode = ProcessingMode::Audited;
 };
 
