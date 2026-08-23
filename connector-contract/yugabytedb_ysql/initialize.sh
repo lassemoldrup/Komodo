@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly database_host=yugabytedb_ysql
+readonly database_host=${CONNECTOR_CONTRACT_DATABASE_HOST:-yugabytedb_ysql}
 readonly database_name=benchbase
 readonly plugin=${CONNECTOR_CONTRACT_PLUGIN:-pgoutput}
 readonly slot=${CONNECTOR_CONTRACT_SLOT:-connector_contract_slot}
@@ -51,6 +51,6 @@ ysql_admin benchbase --command \
 ysql_admin benchbase --command \
   "SELECT schemaname, tablename FROM pg_publication_tables WHERE pubname = 'connector_contract_publication' ORDER BY schemaname, tablename"
 ysql_admin benchbase --command \
-  "SELECT c.relname, c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'benchbase' AND c.relname IN ('usertable','checker_run_fence','session_txn') ORDER BY c.relname"
+  "SELECT c.relname, c.relreplident FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'benchbase' AND c.relkind = 'r' ORDER BY c.relname"
 ysql_admin benchbase --command \
-  "SELECT (SELECT count(*) FROM benchbase.usertable) AS usertable_rows, (SELECT count(*) FROM benchbase.checker_run_fence) AS fence_rows, (SELECT count(*) FROM benchbase.session_txn) AS marker_rows"
+  "SELECT (SELECT count(*) FROM benchbase.usertable) AS usertable_rows, (SELECT count(*) FROM benchbase.checker_run_fence) AS fence_rows, (SELECT count(*) FROM benchbase.session_txn) AS marker_rows, (SELECT count(*) FROM benchbase.contract_account_a) + (SELECT count(*) FROM benchbase.contract_account_b) + (SELECT count(*) FROM benchbase.contract_account_c) + (SELECT count(*) FROM benchbase.contract_account_d) AS contract_rows, (SELECT count(*) FROM benchbase.warehouse) + (SELECT count(*) FROM benchbase.district) AS tpcc_rows"

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
+ROOT = Path(__file__).resolve().parent
 SOURCE_VERSION = "dz.2.5.2.yb.2026.1"
 SOURCE_NAME = "connector_contract"
 CANONICAL_SCHEMA = "benchbase"
@@ -40,6 +41,36 @@ TABLES: dict[str, dict[str, tuple[str, ...]]] = {
     "session_txn": {
         "columns": ("session_id", "txn_id"),
         "primary_key": ("session_id",),
+    },
+    "contract_account_a": {
+        "columns": ("account_id", "payload"),
+        "primary_key": ("account_id",),
+    },
+    "contract_account_b": {
+        "columns": ("account_id", "payload"),
+        "primary_key": ("account_id",),
+    },
+    "contract_account_c": {
+        "columns": ("account_id", "payload"),
+        "primary_key": ("account_id",),
+    },
+    "contract_account_d": {
+        "columns": ("account_id", "payload"),
+        "primary_key": ("account_id",),
+    },
+    "warehouse": {
+        "columns": (
+            "w_id", "w_ytd", "w_tax", "w_name", "w_street_1",
+            "w_street_2", "w_city", "w_state", "w_zip",
+        ),
+        "primary_key": ("w_id",),
+    },
+    "district": {
+        "columns": (
+            "d_w_id", "d_id", "d_ytd", "d_tax", "d_next_o_id",
+            "d_name", "d_street_1", "d_street_2", "d_city", "d_state", "d_zip",
+        ),
+        "primary_key": ("d_w_id", "d_id"),
     },
 }
 
@@ -141,6 +172,23 @@ def load_capture_metadata(capture_path: Path, plugin: str, redis_batch_size: int
         raise ContractViolation("FIXTURE_METADATA_INVALID", f"cannot decode capture metadata: {error}") from error
     require(isinstance(metadata, dict), "FIXTURE_METADATA_INVALID", "capture metadata must be an object")
 
+    provenance_path = capture_path.parent / "provenance.lock.json"
+    if not provenance_path.is_file():
+        provenance_path = ROOT / "provenance.lock.json"
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ContractViolation(
+            "CONNECTOR_IMAGE_IDENTITY_MISMATCH",
+            f"cannot decode locked provenance: {error}",
+        ) from error
+    artifacts = provenance.get("artifacts")
+    require(
+        isinstance(artifacts, dict),
+        "CONNECTOR_IMAGE_IDENTITY_MISMATCH",
+        "locked provenance artifacts are absent",
+    )
+
     required_fields = {
         "capture_id",
         "captured_at_utc",
@@ -178,6 +226,38 @@ def load_capture_metadata(capture_path: Path, plugin: str, redis_batch_size: int
         f"missing={sorted(required_fields - actual_fields)} extra={sorted(actual_fields - required_fields - optional_fields)}",
     )
     require(metadata["platform"] == "linux/amd64", "FIXTURE_METADATA_INVALID", "capture platform differs")
+    locked_values = {
+        "database_image": artifacts["database"]["image"],
+        "database_binary_version": artifacts["database"]["version"],
+        "connector_version": artifacts["connector"]["version"],
+        "connector_sha256": artifacts["connector"]["sha256"],
+        "debezium_server_version": artifacts["debezium_server"]["version"],
+        "java_runtime_version": artifacts["java_runtime"]["version"],
+        "redis_version": artifacts["redis"]["version"],
+        "locally_built_image_id": artifacts["connector_contract_image"]["local_image_id"],
+    }
+    for field, expected in locked_values.items():
+        require(
+            metadata.get(field) == expected,
+            "CONNECTOR_IMAGE_IDENTITY_MISMATCH",
+            f"capture {field} differs from locked provenance",
+        )
+    image_path = capture_path.parent / "connector-contract-image.json"
+    if image_path.is_file():
+        try:
+            image_details = json.loads(image_path.read_text(encoding="utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ContractViolation(
+                "CONNECTOR_IMAGE_IDENTITY_MISMATCH",
+                f"cannot decode connector image inspection: {error}",
+            ) from error
+        require(
+            isinstance(image_details, list)
+            and len(image_details) == 1
+            and image_details[0].get("Id") == locked_values["locally_built_image_id"],
+            "CONNECTOR_IMAGE_IDENTITY_MISMATCH",
+            "inspected connector image differs from locked provenance",
+        )
     require(metadata["plugin"] == plugin == "pgoutput", "PLUGIN_NOT_ADMITTED", "capture plugin differs")
     require(metadata["slot_lsn_type"] == "SEQUENCE", "CAPTURE_TOPOLOGY_INVALID", "slot is not SEQUENCE")
     require(metadata["streaming_mode"] == "default", "CAPTURE_TOPOLOGY_INVALID", "streaming mode is not default")
@@ -201,7 +281,11 @@ def load_capture_metadata(capture_path: Path, plugin: str, redis_batch_size: int
         f"Redis batch size differs: metadata={metadata['redis_sink_batch_size']} command={redis_batch_size}",
     )
     require(metadata["connector_version"] == SOURCE_VERSION, "SOURCE_VERSION_MISMATCH", "metadata connector version differs")
-    if metadata["scenario"] == "redis_backpressure":
+    if metadata["scenario"] in {
+        "redis_backpressure",
+        "redis_backpressure_reversal",
+        "queue_saturation_order",
+    }:
         backpressure = metadata.get("backpressure")
         require(
             isinstance(backpressure, dict)
@@ -274,7 +358,11 @@ def load_capture_metadata(capture_path: Path, plugin: str, redis_batch_size: int
             "INDEPENDENT_ORDER_EVIDENCE_MISSING",
             f"independent ordering artifact is absent: {independent_name}",
         )
-    if metadata["scenario"] == "redis_backpressure":
+    if metadata["scenario"] in {
+        "redis_backpressure",
+        "redis_backpressure_reversal",
+        "queue_saturation_order",
+    }:
         for evidence_name in (
             "backpressure-evidence.json",
             "redis-paused-clients.txt",
@@ -283,6 +371,25 @@ def load_capture_metadata(capture_path: Path, plugin: str, redis_batch_size: int
                 evidence_name in checksums,
                 "BACKPRESSURE_EVIDENCE_INVALID",
                 f"backpressure artifact is absent: {evidence_name}",
+            )
+        if metadata["scenario"] == "queue_saturation_order":
+            queue_evidence_name = "queue-saturation-evidence.json"
+            require(
+                queue_evidence_name in checksums,
+                "QUEUE_SATURATION_EVIDENCE_INVALID",
+                "connector queue saturation evidence is absent",
+            )
+            queue_evidence = json.loads(
+                (capture_path.parent / queue_evidence_name).read_text(encoding="utf-8")
+            )
+            require(
+                queue_evidence.get("kind")
+                == "debezium_connector_queue_saturation_evidence"
+                and queue_evidence.get("status") == "PASSED"
+                and queue_evidence.get("minimum_remaining_capacity") == 0
+                and queue_evidence.get("saturated_samples", 0) > 0,
+                "QUEUE_SATURATION_EVIDENCE_INVALID",
+                "connector queue saturation was not observed",
             )
     for name, expected in checksums.items():
         require(
@@ -395,14 +502,42 @@ def validate_metadata_record(entry: dict[str, Any], expected_status: str) -> Non
 
 
 def validate_column(table: str, column: str, value: Any, label: str) -> None:
-    if column in {"ycsb_key", "txn_id"}:
+    if column in {
+        "ycsb_key", "txn_id", "account_id", "w_id", "d_w_id", "d_id",
+        "d_next_o_id",
+    }:
         require(type(value) is int, "FULL_IMAGE_INVALID", f"{label}.{column} is not an integer")
+        return
+    if column in {"w_ytd", "w_tax", "d_ytd", "d_tax"}:
+        require(
+            isinstance(value, str) and re.fullmatch(r"-?[0-9]+\.[0-9]+", value) is not None,
+            "FULL_IMAGE_INVALID",
+            f"{label}.{column} is not a decimal string",
+        )
         return
     nullable = table == "usertable" and column != "ycsb_key"
     if value is None:
         require(nullable, "FULL_IMAGE_INVALID", f"{label}.{column} is unexpectedly null")
         return
-    limits = {"run_id": 36, "phase": 32, "nonce": 36, "session_id": 64}
+    limits = {
+        "run_id": 36,
+        "phase": 32,
+        "nonce": 36,
+        "session_id": 64,
+        "payload": 100,
+        "w_name": 10,
+        "w_street_1": 20,
+        "w_street_2": 20,
+        "w_city": 20,
+        "w_state": 2,
+        "w_zip": 9,
+        "d_name": 10,
+        "d_street_1": 20,
+        "d_street_2": 20,
+        "d_city": 20,
+        "d_state": 2,
+        "d_zip": 9,
+    }
     limit = 100 if column.startswith("field") else limits[column]
     require(isinstance(value, str), "FULL_IMAGE_INVALID", f"{label}.{column} is not text")
     require(len(value) <= limit, "FULL_IMAGE_INVALID", f"{label}.{column} exceeds {limit} characters")

@@ -208,6 +208,9 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="missing-order-evidence-") as temporary:
             capture = Path(temporary) / "redis-stream.json"
             capture.write_text(json.dumps(canonical_capture()), encoding="utf-8")
+            artifacts = json.loads(
+                (ROOT / "provenance.lock.json").read_text(encoding="utf-8")
+            )["artifacts"]
             metadata = {
                 "capture_id": "synthetic",
                 "captured_at_utc": "2026-01-01T00:00:00Z",
@@ -223,15 +226,15 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
                 "redis_streams": ["cdc"],
                 "source_max_batch_size": 2,
                 "redis_sink_batch_size": 2,
-                "database_image": "pinned",
-                "database_binary_version": "pinned",
+                "database_image": artifacts["database"]["image"],
+                "database_binary_version": artifacts["database"]["version"],
                 "database_build_hash": "0" * 40,
                 "connector_version": "dz.2.5.2.yb.2026.1",
-                "connector_sha256": "0" * 64,
-                "debezium_server_version": "2.5.2.Final",
-                "java_runtime_version": "21",
-                "redis_version": "7",
-                "locally_built_image_id": "sha256:" + "0" * 64,
+                "connector_sha256": artifacts["connector"]["sha256"],
+                "debezium_server_version": artifacts["debezium_server"]["version"],
+                "java_runtime_version": artifacts["java_runtime"]["version"],
+                "redis_version": artifacts["redis"]["version"],
+                "locally_built_image_id": artifacts["connector_contract_image"]["local_image_id"],
                 "expected_completed_transactions": [
                     {"session_id": "cross_tablet", "txn_id": 1}
                 ],
@@ -257,6 +260,18 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
                 "2",
                 "--expect-violation",
                 "INDEPENDENT_ORDER_EVIDENCE_MISSING",
+            )
+
+            metadata["locally_built_image_id"] = "sha256:" + "0" * 64
+            capture.with_name("capture-metadata.json").write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+            self.run_verifier(
+                capture,
+                "--redis-batch-size",
+                "2",
+                "--expect-violation",
+                "CONNECTOR_IMAGE_IDENTITY_MISMATCH",
             )
 
     def test_connector_output_extractor_uses_monitor_commands_not_expected_order(self) -> None:

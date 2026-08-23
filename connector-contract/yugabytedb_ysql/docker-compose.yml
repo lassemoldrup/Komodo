@@ -69,7 +69,10 @@ services:
       DEBEZIUM_SOURCE_SLOT_NAME: ${CONNECTOR_CONTRACT_SLOT:-connector_contract_slot}
       DEBEZIUM_SINK_REDIS_BATCH_SIZE: ${CONNECTOR_CONTRACT_REDIS_BATCH_SIZE:-1000}
       DEBEZIUM_SOURCE_MAX_BATCH_SIZE: ${CONNECTOR_CONTRACT_SOURCE_BATCH_SIZE:-2}
+      DEBEZIUM_SOURCE_MAX_QUEUE_SIZE: ${CONNECTOR_CONTRACT_MAX_QUEUE_SIZE:-32}
       DEBEZIUM_SOURCE_POLL_INTERVAL_MS: ${CONNECTOR_CONTRACT_POLL_INTERVAL_MS:-10}
+      JMX_HOST: connector-contract-debezium-server
+      JMX_PORT: "9010"
     volumes:
       - ./application.properties:/debezium/conf/application.properties:ro
     tmpfs:

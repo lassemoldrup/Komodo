@@ -43,6 +43,12 @@ def main() -> int:
     local_image_id = image_details[0].get("Id")
     if not isinstance(local_image_id, str) or not local_image_id.startswith("sha256:"):
         raise SystemExit("locally built connector image ID is absent")
+    locked_image_id = artifacts["connector_contract_image"]["local_image_id"]
+    if local_image_id != locked_image_id:
+        raise SystemExit(
+            "locally built connector image differs from provenance lock: "
+            f"expected={locked_image_id} actual={local_image_id}"
+        )
 
     database_build = (output_dir / "database-build.txt").read_text(encoding="utf-8")
     build_hash_match = re.search(r"Build Hash\s*:\s*([0-9a-f]{40})", database_build)
@@ -100,7 +106,11 @@ def main() -> int:
             "decision_boundary": DECISION_BOUNDARY,
         },
     }
-    if args.scenario == "redis_backpressure":
+    if args.scenario in {
+        "redis_backpressure",
+        "redis_backpressure_reversal",
+        "queue_saturation_order",
+    }:
         metadata["backpressure"] = json.loads(
             (output_dir / "backpressure-evidence.json").read_text(encoding="utf-8")
         )
