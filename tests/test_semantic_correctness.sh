@@ -8,8 +8,12 @@ SCRIPT="$ROOT/tests/test_semantic_correctness.sh"
 . "$ROOT/scripts/blackbox_lifecycle.sh"
 
 BLACKBOX_DOCKER=${BLACKBOX_DOCKER:-docker}
-COMPOSE=("$BLACKBOX_DOCKER" compose --file "$ROOT/docker-compose.yml" --profile mariadb)
+COMPOSE=(
+  "$BLACKBOX_DOCKER" compose --file "$ROOT/docker-compose.yml"
+  --profile "$BLACKBOX_COMPOSE_PROFILE"
+)
 CLIENT="$ROOT/tests/semantic_client.sh"
+YUGABYTEDB_YCSB_VALIDATOR="$ROOT/tests/verify_yugabytedb_ysql_ycsb_semantic.py"
 OUTPUT_ROOT=${BLACKBOX_CORRECTNESS_OUTPUT_ROOT:-/tmp}
 CASE_TIMEOUT_SECONDS=${BLACKBOX_CORRECTNESS_CASE_TIMEOUT_SECONDS:-600}
 CASE_KILL_AFTER_SECONDS=${BLACKBOX_CORRECTNESS_CASE_KILL_AFTER_SECONDS:-10}
@@ -37,16 +41,23 @@ require_positive_integer() {
 
 require_harness_configuration() {
   : "${BLACKBOX_MONITOR_BIN:?set BLACKBOX_MONITOR_BIN to blackbox_run_monitor}"
-  : "${BLACKBOX_BENCHBASE_BUILD_DIR:?set BLACKBOX_BENCHBASE_BUILD_DIR}"
-  : "${BLACKBOX_BENCHBASE_ROOT:?set BLACKBOX_BENCHBASE_ROOT}"
-  : "${BLACKBOX_MAVEN:?set BLACKBOX_MAVEN}"
   [[ -x $BLACKBOX_MONITOR_BIN ]]
   [[ -x $CLIENT ]]
-  [[ -f $BLACKBOX_BENCHBASE_ROOT/pom.xml ]]
+  if [[ -n ${BLACKBOX_BENCHBASE_DIST:-} ]]; then
+    [[ -f $BLACKBOX_BENCHBASE_DIST/benchbase.jar ]]
+    [[ -d $BLACKBOX_BENCHBASE_DIST/lib ]]
+  else
+    : "${BLACKBOX_BENCHBASE_BUILD_DIR:?set BLACKBOX_BENCHBASE_BUILD_DIR}"
+    : "${BLACKBOX_BENCHBASE_ROOT:?set BLACKBOX_BENCHBASE_ROOT}"
+    : "${BLACKBOX_MAVEN:?set BLACKBOX_MAVEN}"
+    [[ -f $BLACKBOX_BENCHBASE_ROOT/pom.xml ]]
+  fi
   command -v timeout >/dev/null 2>&1
   command -v "$BLACKBOX_DOCKER" >/dev/null 2>&1
   command -v "$BLACKBOX_REDIS_CLI" >/dev/null 2>&1
-  command -v "$BLACKBOX_MARIADB_CLI" >/dev/null 2>&1
+  if [[ $BLACKBOX_BACKEND == mariadb ]]; then
+    command -v "$BLACKBOX_MARIADB_CLI" >/dev/null 2>&1
+  fi
   command -v jq >/dev/null 2>&1
   command -v python3 >/dev/null 2>&1
   command -v setsid >/dev/null 2>&1
@@ -85,6 +96,26 @@ run_bounded_cleanup() {
 }
 
 
+run_bounded_function() {
+  "$@" &
+  local function_pid=$!
+  local deadline=$(( SECONDS + DIAGNOSTIC_TIMEOUT_SECONDS ))
+  while kill -0 "$function_pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      pkill --signal TERM --parent "$function_pid" >/dev/null 2>&1 || true
+      kill -TERM "$function_pid" >/dev/null 2>&1 || true
+      sleep 0.2
+      pkill --signal KILL --parent "$function_pid" >/dev/null 2>&1 || true
+      kill -KILL "$function_pid" >/dev/null 2>&1 || true
+      wait "$function_pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "$function_pid"
+}
+
+
 redis_command() {
   local command=(
     "$BLACKBOX_REDIS_CLI"
@@ -100,18 +131,22 @@ redis_command() {
 
 database_query() {
   local query=$1
-  run_bounded_diagnostic "$BLACKBOX_MARIADB_CLI" \
-    --skip-ssl \
-    --host="$BLACKBOX_DB_HOST" \
-    --port="$BLACKBOX_DB_PORT" \
-    --user="$BLACKBOX_DB_USER" \
-    --password="$BLACKBOX_DB_PASSWORD" \
-    --database=benchbase \
-    --default-character-set=utf8mb4 \
-    --batch \
-    --raw \
-    --skip-column-names \
-    --execute "$query"
+  if [[ $BLACKBOX_BACKEND == mariadb ]]; then
+    run_bounded_diagnostic "$BLACKBOX_MARIADB_CLI" \
+      --skip-ssl \
+      --host="$BLACKBOX_DB_HOST" \
+      --port="$BLACKBOX_DB_PORT" \
+      --user="$BLACKBOX_DB_USER" \
+      --password="$BLACKBOX_DB_PASSWORD" \
+      --database=benchbase \
+      --default-character-set=utf8mb4 \
+      --batch \
+      --raw \
+      --skip-column-names \
+      --execute "$query"
+  else
+    run_bounded_function blackbox_backend_database_query "$query"
+  fi
 }
 
 
@@ -249,12 +284,12 @@ expected_sessions = {"ycsb/worker/1", "ycsb/worker/2"}
 if len(done) != 2 or set(done_by_session) != expected_sessions:
     raise SystemExit("both probe sessions must publish exactly one SessionDone")
 
-def one_client(session_id):
+def one_client(session_id, transaction_type="si_fractured_read_probe"):
     matches = by_session.get(session_id, [])
     if len(matches) != 1:
         raise SystemExit(f"expected one ClientTxn for {session_id}, found {len(matches)}")
     record = matches[0]
-    if record.get("txn_type") != "si_fractured_read_probe":
+    if record.get("txn_type") != transaction_type:
         raise SystemExit(f"{session_id} has the wrong transaction type")
     return record
 
@@ -291,6 +326,37 @@ def assert_reader(record, session_id):
             f"{session_id} values {observed!r} differ from {expected_values!r}"
         )
 
+def assert_retry_reader(record, session_id, expected_value):
+    reads = record.get("reads")
+    if record.get("read_count") != 1 or not isinstance(reads, list) or len(reads) != 1:
+        raise SystemExit(f"{session_id} must contain exactly one retry-probe read")
+    read = reads[0]
+    if read.get("event_seq") != 0:
+        raise SystemExit(f"{session_id} retry-probe read sequence is not zero")
+    if read.get("source") != "snapshot" or read.get("value_state") != "present":
+        raise SystemExit(f"{session_id} retry-probe read is not a present snapshot")
+    if base64.b64decode(read["key_bytes_base64"], validate=True) != canonical_key(1):
+        raise SystemExit(f"{session_id} retry-probe read did not capture key 1")
+    if first_field(read["value_bytes_base64"]) != expected_value:
+        raise SystemExit(f"{session_id} retry-probe read has the wrong value")
+
+def assert_fractured_reader(record, session_id):
+    reads = record.get("reads")
+    if record.get("read_count") != 3 or not isinstance(reads, list) or len(reads) != 3:
+        raise SystemExit(f"{session_id} must contain exactly three fractured-probe reads")
+    expected_keys = (1, 2, 2)
+    for event_seq, (read, key) in enumerate(zip(reads, expected_keys, strict=True)):
+        if read.get("event_seq") != event_seq:
+            raise SystemExit(f"{session_id} fractured read sequence is not dense")
+        if read.get("source") != "snapshot" or read.get("value_state") != "present":
+            raise SystemExit(f"{session_id} fractured reads must be present snapshots")
+        if base64.b64decode(read["key_bytes_base64"], validate=True) != canonical_key(key):
+            raise SystemExit(f"{session_id} fractured read {event_seq} has the wrong key")
+    observed = [first_field(read["value_bytes_base64"]) for read in reads]
+    expected = [expected_values[0], expected_values[0], expected_values[1]]
+    if observed != expected:
+        raise SystemExit(f"{session_id} fractured values {observed!r} differ from {expected!r}")
+
 if dropped:
     if set(by_session) != {"ycsb/worker/2"} or len(clients) != 1:
         raise SystemExit("the dropped case must retain only worker 2's ClientTxn")
@@ -305,10 +371,30 @@ elif mode == "clean":
 elif mode == "fractured":
     if set(by_session) != expected_sessions or len(clients) != 2:
         raise SystemExit("fractured mode must publish one ClientTxn for each session")
-    assert_reader(one_client("ycsb/worker/1"), "ycsb/worker/1")
+    assert_fractured_reader(one_client("ycsb/worker/1"), "ycsb/worker/1")
     writer = one_client("ycsb/worker/2")
     if writer.get("read_count") != 0 or writer.get("reads") != []:
         raise SystemExit("fractured mode worker 2 must be the zero-read writer")
+elif mode == "retry":
+    if set(by_session) != expected_sessions or len(clients) != 2:
+        raise SystemExit("retry mode must publish one ClientTxn for each session")
+    winner = one_client("ycsb/worker/1", "ycsb_update")
+    retried = one_client("ycsb/worker/2", "ycsb_update")
+    assert_retry_reader(winner, "ycsb/worker/1", expected_values[0])
+    assert_retry_reader(retried, "ycsb/worker/2", expected_values[1])
+    winner_done = done_by_session["ycsb/worker/1"]
+    retried_done = done_by_session["ycsb/worker/2"]
+    if (winner_done.get("physical_attempts_started") != 1
+            or winner_done.get("definitively_aborted_attempts") != 0
+            or winner_done.get("retry_attempts") != 0):
+        raise SystemExit("retry winner ledger differs")
+    if (retried_done.get("logical_transactions_started") != 1
+            or retried_done.get("successful_transactions") != 1
+            or retried_done.get("physical_attempts_started") != 2
+            or retried_done.get("definitively_aborted_attempts") != 1
+            or retried_done.get("retry_attempts") != 1
+            or retried_done.get("published_transactions") != 1):
+        raise SystemExit("definitive retry ledger differs")
 else:
     raise SystemExit(f"unknown probe mode {mode!r}")
 PY
@@ -321,6 +407,13 @@ assert_database_state() {
   case "$mode" in
     clean) value=old ;;
     fractured) value=new ;;
+    retry)
+      local observed
+      observed=$(database_query \
+        'SELECT ycsb_key, field1 FROM usertable WHERE ycsb_key IN (1, 2) ORDER BY ycsb_key')
+      [[ $observed == $'1\tretry\n2\told' ]]
+      return
+      ;;
     *) return 1 ;;
   esac
   local expected observed
@@ -421,8 +514,8 @@ terminate_case_session() {
 
 
 run_case_body() {
-  (( $# == 8 )) || {
-    echo 'internal semantic case invocation requires eight arguments' >&2
+  (( $# == 9 )) || {
+    echo 'internal semantic case invocation requires nine arguments' >&2
     return 2
   }
   local case_name=$1
@@ -433,6 +526,7 @@ run_case_body() {
   local expected_exit=$6
   local expected_first=$7
   local expected_second=$8
+  local benchmark=$9
   [[ $case_name =~ ^[a-z0-9_]+$ ]]
   local log_file="$RUN_OUTPUT/$case_name.log"
   local client_file="$RUN_OUTPUT/$case_name-client.json"
@@ -447,13 +541,16 @@ run_case_body() {
   trap 'terminate_case_session TERM 143' TERM
   set +e
   BLACKBOX_DECLARED_ISOLATION=$isolation \
+  BLACKBOX_BENCHMARK=$benchmark \
   BLACKBOX_EXPECTED_SESSION_IDS=ycsb/worker/1,ycsb/worker/2 \
   BLACKBOX_LOADER_COMMAND=$loader_command \
   BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$RUN_OUTPUT/$case_name-loader-declaration.json" \
   BLACKBOX_WORKLOAD_COMMAND=$workload_command \
-  BLACKBOX_BENCHBASE_BUILD_DIR=$BLACKBOX_BENCHBASE_BUILD_DIR \
-  BLACKBOX_BENCHBASE_ROOT=$BLACKBOX_BENCHBASE_ROOT \
-  BLACKBOX_MAVEN=$BLACKBOX_MAVEN \
+  BLACKBOX_BENCHBASE_BUILD_DIR=${BLACKBOX_BENCHBASE_BUILD_DIR:-} \
+  BLACKBOX_BENCHBASE_ROOT=${BLACKBOX_BENCHBASE_ROOT:-} \
+  BLACKBOX_MAVEN=${BLACKBOX_MAVEN:-} \
+  BLACKBOX_BENCHBASE_DIST=${BLACKBOX_BENCHBASE_DIST:-} \
+  BLACKBOX_JAVA_BIN=${BLACKBOX_JAVA_BIN:-java} \
   BLACKBOX_PROBE_MODE=$mode \
   BLACKBOX_DROP_CLIENT_SESSION=$drop_session \
   BLACKBOX_PROBE_TIMEOUT_SECONDS=30 \
@@ -477,8 +574,52 @@ run_case_body() {
 
   local final_status run_id status_run_id
   run_id=$(extract_run_id "$log_file")
+  if [[ $BLACKBOX_BACKEND == yugabytedb_ysql ]]; then
+    local compact_run_id=${run_id//-/}
+    BLACKBOX_YSQL_SLOT_NAME="blackbox_${compact_run_id}_slot"
+    BLACKBOX_YSQL_PUBLICATION_NAME="blackbox_${compact_run_id}_publication"
+    export BLACKBOX_YSQL_SLOT_NAME BLACKBOX_YSQL_PUBLICATION_NAME
+  fi
   capture_redis_stream "blackbox:client:$run_id" "$client_file"
   capture_redis_stream "blackbox:status:$run_id" "$status_file"
+  capture_redis_stream cdc "$RUN_OUTPUT/$case_name-cdc.json"
+  redis_command --raw XRANGE cdc - + >"$RUN_OUTPUT/$case_name-cdc.raw.txt"
+  redis_command --raw XRANGE "blackbox:client:$run_id" - + \
+    >"$RUN_OUTPUT/$case_name-client.raw.txt"
+  redis_command --raw XRANGE "blackbox:status:$run_id" - + \
+    >"$RUN_OUTPUT/$case_name-status.raw.txt"
+  run_bounded_diagnostic "${COMPOSE[@]}" config >"$RUN_OUTPUT/$case_name-compose-config.yml"
+  run_bounded_diagnostic "${COMPOSE[@]}" ps --all --format json >"$RUN_OUTPUT/$case_name-compose-ps.json"
+  run_bounded_diagnostic "${COMPOSE[@]}" logs --no-color --timestamps >"$RUN_OUTPUT/$case_name-compose.log" 2>&1
+  run_bounded_function blackbox_backend_capture_schema_metadata >"$RUN_OUTPUT/$case_name-schema-catalog.txt"
+  run_bounded_function blackbox_backend_status >"$RUN_OUTPUT/$case_name-database-status.txt"
+  run_bounded_diagnostic "$BLACKBOX_DOCKER" inspect "$BLACKBOX_DATABASE_CONTAINER" \
+    >"$RUN_OUTPUT/$case_name-database-container.json"
+  run_bounded_diagnostic "$BLACKBOX_DOCKER" inspect "$BLACKBOX_CONNECTOR_CONTAINER" \
+    >"$RUN_OUTPUT/$case_name-connector-container.json"
+  run_bounded_diagnostic "$BLACKBOX_DOCKER" inspect cdc-redis \
+    >"$RUN_OUTPUT/$case_name-redis-container.json"
+  if [[ $BLACKBOX_BACKEND == yugabytedb_ysql ]]; then
+    run_bounded_function blackbox_backend_capture_security_catalog \
+      >"$RUN_OUTPUT/$case_name-security-catalog.txt"
+    run_bounded_diagnostic "$BLACKBOX_DOCKER" exec "$BLACKBOX_DATABASE_CONTAINER" \
+      bin/yb-admin --master_addresses yugabytedb_ysql:7100 \
+      list_tablets ysql.benchbase usertable 0 \
+      >"$RUN_OUTPUT/$case_name-usertable-tablets.txt"
+    run_bounded_diagnostic "$BLACKBOX_DOCKER" exec "$BLACKBOX_DATABASE_CONTAINER" \
+      bin/yb-admin --master_addresses yugabytedb_ysql:7100 \
+      list_tablets ysql.benchbase checker_run_fence 0 \
+      >"$RUN_OUTPUT/$case_name-fence-tablets.txt"
+    run_bounded_diagnostic "$BLACKBOX_DOCKER" exec "$BLACKBOX_DATABASE_CONTAINER" \
+      bin/yb-admin --master_addresses yugabytedb_ysql:7100 \
+      list_tablets ysql.benchbase session_txn 0 \
+      >"$RUN_OUTPUT/$case_name-marker-tablets.txt"
+    run_bounded_diagnostic "$BLACKBOX_DOCKER" exec "$BLACKBOX_DATABASE_CONTAINER" \
+      bin/yb-admin --version >"$RUN_OUTPUT/$case_name-database-build.txt"
+    run_bounded_diagnostic "$BLACKBOX_DOCKER" exec "$BLACKBOX_CONNECTOR_CONTAINER" sh -lc \
+      'sha256sum /debezium/lib/yugabytedb-source-connector-*.jar; sed -n "1,240p" /debezium/conf/application.properties' \
+      >"$RUN_OUTPUT/$case_name-connector-identity.txt"
+  fi
   final_status=$(extract_final_status "$log_file")
   assert_terminal_status "$final_status" "$expected_outcome"
   status_run_id=$(jq -er '.run_id' <<<"$final_status")
@@ -499,6 +640,8 @@ run_case_body() {
   [[ $final_count == 1 ]]
   if [[ $mode == clean ]]; then
     database_value=old
+  elif [[ $mode == retry ]]; then
+    database_value=retry
   else
     database_value=new
   fi
@@ -513,15 +656,18 @@ run_case() {
   local case_name=$1
   CURRENT_CASE=$case_name
   CURRENT_LOG="$RUN_OUTPUT/$case_name.log"
-  printf 'running semantic case %s (isolation=%s mode=%s)\n' "$1" "$2" "$3"
+  printf 'running semantic case %s (isolation=%s mode=%s benchmark=%s)\n' \
+    "$1" "$2" "$3" "$9"
 
   local status
   set +e
   BLACKBOX_CORRECTNESS_RUN_OUTPUT=$RUN_OUTPUT \
   BLACKBOX_MONITOR_BIN=$BLACKBOX_MONITOR_BIN \
-  BLACKBOX_BENCHBASE_BUILD_DIR=$BLACKBOX_BENCHBASE_BUILD_DIR \
-  BLACKBOX_BENCHBASE_ROOT=$BLACKBOX_BENCHBASE_ROOT \
-  BLACKBOX_MAVEN=$BLACKBOX_MAVEN \
+  BLACKBOX_BENCHBASE_BUILD_DIR=${BLACKBOX_BENCHBASE_BUILD_DIR:-} \
+  BLACKBOX_BENCHBASE_ROOT=${BLACKBOX_BENCHBASE_ROOT:-} \
+  BLACKBOX_MAVEN=${BLACKBOX_MAVEN:-} \
+  BLACKBOX_BENCHBASE_DIST=${BLACKBOX_BENCHBASE_DIST:-} \
+  BLACKBOX_JAVA_BIN=${BLACKBOX_JAVA_BIN:-java} \
     timeout --foreground --kill-after="${CASE_KILL_AFTER_SECONDS}s" \
       "${CASE_TIMEOUT_SECONDS}s" "$SCRIPT" --run-case "$@"
   status=$?
@@ -548,28 +694,47 @@ run_all_cases() {
   RUN_OUTPUT=$(mktemp -d "$OUTPUT_ROOT/blackbox-correctness.XXXXXX")
   trap cleanup EXIT
 
-  run_case clean_repeatable_read REPEATABLE_READ clean '' PASS 0 old old
-  run_case fractured_read_committed READ_COMMITTED fractured '' VIOLATION 3 old new
-  run_case fractured_repeatable_read REPEATABLE_READ fractured '' PASS 0 old old
-  run_case dropped_client_record REPEATABLE_READ clean ycsb/worker/1 INVALID 4 old old
+  if [[ $BLACKBOX_BACKEND == yugabytedb_ysql ]]; then
+    cp "$ROOT/connector-contract/yugabytedb_ysql/provenance.lock.json" \
+      "$RUN_OUTPUT/provenance.lock.json"
+    run_case definitive_retry REPEATABLE_READ retry '' PASS 0 old winner ycsb
+    run_case fractured_repeatable_read REPEATABLE_READ fractured '' PASS 0 old old \
+      ycsb_fractured_read_probe
+    run_case fractured_read_committed READ_COMMITTED fractured '' VIOLATION 3 old new \
+      ycsb_fractured_read_probe
+    run_bounded_diagnostic python3 "$YUGABYTEDB_YCSB_VALIDATOR" \
+      --directory "$RUN_OUTPUT" \
+      --provenance "$RUN_OUTPUT/provenance.lock.json" \
+      --output "$RUN_OUTPUT/yugabytedb-ysql-ycsb-semantic-report.json"
+  else
+    run_case clean_repeatable_read REPEATABLE_READ clean '' PASS 0 old old ycsb
+    run_case fractured_read_committed READ_COMMITTED fractured '' VIOLATION 3 old new \
+      ycsb_fractured_read_probe
+    run_case fractured_repeatable_read REPEATABLE_READ fractured '' PASS 0 old old \
+      ycsb_fractured_read_probe
+    run_case dropped_client_record REPEATABLE_READ clean ycsb/worker/1 INVALID 4 old old \
+      ycsb
+  fi
 
   SUCCESS=1
   printf 'all semantic correctness cases passed\n'
 }
 
 
-case "${1:-}" in
-  --run-case)
-    shift
-    require_harness_configuration
-    : "${BLACKBOX_CORRECTNESS_RUN_OUTPUT:?missing internal semantic output directory}"
-    RUN_OUTPUT=$BLACKBOX_CORRECTNESS_RUN_OUTPUT
-    [[ -d $RUN_OUTPUT ]]
-    run_case_body "$@"
-    ;;
-  '') run_all_cases ;;
-  *)
-    echo "usage: $0" >&2
-    exit 2
-    ;;
-esac
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  case "${1:-}" in
+    --run-case)
+      shift
+      require_harness_configuration
+      : "${BLACKBOX_CORRECTNESS_RUN_OUTPUT:?missing internal semantic output directory}"
+      RUN_OUTPUT=$BLACKBOX_CORRECTNESS_RUN_OUTPUT
+      [[ -d $RUN_OUTPUT ]]
+      run_case_body "$@"
+      ;;
+    '') run_all_cases ;;
+    *)
+      echo "usage: $0" >&2
+      exit 2
+      ;;
+  esac
+fi

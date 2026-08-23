@@ -1,0 +1,39 @@
+{
+  "kind": "yugabytedb_ysql_ycsb_acceptance_bundle_index",
+  "platform": "linux/amd64",
+  "bundles": [
+    {
+      "purpose": "complete_value_normalization",
+      "bundle_path": "fixtures/pgoutput_ycsb_value_normalization_cpp_codec_gate",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "2bf04163f923b4dcc344e18ffa16a373faa850fa9c76f65d01c0c83176b43b57",
+      "report": "normalization-report.json",
+      "report_sha256": "d9e1c42f8be179132d6115ebc8d2f48a786e7cdf4fa6b8e8776264628ef88fb5",
+      "regular_file_count": 37
+    },
+    {
+      "purpose": "ordinary_two_session_workload",
+      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_ordinary_identity_attested_gate",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "2a3259ac240de1f6e49efe1c70c98a1ebf5a02a8ad7f80b9503c6022c9e09937",
+      "report": "acceptance-report.json",
+      "report_sha256": "65b4a045f5b3560c77d47c25c3fe8ce9485a94807f87933cd013751931b8d4ed",
+      "run_ids": ["b12d6751-3327-44f2-b4ad-86e2ee107ebc"],
+      "regular_file_count": 53
+    },
+    {
+      "purpose": "retry_and_isolation_semantics",
+      "bundle_path": "fixtures/pgoutput_yugabytedb_ycsb_semantic_adapter_reconciled_gate",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "c1fce1cd1f9da32f37452512f7a0ea9d41aa70b6fb8559ddf2aae9a0fee5a163",
+      "report": "blackbox-correctness.HlAgjr/yugabytedb-ysql-ycsb-semantic-report.json",
+      "report_sha256": "54484a3c3a07e61c4803c4e3308ad7a21b4fa43ae8d32d6045718c12b82aada6",
+      "run_ids": [
+        "f4b134e0-079d-4dca-87bc-dc8f9edd94a6",
+        "60c6f400-f583-4584-be1a-49e49dc8f8c6",
+        "a38072c1-f55b-4e61-b2f5-30b4aad12689"
+      ],
+      "regular_file_count": 71
+    }
+  ]
+}

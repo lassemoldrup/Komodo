@@ -26,7 +26,7 @@ path = os.environ["BLACKBOX_LOADER_DECLARED_COUNTS_FILE"]
 temporary = path + ".tmp"
 document = {
     "kind": "loader_declaration",
-    "benchmark": "ycsb",
+    "benchmark": os.environ["BLACKBOX_BENCHMARK"],
     "loader_batch_size": int(os.environ["BLACKBOX_LOADER_BATCH_SIZE"]),
     "scale_parameter": None,
     "declared_table_row_counts": [
@@ -43,9 +43,29 @@ PY
 
 
 run_probe() {
+  if [[ -n ${BLACKBOX_BENCHBASE_DIST:-} ]]; then
+    local java_bin=${BLACKBOX_JAVA_BIN:-java}
+    [[ -f $BLACKBOX_BENCHBASE_DIST/benchbase.jar ]] || {
+      echo "BenchBase distribution jar is missing: $BLACKBOX_BENCHBASE_DIST" >&2
+      return 1
+    }
+    [[ -d $BLACKBOX_BENCHBASE_DIST/lib ]] || {
+      echo "BenchBase distribution libraries are missing: $BLACKBOX_BENCHBASE_DIST" >&2
+      return 1
+    }
+    command -v "$java_bin" >/dev/null 2>&1 || [[ -x $java_bin ]] || {
+      echo "Java is not executable: $java_bin" >&2
+      return 1
+    }
+    cd "$BLACKBOX_BENCHBASE_DIST"
+    exec "$java_bin" -classpath 'benchbase.jar:lib/*' \
+      com.oltpbenchmark.benchmarks.ycsb.FracturedReadProbe
+  fi
+
   : "${BLACKBOX_BENCHBASE_BUILD_DIR:?set BLACKBOX_BENCHBASE_BUILD_DIR}"
   : "${BLACKBOX_BENCHBASE_ROOT:?set BLACKBOX_BENCHBASE_ROOT}"
   : "${BLACKBOX_MAVEN:?set BLACKBOX_MAVEN}"
+  : "${BLACKBOX_BENCHBASE_DATABASE_PROFILE:?set BLACKBOX_BENCHBASE_DATABASE_PROFILE}"
   local classes="$BLACKBOX_BENCHBASE_BUILD_DIR/classes"
   [[ -d $classes ]] || {
     echo "BenchBase classes are missing: $classes" >&2
@@ -71,7 +91,8 @@ run_probe() {
   fi
 
   cd "$BLACKBOX_BENCHBASE_ROOT"
-  exec "$maven" --batch-mode --quiet --activate-profiles mariadb \
+  exec "$maven" --batch-mode --quiet \
+    --activate-profiles "$BLACKBOX_BENCHBASE_DATABASE_PROFILE" \
     -Dmaven.gitcommitid.skip=true \
     -DbuildDirectory="$BLACKBOX_BENCHBASE_BUILD_DIR" \
     -Dexec.executable=java \
