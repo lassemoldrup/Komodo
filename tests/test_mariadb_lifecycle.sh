@@ -599,6 +599,13 @@ publish_clean_session_done() {
 }
 
 
+publish_schema_attestation() {
+  local phase=$1 payload
+  payload=$(blackbox_build_schema_attestation "$phase")
+  blackbox_publish_record "$(blackbox_client_stream)" "$payload" >/dev/null
+}
+
+
 run_unmarked_application_negative() {
   reset_database_and_redis
   start_connector_with_snapshot_schema
@@ -617,6 +624,7 @@ run_unmarked_application_negative() {
   start_live_monitor
   blackbox_publish_record \
     "$(blackbox_client_stream)" "$(blackbox_build_run_manifest)" >/dev/null
+  publish_schema_attestation STARTUP
   blackbox_commit_fence RUN_START
   wait_cdc_fence RUN_START
   blackbox_wait_for_status START_FENCE_SEEN
@@ -742,6 +750,10 @@ main() {
     return 1
   fi
   BLACKBOX_ACTIVE_RUN_ID=${BLACKBOX_ACTIVE_RUN_ID:-$(blackbox_new_uuid)}
+  BLACKBOX_ADAPTER_CONTRACT=$(<"$ROOT/protocol/adapters/ycsb.json")
+  BLACKBOX_BACKEND_CONTRACT=$(<"$ROOT/protocol/backends/mariadb.json")
+  export BLACKBOX_ADAPTER_CONTRACT BLACKBOX_BACKEND_CONTRACT
+  blackbox_backend_prepare_run
   # Consumed by helpers sourced from blackbox_lifecycle.sh.
   # shellcheck disable=SC2034
   BLACKBOX_SESSION_IDS=(ycsb/worker/1)
@@ -777,6 +789,7 @@ main() {
   local run_manifest
   run_manifest=$(blackbox_build_run_manifest)
   blackbox_publish_record "$(blackbox_client_stream)" "$run_manifest" >/dev/null
+  publish_schema_attestation STARTUP
   wait_ingest_blocked
   blackbox_commit_fence RUN_START
   wait_cdc_fence RUN_START
@@ -893,6 +906,7 @@ main() {
   publish_client_txn ycsb/worker/1 7 7
   publish_clean_session_done ycsb/worker/1 7
   blackbox_commit_fence END_FENCE
+  publish_schema_attestation FINAL
 
   wait_end_fence
   blackbox_wait_for_status FINAL

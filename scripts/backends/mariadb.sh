@@ -53,11 +53,12 @@ blackbox_backend_database() {
   # BLACKBOX_DB_HOST is initialized by the generic lifecycle before this
   # dynamically sourced driver executes.
   # shellcheck disable=SC2153
+  local set_names_sql=${BLACKBOX_SET_NAMES_SQL:-SET NAMES utf8mb4 COLLATE utf8mb4_bin}
   "$BLACKBOX_MARIADB_CLI" --skip-ssl \
     --host="$BLACKBOX_DB_HOST" --port="$BLACKBOX_DB_PORT" \
     --user="$BLACKBOX_DB_USER" --password="$BLACKBOX_DB_PASSWORD" \
     --database=benchbase --default-character-set=utf8mb4 \
-    --init-command="${BLACKBOX_SET_NAMES_SQL}" --batch --raw \
+    --init-command="$set_names_sql" --batch --raw \
     --skip-column-names "$@"
 }
 
@@ -135,11 +136,16 @@ blackbox_backend_wait_for_connector_progress() {
   grep -q 'connector.class = io.debezium.connector.mariadb.MariaDbConnector' \
     <<<"$logs" || return 1
   grep -q '3.6.1.Final' <<<"$logs" || return 1
-  local connections
-  connections=$(blackbox_backend_database_query \
-    "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER = 'debezium' AND DB = 'benchbase'") || return 1
-  connections=${connections//[[:space:]]/}
-  [[ $connections =~ ^[1-9][0-9]*$ ]]
+  # The binlog client does not keep a default database selected. Require the
+  # terminal connector-produced schema snapshot record in Redis instead of
+  # inferring readiness from PROCESSLIST metadata or a partial stream prefix.
+  local startup_evidence
+  startup_evidence=$(blackbox_redis --json XRANGE cdc - +) || return 1
+  jq -e '
+    any(.[];
+      (.[1][1] | fromjson) as $event |
+      $event.source.snapshot? == "last")
+  ' <<<"$startup_evidence" >/dev/null
 }
 
 blackbox_backend_capture_attestation_inputs() {

@@ -179,6 +179,10 @@ case "$command" in
   EXISTS|DBSIZE)
     echo 0
     ;;
+  XLEN)
+    [[ $1 == cdc ]]
+    echo 1
+    ;;
   XADD)
     stream=$1
     field=$3
@@ -204,6 +208,11 @@ else:
     fi
     echo "$counter" >"$REDIS_COUNTER_FILE"
     echo "$counter-0"
+    ;;
+  XRANGE)
+    (( json_output == 1 ))
+    [[ $1 == cdc ]]
+    printf '%s\n' '[["1-0",["{}","{\"source\":{\"snapshot\":\"last\"}}"]]]'
     ;;
   XREAD)
     (( json_output == 1 ))

@@ -81,6 +81,15 @@ def parse_create_tables(sql: str) -> dict[str, dict[str, object]]:
 
 
 class MariaDbSchemaAssetTest(unittest.TestCase):
+    def test_fractured_probe_reuses_exact_ycsb_schema(self) -> None:
+        adapter_root = ROOT / "mariadb" / "initdb" / "adapters"
+        self.assertEqual(
+            (adapter_root / "ycsb.sql").read_text(encoding="utf-8"),
+            (adapter_root / "ycsb_fractured_read_probe.sql").read_text(
+                encoding="utf-8"
+            ),
+        )
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.tpcc_contract = json.loads(
