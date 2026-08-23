@@ -388,7 +388,9 @@ def connector_stall_status(directory: Path) -> dict[str, Any]:
         operation[name] = value
     require(
         operation.get("admitted_slot_active") == "1"
+        and operation.get("paused_container") == "cdc-debezium-yugabytedb-ysql"
         and operation.get("paused_state") == "true"
+        and operation.get("unpaused_container") == "cdc-debezium-yugabytedb-ysql"
         and operation.get("pause_requested_ns", "").isdigit()
         and operation.get("pause_completed_ns", "").isdigit()
         and operation.get("unpause_completed_ns", "").isdigit()

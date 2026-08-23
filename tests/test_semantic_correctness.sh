@@ -617,8 +617,9 @@ run_case_body() {
   trap - HUP INT TERM
 
   if [[ $failure_kind == connector_stall ]]; then
-    "$BLACKBOX_DOCKER" unpause "$BLACKBOX_CONNECTOR_CONTAINER" \
-      >>"$RUN_OUTPUT/connector_stall_invalid-operation.txt" 2>&1
+    printf 'unpaused_container=%s\n' \
+      "$("$BLACKBOX_DOCKER" unpause "$BLACKBOX_CONNECTOR_CONTAINER")" \
+      >>"$RUN_OUTPUT/connector_stall_invalid-operation.txt"
     printf 'unpause_completed_ns=%s\n' "$(date +%s%N)" \
       >>"$RUN_OUTPUT/connector_stall_invalid-operation.txt"
   fi

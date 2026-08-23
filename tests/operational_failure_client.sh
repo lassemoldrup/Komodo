@@ -46,8 +46,9 @@ case "${1:-}" in
             "$(blackbox_backend_admin_query "SELECT count(*) FROM pg_replication_slots WHERE slot_name='$BLACKBOX_YSQL_SLOT_NAME' AND active AND active_pid IS NOT NULL" | tr -d '[:space:]')"
           printf 'pause_requested_ns=%s\n' "$(date +%s%N)"
         } >"$stall_evidence"
-        "$BLACKBOX_DOCKER" pause "$BLACKBOX_CONNECTOR_CONTAINER" \
-          >>"$stall_evidence" 2>&1
+        printf 'paused_container=%s\n' \
+          "$("$BLACKBOX_DOCKER" pause "$BLACKBOX_CONNECTOR_CONTAINER")" \
+          >>"$stall_evidence"
         printf 'paused_state=%s\n' \
           "$("$BLACKBOX_DOCKER" inspect --format '{{.State.Paused}}' "$BLACKBOX_CONNECTOR_CONTAINER")" \
           >>"$stall_evidence"
