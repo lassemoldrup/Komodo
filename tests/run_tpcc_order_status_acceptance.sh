@@ -97,16 +97,26 @@ tpcc_acceptance_config_extras() {
 tpcc_acceptance_capture_profile_artifacts() {
   local output_dir=$1
   local catalog="$output_dir/customer-catalog.jsonl"
+  # Backend-neutral SQL; the tab-separated rows become JSONL records here.
   blackbox_database_query '
-    SELECT JSON_OBJECT(
-             "c_w_id", c_w_id,
-             "c_d_id", c_d_id,
-             "c_id", c_id,
-             "c_last", c_last,
-             "last_name_group_count",
-               COUNT(*) OVER (PARTITION BY c_w_id, c_d_id, c_last))
+    SELECT c_w_id, c_d_id, c_id, c_last,
+           COUNT(*) OVER (PARTITION BY c_w_id, c_d_id, c_last)
       FROM customer
-     ORDER BY c_w_id, c_d_id, c_id' >"$catalog"
+     ORDER BY c_w_id, c_d_id, c_id' |
+    python3 -c '
+import json
+import sys
+
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    w_id, d_id, c_id, c_last, group = line.split("\t")
+    print(json.dumps({
+        "c_w_id": int(w_id), "c_d_id": int(d_id), "c_id": int(c_id),
+        "c_last": c_last, "last_name_group_count": int(group),
+    }, separators=(",", ":")))
+' >"$catalog"
   TPCC_ACCEPTANCE_VALIDATOR_EXTRA_ARGS=(--customer-catalog "$catalog")
 }
 
