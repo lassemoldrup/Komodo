@@ -335,6 +335,9 @@ through `o_ol_cnt`.
 Loader batch size is a positive command-line/configuration value with default
 128. It is passed into generated BenchBase configuration and recorded in loader
 validation/performance artifacts, but it is not an acceptance constant.
+YugabyteDB YSQL enables pgjdbc `reWriteBatchedInserts=true` in both formal modes
+so one JDBC batch is sent efficiently without changing the configured batch,
+one-table transaction boundary, committed row images, or CDC event counts.
 Canonical scans use the same shared row contract and globally byte-sort encoded
 keys before computing the bootstrap digest.
 

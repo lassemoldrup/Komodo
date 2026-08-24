@@ -13,7 +13,7 @@ blackbox_backend_initialize() {
   BLACKBOX_BACKEND_SOURCE_ID=${BLACKBOX_BACKEND_SOURCE_ID:-yugabytedb_ysql_main}
   BLACKBOX_BACKEND_MONITOR_ARGUMENTS=()
   BLACKBOX_BENCHBASE_DATABASE_PROFILE=postgres
-  BLACKBOX_JDBC_URL=${BLACKBOX_JDBC_URL:-jdbc:postgresql://${BLACKBOX_DB_HOST}:${BLACKBOX_DB_PORT}/benchbase?sslmode=disable\&ApplicationName=blackbox-fractured-read-probe}
+  BLACKBOX_JDBC_URL=${BLACKBOX_JDBC_URL:-jdbc:postgresql://${BLACKBOX_DB_HOST}:${BLACKBOX_DB_PORT}/benchbase?sslmode=disable\&reWriteBatchedInserts=true\&ApplicationName=blackbox-fractured-read-probe}
   export BLACKBOX_COMPOSE_PROFILE BLACKBOX_DATABASE_SERVICE
   export BLACKBOX_DATABASE_CONTAINER BLACKBOX_CONNECTOR_SERVICE
   export BLACKBOX_CONNECTOR_CONTAINER BLACKBOX_DB_PORT

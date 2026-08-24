@@ -12,6 +12,18 @@ DEBEZIUM = ROOT / "debezium"
 
 
 class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
+    def test_loader_batch_rewrite_is_identical_across_formal_modes(self) -> None:
+        driver = (ROOT / "scripts/backends/yugabytedb_ysql.sh").read_text(
+            encoding="utf-8"
+        )
+        performance = (ROOT / "scripts/run_blackbox_performance.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("reWriteBatchedInserts=true", driver)
+        self.assertIn(
+            "sslmode=disable&amp;reWriteBatchedInserts=true", performance
+        )
+
     def test_obsolete_exploratory_assets_are_removed(self) -> None:
         for path in (
             ROOT / "yugabyte" / "init.sh",

@@ -1017,7 +1017,7 @@ def document(instrumented: bool) -> str:
     <password>app_pw</password>""",
         "yugabytedb_ysql": """    <type>POSTGRES</type>
     <driver>org.postgresql.Driver</driver>
-    <url>jdbc:postgresql://host.docker.internal:5433/benchbase?sslmode=disable</url>
+    <url>jdbc:postgresql://host.docker.internal:5433/benchbase?sslmode=disable&amp;reWriteBatchedInserts=true</url>
     <username>blackbox_application</username>
     <password>blackbox_application_password</password>""",
     }
