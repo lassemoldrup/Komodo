@@ -64,7 +64,7 @@ blackbox_backend_teardown() {
 }
 
 blackbox_backend_wait_for_schema_initialization() {
-  local deadline=$(( $(date +%s) + BLACKBOX_STACK_TIMEOUT_SECONDS ))
+  local deadline=$(( $(date +%s) + ${BLACKBOX_STACK_TIMEOUT_SECONDS:-300} ))
   while (( $(date +%s) <= deadline )); do
     local status exit_code
     status=$("$BLACKBOX_DOCKER" inspect --format '{{.State.Status}}' \
