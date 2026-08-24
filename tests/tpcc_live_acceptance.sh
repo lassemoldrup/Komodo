@@ -3,8 +3,26 @@
 # shellcheck disable=SC2034 # Output variables are consumed by profile wrappers.
 
 TPCC_ACCEPTANCE_ROOT=${TPCC_ACCEPTANCE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+
+# The backend is selected before the lifecycle library loads so the registered
+# coordinator backend driver (scripts/backends/<backend>.sh) supplies every
+# backend-specific default, command requirement, and stack operation.
+TPCC_BACKEND=${TPCC_ACCEPTANCE_BACKEND:-${BLACKBOX_BACKEND:-mariadb}}
+export BLACKBOX_BACKEND=$TPCC_BACKEND
+
+# BenchBase distribution configuration directory for each registered backend.
+declare -A TPCC_ACCEPTANCE_CONFIG_DIRS=(
+  [mariadb]=mariadb
+  [yugabytedb_ysql]=yugabytedb
+)
+
 # shellcheck source=scripts/blackbox_lifecycle.sh
 . "$TPCC_ACCEPTANCE_ROOT/scripts/blackbox_lifecycle.sh"
+
+[[ -v "TPCC_ACCEPTANCE_CONFIG_DIRS[$TPCC_BACKEND]" ]] || {
+  printf 'unsupported TPC-C acceptance backend: %s\n' "$TPCC_BACKEND" >&2
+  exit 2
+}
 
 BLACKBOX_DOCKER=${BLACKBOX_DOCKER:-docker}
 TPCC_ACCEPTANCE_SUCCESS=0
@@ -223,7 +241,7 @@ tpcc_acceptance_emit_config() {
   local destination=$1
   local extras
   extras=$(tpcc_acceptance_config_extras)
-  python3 - "$destination" "$TPCC_ACCEPTANCE_CONFIG_KIND" "$TPCC_WAREHOUSES" \
+  python3 - "$destination" "$TPCC_ACCEPTANCE_CONFIG_KIND" "$TPCC_BACKEND" "$TPCC_WAREHOUSES" \
     "$TPCC_TERMINALS" "$TPCC_WEIGHTS" "$TPCC_RANDOM_SEED" \
     "$TPCC_WARMUP_SECONDS" "$TPCC_DURATION_SECONDS" "$TPCC_RATE" \
     "$TPCC_LOADER_THREADS" "$TPCC_LOADER_BATCH_SIZE" \
@@ -238,8 +256,8 @@ import os
 import sys
 
 (
-    destination, kind, warehouses, terminals, weights, random_seed, warmup,
-    duration, rate, loader_threads, loader_batch_size, bootstrap_rows,
+    destination, kind, backend, warehouses, terminals, weights, random_seed,
+    warmup, duration, rate, loader_threads, loader_batch_size, bootstrap_rows,
     bootstrap_bytes, stack_timeout, loader_timeout, workload_timeout,
     status_timeout, case_timeout, kill_after, keep_stack, redis_host,
     redis_port, db_host, db_port, sessions, extras,
@@ -247,7 +265,7 @@ import sys
 document = {
     "kind": kind,
     "benchmark": "tpcc",
-    "backend": "mariadb",
+    "backend": backend,
     "declared_isolation": "REPEATABLE_READ",
     "warehouses": int(warehouses),
     "terminals": int(terminals),
@@ -323,7 +341,7 @@ tpcc_acceptance_preflight() {
     exit 2
   }
   if [[ -z $TPCC_BENCHBASE_CONFIG ]]; then
-    TPCC_BENCHBASE_CONFIG="$TPCC_BENCHBASE_DIST/config/mariadb/blackbox_tpcc_config.xml"
+    TPCC_BENCHBASE_CONFIG="$TPCC_BENCHBASE_DIST/config/${TPCC_ACCEPTANCE_CONFIG_DIRS[$TPCC_BACKEND]}/blackbox_tpcc_config.xml"
   fi
   [[ -f $TPCC_BENCHBASE_CONFIG ]] || {
     printf 'BenchBase config is missing: %s\n' "$TPCC_BENCHBASE_CONFIG" >&2
@@ -339,13 +357,16 @@ tpcc_acceptance_preflight() {
   }
   local command
   for command in \
-      python3 jq timeout "$BLACKBOX_DOCKER" "$BLACKBOX_REDIS_CLI" \
-      "$BLACKBOX_MARIADB_CLI"; do
+      python3 jq timeout "$BLACKBOX_DOCKER" "$BLACKBOX_REDIS_CLI"; do
     command -v "$command" >/dev/null 2>&1 || {
       printf 'required command is unavailable: %s\n' "$command" >&2
       exit 2
     }
   done
+  blackbox_backend_require_commands || {
+    printf 'backend %s command requirements are unavailable\n' "$TPCC_BACKEND" >&2
+    exit 2
+  }
 }
 
 
@@ -373,7 +394,7 @@ tpcc_acceptance_run() {
 
   TPCC_ACCEPTANCE_COMPOSE=(
     "$BLACKBOX_DOCKER" compose
-    --file "$TPCC_ACCEPTANCE_ROOT/docker-compose.yml" --profile mariadb
+    --file "$TPCC_ACCEPTANCE_ROOT/docker-compose.yml" --profile "$TPCC_BACKEND"
   )
   trap tpcc_acceptance_cleanup EXIT
   BLACKBOX_LIVE_LOCK_TARGET=${BLACKBOX_LIVE_LOCK_TARGET:-$TPCC_ACCEPTANCE_ROOT}
@@ -413,11 +434,12 @@ tpcc_acceptance_run() {
 
   local status
   set +e
+  BLACKBOX_BACKEND="$TPCC_BACKEND" \
   BLACKBOX_BENCHMARK=tpcc \
   BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
   BLACKBOX_DOCKER="$BLACKBOX_DOCKER" \
   BLACKBOX_REDIS_CLI="$BLACKBOX_REDIS_CLI" \
-  BLACKBOX_MARIADB_CLI="$BLACKBOX_MARIADB_CLI" \
+  BLACKBOX_MARIADB_CLI="${BLACKBOX_MARIADB_CLI:-}" \
   BLACKBOX_REDIS_HOST="$BLACKBOX_REDIS_HOST" \
   BLACKBOX_REDIS_PORT="$BLACKBOX_REDIS_PORT" \
   BLACKBOX_DB_HOST="$BLACKBOX_DB_HOST" \

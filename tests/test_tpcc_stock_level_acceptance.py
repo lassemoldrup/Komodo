@@ -186,6 +186,34 @@ Unknown Status Transactions:
         self.assertEqual(report["cdc"]["markers"], 2)
         self.assertEqual(report["reconciliation"]["unmatched_client_records"], 0)
 
+    def rekey_backend(self, docs, backend, source_id):
+        docs["config"]["backend"] = backend
+        rows = [json.loads(entry[1][1]) for entry in docs["client"]]
+        for row in rows:
+            if row.get("kind") == "run_manifest":
+                row["backend"] = backend
+        docs["client"] = self.payload(rows)
+        for entry in docs["cdc"]:
+            envelope = json.loads(entry[1][1])
+            if isinstance(envelope.get("source"), dict):
+                envelope["source"]["name"] = source_id
+                entry[1][1] = json.dumps(envelope, separators=(",", ":"))
+        return docs
+
+    def test_registered_backend_identities_are_data_driven(self):
+        docs = self.rekey_backend(self.documents(), "yugabytedb_ysql", "yugabytedb_ysql_main")
+        report = self.validate(docs)
+        self.assertEqual(report["configuration"]["backend"], "yugabytedb_ysql")
+
+        docs = self.rekey_backend(self.documents(), "yugabytedb_ysql", "mariadb-main")
+        with self.assertRaisesRegex(ACCEPTANCE.AcceptanceError, "metadata"):
+            self.validate(docs)
+
+        docs = self.documents()
+        docs["config"]["backend"] = "oracle"
+        with self.assertRaisesRegex(ACCEPTANCE.AcceptanceError, "registered acceptance backend"):
+            self.validate(docs)
+
     def test_extra_stock_local_or_absent_read_is_rejected(self):
         for mutation in ("stock", "local", "absent"):
             with self.subTest(mutation=mutation):
@@ -234,6 +262,21 @@ class StockLevelDriverTest(unittest.TestCase):
         result = subprocess.run([str(self.DRIVER), "--print-config", "--weights", "0,0,0,1,99"],
                                 text=True, capture_output=True, check=False)
         self.assertEqual(result.returncode, 2)
+
+    def test_backend_selection_reaches_config_and_driver_defaults(self):
+        environment = os.environ.copy()
+        environment["TPCC_ACCEPTANCE_BACKEND"] = "yugabytedb_ysql"
+        result = subprocess.run([str(self.DRIVER), "--print-config"], text=True,
+                                capture_output=True, check=False, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout)
+        self.assertEqual(config["backend"], "yugabytedb_ysql")
+        self.assertEqual(config["db_port"], 5433)
+
+        environment["TPCC_ACCEPTANCE_BACKEND"] = "oracle"
+        result = subprocess.run([str(self.DRIVER), "--print-config"], text=True,
+                                capture_output=True, check=False, env=environment)
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

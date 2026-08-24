@@ -151,12 +151,44 @@ class YugabyteYsqlDistributedEvidenceTest(unittest.TestCase):
                     column_names.append(name)
             self.assertEqual(column_names, [column["name"] for column in expected["columns"]])
 
+        adapters_root = ROOT / "yugabytedb_ysql" / "initdb" / "adapters"
         production_schema = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in (ROOT / "yugabytedb_ysql" / "initdb" / "adapters").glob("*.sql")
+            path.read_text(encoding="utf-8") for path in sorted(adapters_root.glob("*.sql"))
         )
         self.assertNotIn("contract_account_", production_schema)
-        self.assertNotRegex(production_schema, r"(?i)CREATE TABLE\s+warehouse")
+
+        # TPC-C DDL lives only in its own registered adapter schema; the other
+        # production adapter schemas never gain TPC-C tables.
+        non_tpcc_schema = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(adapters_root.glob("*.sql"))
+            if path.name != "tpcc.sql"
+        )
+        self.assertNotRegex(non_tpcc_schema, r"(?i)CREATE TABLE\s+warehouse")
+
+        # The production TPC-C adapter schema follows the same frozen column
+        # contract that the contract-only experiment schema was validated with.
+        tpcc_schema = (adapters_root / "tpcc.sql").read_text(encoding="utf-8")
+        for expected in adapter["tables"]:
+            leaf = expected["name"].partition(".")[2]
+            match = re.search(
+                rf"CREATE TABLE {leaf} \((.*?)\n\) SPLIT INTO [0-9]+ TABLETS;",
+                tpcc_schema,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(match, leaf)
+            assert match is not None
+            column_names = []
+            for line in match.group(1).splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                name = stripped.split(maxsplit=1)[0].rstrip(",")
+                if name not in {"PRIMARY", "FOREIGN", "UNIQUE", "REFERENCES"}:
+                    column_names.append(name)
+            self.assertEqual(
+                column_names, [column["name"] for column in expected["columns"]], leaf
+            )
 
     def test_topology_operation_must_overlap_the_inflight_transaction(self) -> None:
         valid = {

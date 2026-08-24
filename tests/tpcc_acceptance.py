@@ -40,6 +40,13 @@ EXPECTED_TABLES = [
     "benchbase.new_order",
     "benchbase.order_line",
 ]
+# Registered acceptance backends mapped to their pinned connector source IDs.
+# Selection is data-driven from the run configuration; validators never branch
+# on a backend name.
+BACKEND_SOURCE_IDS = {
+    "mariadb": "mariadb-main",
+    "yugabytedb_ysql": "yugabytedb_ysql_main",
+}
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 BENCHBASE_SECTIONS = (
     "Completed Transactions:",
@@ -62,6 +69,15 @@ class AcceptanceError(ValueError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AcceptanceError(message)
+
+
+def expected_source_id(config: dict[str, Any]) -> str:
+    backend = config.get("backend")
+    require(
+        isinstance(backend, str) and backend in BACKEND_SOURCE_IDS,
+        "config backend is not a registered acceptance backend",
+    )
+    return BACKEND_SOURCE_IDS[backend]
 
 
 def strict_json(text: str, label: str) -> Any:

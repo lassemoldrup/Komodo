@@ -40,7 +40,8 @@ def load_config(path: Path) -> dict[str, Any]:
     }
     require(isinstance(config, dict) and set(config) == required, "run configuration fields differ")
     require(config["kind"] == "tpcc_stock_level_acceptance_config", "run configuration kind")
-    require(config["benchmark"] == "tpcc" and config["backend"] == "mariadb", "run identity")
+    require(config["benchmark"] == "tpcc", "run benchmark")
+    common.expected_source_id(config)
     require(config["declared_isolation"] == "REPEATABLE_READ", "run isolation")
     require(config["warehouses"] == 1 and 1 <= config["terminals"] <= 10, "live topology")
     require(config["weights"] == EXPECTED_WEIGHTS, "weights are not StockLevel-only")
@@ -83,7 +84,7 @@ def decode_clients(config: dict, run_id: str, records: list, decoder: common.Can
     manifest = manifests[0]
     require(
         manifest["run_id"] == run_id and manifest["benchmark"] == "tpcc"
-        and manifest["backend"] == "mariadb"
+        and manifest["backend"] == config["backend"]
         and manifest["declared_isolation"] == "REPEATABLE_READ",
         "RunManifest identity differs",
     )
@@ -137,7 +138,7 @@ def decode_clients(config: dict, run_id: str, records: list, decoder: common.Can
     return clients, correlations
 
 
-def validate_marker_cdc(path: Path, run_id: str, load_id: str, correlations: set):
+def validate_marker_cdc(path: Path, run_id: str, load_id: str, correlations: set, source_id: str):
     entries = common.raw_cdc_records(path)
     require(entries and common.parse_stream_id(entries[0][0], "CDC first")
             > common.parse_stream_id(load_id, "LOAD cursor"), "CDC tail boundary")
@@ -154,7 +155,7 @@ def validate_marker_cdc(path: Path, run_id: str, load_id: str, correlations: set
         rows, txid = transaction[1:-1], begin.get("id")
         require(end.get("id") == txid and end.get("event_count") == len(rows) == 1, f"{label} framing/count")
         _, key, envelope = rows[0]; source, meta = envelope.get("source"), envelope.get("transaction")
-        require(isinstance(source, dict) and source.get("name") == "mariadb-main"
+        require(isinstance(source, dict) and source.get("name") == source_id
                 and source.get("db") == "benchbase" and isinstance(meta, dict)
                 and meta.get("id") == txid and meta.get("total_order") == 1
                 and meta.get("data_collection_order") == 1, f"{label} metadata")
@@ -188,7 +189,8 @@ def validate_acceptance(config_path: Path, run_path: Path, client_path: Path,
     outcomes = common.benchbase_outcomes(benchbase_log, "StockLevel", len(clients), 0, 0)
     statuses = [row for _, row in common.payload_records(status_path, "status stream")]
     load = common.one_status(statuses, "LOAD_FINISHED_SEEN")
-    cdc = validate_marker_cdc(cdc_path, run_id, load["last_cdc_stream_id"], correlations)
+    cdc = validate_marker_cdc(cdc_path, run_id, load["last_cdc_stream_id"], correlations,
+                              common.expected_source_id(config))
     final, _ = common.validate_audited_status_and_metrics(
         config, run_id, statuses, common.load_json(monitor_path, "monitor metrics"),
         len(clients), len(clients), marker_only_count=len(clients), write_count=0)

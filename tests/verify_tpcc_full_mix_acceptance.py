@@ -50,7 +50,8 @@ def load_config(path: Path) -> dict[str, Any]:
     }
     require(isinstance(config, dict) and set(config) == base, "run configuration fields differ")
     require(config["kind"] == "tpcc_full_mix_acceptance_config", "config kind")
-    require(config["benchmark"] == "tpcc" and config["backend"] == "mariadb", "config identity")
+    require(config["benchmark"] == "tpcc", "config benchmark")
+    common.expected_source_id(config)
     require(config["declared_isolation"] == "REPEATABLE_READ", "config isolation")
     require(config["warehouses"] == 1 and config["terminals"] == 4, "standard topology differs")
     require(config["weights"] == [45, 43, 4, 4, 4], "standard weights differ")
@@ -134,7 +135,7 @@ def decode_client_evidence(config: dict, run_id: str, records: list[dict]):
     manifest, bootstrap = manifests[0], bootstraps[0]
     require(
         manifest["run_id"] == run_id and manifest["benchmark"] == "tpcc"
-        and manifest["backend"] == "mariadb"
+        and manifest["backend"] == config["backend"]
         and manifest["declared_isolation"] == "REPEATABLE_READ"
         and manifest["expected_session_ids"] == config["expected_session_ids"]
         and manifest["application_table_allowlist"] == EXPECTED_TABLES,

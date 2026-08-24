@@ -66,7 +66,8 @@ def load_config(path: Path) -> dict[str, Any]:
     }
     require(isinstance(config, dict) and set(config) == required, "run configuration fields differ")
     require(config["kind"] == "tpcc_order_status_acceptance_config", "run configuration kind")
-    require(config["benchmark"] == "tpcc" and config["backend"] == "mariadb", "run benchmark/backend")
+    require(config["benchmark"] == "tpcc", "run benchmark")
+    common.expected_source_id(config)
     require(config["declared_isolation"] == "REPEATABLE_READ", "run isolation is not RR")
     require(config["warehouses"] == 1, "acceptance run must use one warehouse")
     require(config["weights"] == EXPECTED_WEIGHTS, "acceptance weights are not OrderStatus-only")
@@ -180,7 +181,7 @@ def validate_clients(
     require(
         manifest["run_id"] == run_id
         and manifest["benchmark"] == "tpcc"
-        and manifest["backend"] == "mariadb"
+        and manifest["backend"] == config["backend"]
         and manifest["declared_isolation"] == "REPEATABLE_READ",
         "RunManifest identity differs",
     )
@@ -377,6 +378,7 @@ def validate_cdc_tail(
     run_id: str,
     load_finished_stream_id: str,
     client_correlations: set[tuple[str, int]],
+    source_id: str,
 ) -> dict[str, int]:
     entries = common.raw_cdc_records(path)
     require(entries, "CDC tail is empty")
@@ -418,7 +420,7 @@ def validate_cdc_tail(
         metadata = envelope.get("transaction")
         require(
             isinstance(source, dict)
-            and source.get("name") == "mariadb-main"
+            and source.get("name") == source_id
             and source.get("db") == "benchbase"
             and isinstance(metadata, dict)
             and metadata.get("id") == transaction_id
@@ -539,7 +541,8 @@ def validate_acceptance(
         (client["session_id"], client["correlation_id"]["txn_id"])
         for client in clients
     }
-    cdc = validate_cdc_tail(cdc_path, run_id, load_finished_cdc_id, correlations)
+    cdc = validate_cdc_tail(cdc_path, run_id, load_finished_cdc_id, correlations,
+                            common.expected_source_id(config))
     require(cdc["markers"] == len(clients), "marker count differs from successful clients")
     return {
         "kind": "tpcc_order_status_acceptance",

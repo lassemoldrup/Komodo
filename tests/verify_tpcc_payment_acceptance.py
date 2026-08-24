@@ -80,7 +80,8 @@ def load_config(path: Path) -> dict[str, Any]:
     }
     require(isinstance(config, dict) and set(config) == required, "run configuration fields differ")
     require(config["kind"] == "tpcc_payment_acceptance_config", "run configuration kind")
-    require(config["benchmark"] == "tpcc" and config["backend"] == "mariadb", "run benchmark/backend")
+    require(config["benchmark"] == "tpcc", "run benchmark")
+    common.expected_source_id(config)
     require(config["declared_isolation"] == "REPEATABLE_READ", "run isolation is not RR")
     require(config["warehouses"] == 1, "acceptance run must use one warehouse")
     require(config["weights"] == EXPECTED_WEIGHTS, "acceptance weights are not Payment-only")
@@ -199,7 +200,7 @@ def decode_clients(
     require(
         manifest["run_id"] == run_id
         and manifest["benchmark"] == "tpcc"
-        and manifest["backend"] == "mariadb"
+        and manifest["backend"] == config["backend"]
         and manifest["declared_isolation"] == "REPEATABLE_READ",
         "RunManifest identity differs",
     )
@@ -539,6 +540,7 @@ def validate_cdc_tail(
     load_finished_stream_id: str,
     shapes: dict[tuple[str, int], dict[str, Any]],
     codec: TpccCodec,
+    source_id: str,
 ) -> dict[str, Any]:
     entries = common.raw_cdc_records(path)
     require(entries, "CDC tail is empty")
@@ -584,7 +586,7 @@ def validate_cdc_tail(
             source, metadata = envelope.get("source"), envelope.get("transaction")
             require(
                 isinstance(source, dict)
-                and source.get("name") == "mariadb-main"
+                and source.get("name") == source_id
                 and source.get("db") == "benchbase"
                 and isinstance(source.get("table"), str)
                 and isinstance(metadata, dict)
@@ -712,7 +714,8 @@ def validate_acceptance(
     status_entries = common.payload_records(status_path, "status stream")
     status_records = [record for _, record in status_entries]
     load_status = common.one_status(status_records, "LOAD_FINISHED_SEEN")
-    cdc = validate_cdc_tail(cdc_path, run_id, load_status["last_cdc_stream_id"], shapes, codec)
+    cdc = validate_cdc_tail(cdc_path, run_id, load_status["last_cdc_stream_id"], shapes, codec,
+                            common.expected_source_id(config))
     require(cdc["markers"] == len(clients), "marker count differs from successful clients")
     require(
         cdc["good_credit_transactions"] >= config["minimum_good_credit_transactions"],

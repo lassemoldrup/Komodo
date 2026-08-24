@@ -53,7 +53,8 @@ def load_config(path: Path) -> dict[str, Any]:
     }
     require(isinstance(config, dict) and set(config) == required, "run configuration fields differ")
     require(config["kind"] == "tpcc_delivery_acceptance_config", "run configuration kind")
-    require(config["benchmark"] == "tpcc" and config["backend"] == "mariadb", "run benchmark/backend")
+    require(config["benchmark"] == "tpcc", "run benchmark")
+    common.expected_source_id(config)
     require(config["declared_isolation"] == "REPEATABLE_READ", "run isolation is not RR")
     require(
         config["warehouses"] == 1 and 2 <= config["terminals"] <= 10,
@@ -114,7 +115,7 @@ def decode_clients(
     manifest = manifests[0]
     require(
         manifest["run_id"] == run_id and manifest["benchmark"] == "tpcc"
-        and manifest["backend"] == "mariadb"
+        and manifest["backend"] == config["backend"]
         and manifest["declared_isolation"] == "REPEATABLE_READ",
         "RunManifest identity differs",
     )
@@ -345,7 +346,8 @@ def validate_delivery_rows(label: str, shape: dict, rows: list, codec: TpccCodec
     return 3 * active + sum(len(lines) for lines in lines_by_order.values()), multi_line
 
 
-def validate_cdc_tail(path: Path, run_id: str, load_id: str, shapes: dict, codec: TpccCodec):
+def validate_cdc_tail(path: Path, run_id: str, load_id: str, shapes: dict, codec: TpccCodec,
+                      source_id: str):
     entries = common.raw_cdc_records(path)
     require(entries and common.parse_stream_id(entries[0][0], "CDC first")
             > common.parse_stream_id(load_id, "LOAD cursor"), "CDC tail boundary differs")
@@ -371,7 +373,7 @@ def validate_cdc_tail(path: Path, run_id: str, load_id: str, shapes: dict, codec
         counts, orders, parsed = Counter(), Counter(), []
         for total, (_, key, envelope) in enumerate(rows, 1):
             source, meta = envelope.get("source"), envelope.get("transaction")
-            require(isinstance(source, dict) and source.get("name") == "mariadb-main"
+            require(isinstance(source, dict) and source.get("name") == source_id
                     and source.get("db") == "benchbase" and isinstance(meta, dict)
                     and meta.get("id") == txid and meta.get("total_order") == total, f"{label} metadata")
             collection = f"benchbase.{source['table']}"; counts[collection] += 1; orders[collection] += 1
@@ -425,7 +427,8 @@ def validate_acceptance(config_path: Path, run_id_path: Path, client_path: Path,
     )
     status_records = [record for _, record in common.payload_records(status_path, "status stream")]
     load_status = common.one_status(status_records, "LOAD_FINISHED_SEEN")
-    cdc = validate_cdc_tail(cdc_path, run_id, load_status["last_cdc_stream_id"], shapes, codec)
+    cdc = validate_cdc_tail(cdc_path, run_id, load_status["last_cdc_stream_id"], shapes, codec,
+                            common.expected_source_id(config))
     require(cdc["markers"] == len(clients), "marker/client count differs")
     require(cdc["multi_line_districts"] >= config["minimum_multi_line_districts"], "multi-line lacks proof")
     metrics = common.load_json(monitor_path, "monitor metrics")
