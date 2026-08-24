@@ -357,17 +357,20 @@ def decode_clients(
 
     require(confirmed_id >= config["minimum_id_transactions"], "ID branch lacks positive proof")
     require(confirmed_name >= config["minimum_last_name_transactions"], "name branch lacks positive proof")
+    for session_id in config["expected_session_ids"]:
+        by_session.setdefault(session_id, [])
     require(set(by_session) == set(config["expected_session_ids"]), "ClientTxn session roster differs")
     done_by_session = {record["session_id"]: record for record in done_records}
     require(set(done_by_session) == set(config["expected_session_ids"]), "SessionDone roster differs")
     retries = 0
+    terminal_aborts = 0
     retry_surplus_increases = 0
     for session_id in config["expected_session_ids"]:
         session_clients = sorted(by_session[session_id], key=lambda item: item["session_seq"])
         count = len(session_clients)
         sequences = [client["session_seq"] for client in session_clients]
         txn_ids = [client["correlation_id"]["txn_id"] for client in session_clients]
-        require(sequences == list(range(1, count + 1)), f"{session_id} logical sequence has abort gap")
+        require(sequences == sorted(set(sequences)), f"{session_id} logical sequence is not increasing/unique")
         require(txn_ids == sorted(set(txn_ids)), f"{session_id} marker IDs are not increasing/unique")
         previous_surplus = 0
         for txn_id, sequence in zip(txn_ids, sequences, strict=True):
@@ -377,15 +380,25 @@ def decode_clients(
             previous_surplus = surplus
         done = done_by_session[session_id]
         retry_count = done["retry_attempts"]
+        terminal_count = done["terminal_aborted_transactions"]
+        final_sequence = done["final_session_seq"]
+        require(
+            all(1 <= sequence <= final_sequence for sequence in sequences)
+            and final_sequence - count == terminal_count,
+            f"{session_id} logical sequence gaps do not equal terminal aborts",
+        )
         require(
             done["run_id"] == run_id
-            and done["final_session_seq"] == count
-            and done["logical_transactions_started"] == count
+            and done["logical_transactions_started"] == final_sequence
             and done["successful_transactions"] == count
-            and done["terminal_aborted_transactions"] == 0
+            and done["logical_transactions_started"] == count + terminal_count
             and done["published_transactions"] == count
-            and done["physical_attempts_started"] == count + retry_count
-            and done["definitively_aborted_attempts"] == retry_count
+            and done["physical_attempts_started"]
+            == count + done["definitively_aborted_attempts"]
+            and done["definitively_aborted_attempts"]
+            == retry_count + terminal_count
+            and retry_count
+            == done["physical_attempts_started"] - done["logical_transactions_started"]
             and done["ambiguous_attempts"] == 0,
             f"{session_id} SessionDone accounting differs",
         )
@@ -395,6 +408,7 @@ def decode_clients(
             f"{session_id} rolling correlation digest differs",
         )
         retries += retry_count
+        terminal_aborts += terminal_count
     require(retries >= config["minimum_retries"], "retry accounting is below configured minimum")
     if retries > 0:
         require(retry_surplus_increases > 0, "retries produce no published marker-surplus increase")
@@ -406,6 +420,7 @@ def decode_clients(
         "ambiguous_single": ambiguous_single,
         "remote_customer_transactions": remote_customer_transactions,
         "retries": retries,
+        "terminal_aborts": terminal_aborts,
         "retry_surplus_increases": retry_surplus_increases,
     }
 
@@ -750,7 +765,12 @@ def validate_acceptance(
         config, run_id, [record for _, record in client_entries], decoder, catalog, groups
     )
     outcomes = common.benchbase_outcomes(
-        benchbase_log_path, "Payment", len(clients), 0, coverage["retries"]
+        benchbase_log_path,
+        "Payment",
+        len(clients),
+        coverage["terminal_aborts"],
+        coverage["retries"],
+        coverage["retries"] + coverage["terminal_aborts"],
     )
     status_entries = common.payload_records(status_path, "status stream")
     status_records = [record for _, record in status_entries]
