@@ -1161,6 +1161,8 @@ start_direct_stack() {
   [[ $stage == benchbase_uninstrumented ]] || die "not a direct mode: $stage"
   record_command "$ACTIVE_TRIAL_DIR/commands.txt" compose down --volumes --remove-orphans
   reset_stack
+  blackbox_backend_prepare_run ||
+    die "backend did not prepare the uninstrumented trial"
   STACK_MAY_BE_RUNNING=1
   record_command "$ACTIVE_TRIAL_DIR/commands.txt" \
     blackbox_backend_start_uninstrumented_database
@@ -1989,10 +1991,10 @@ run_trial() {
     capture_redis_configuration "$trial_dir"
   else
     [[ $stage == benchbase_uninstrumented ]] || die "unknown formal mode: $stage"
+    export BLACKBOX_ACTIVE_RUN_ID=$run_id
     start_direct_stack "$stage"
     capture_host_before "$trial_dir"
     capture_versions "$trial_dir"
-    export BLACKBOX_ACTIVE_RUN_ID=$run_id
     export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$trial_dir/loader_declaration.json"
     run_loader "$trial_dir" "$BASELINE_DIST" "$BASELINE_CONFIG"
     validate_independent_loader_state "$trial_dir"
@@ -2133,6 +2135,11 @@ main() {
   assert_output_size_within_limit
   # shellcheck source=scripts/blackbox_lifecycle.sh
   . "$ROOT/scripts/blackbox_lifecycle.sh"
+  BLACKBOX_ADAPTER_CONTRACT=$(blackbox_adapter_contract) ||
+    die "selected benchmark adapter contract is unavailable"
+  BLACKBOX_BACKEND_CONTRACT=$(blackbox_backend_contract) ||
+    die "selected backend contract is unavailable"
+  export BLACKBOX_ADAPTER_CONTRACT BLACKBOX_BACKEND_CONTRACT
   blackbox_acquire_live_stack_lock
   LIVE_LOCK_ACQUIRED=1
   read -r -a JAVA_FLAGS <<<"$JAVA_FLAGS_TEXT"
