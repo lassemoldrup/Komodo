@@ -20,6 +20,7 @@ BLACKBOX_TERMINATION_GRACE_SECONDS=${BLACKBOX_TERMINATION_GRACE_SECONDS:-5}
 BLACKBOX_COORDINATOR_MARGIN_SECONDS=${BLACKBOX_COORDINATOR_MARGIN_SECONDS:-1800}
 BLACKBOX_PROCESSING_MODE=${BLACKBOX_PROCESSING_MODE:-audited}
 BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE=${BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE:-0}
+BLACKBOX_EXPECT_BOOTSTRAP_REJECTION=${BLACKBOX_EXPECT_BOOTSTRAP_REJECTION:-0}
 BLACKBOX_MONITOR_METRICS_PATH=${BLACKBOX_MONITOR_METRICS_PATH:-}
 BLACKBOX_RUN_ID_PATH=${BLACKBOX_RUN_ID_PATH:-}
 BLACKBOX_BOOTSTRAP_MANIFEST_PATH=${BLACKBOX_BOOTSTRAP_MANIFEST_PATH:-}
@@ -128,6 +129,8 @@ require_configuration() {
   [[ $BLACKBOX_MONITOR_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]
   [[ $BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE == 0 ||
      $BLACKBOX_REQUIRE_TERMINAL_INVALID_ON_FAILURE == 1 ]]
+  [[ $BLACKBOX_EXPECT_BOOTSTRAP_REJECTION == 0 ||
+     $BLACKBOX_EXPECT_BOOTSTRAP_REJECTION == 1 ]]
   [[ $BLACKBOX_LOADER_BATCH_SIZE =~ ^[1-9][0-9]*$ ]] ||
     blackbox_die "BLACKBOX_LOADER_BATCH_SIZE must be a positive integer"
   [[ $BLACKBOX_BOOTSTRAP_MAX_ROWS =~ ^[1-9][0-9]*$ ]] ||
@@ -775,6 +778,47 @@ publish_final_schema_attestation() {
 }
 
 
+close_expected_bootstrap_rejection() {
+  rm -f -- "$BOOTSTRAP_SCAN_FILE" || true
+  BOOTSTRAP_SCAN_FILE=
+
+  # The loader is already quiescent and no workload process was admitted. This
+  # is therefore the normal failure-closure ordering, without a synthetic
+  # RunFailed record that could mask the monitor-owned bootstrap diagnostic.
+  if ! blackbox_commit_fence END_FENCE; then
+    close_failed_run COMMIT_OUTCOME_AMBIGUOUS \
+      "END_FENCE commit did not complete with a known outcome" 0
+    return 1
+  fi
+  END_FENCE_COMMITTED=1
+  if ! publish_final_schema_attestation; then
+    close_failed_run SCHEMA_ATTESTATION_MISSING \
+      "FINAL schema/capture attestation failed" 0
+    return 1
+  fi
+
+  blackbox_log "waiting for expected bootstrap rejection"
+  blackbox_wait_for_status FINAL || return 1
+  local outcome
+  outcome=$(jq -r '.outcome' <<<"$MATCHED_STATUS")
+  printf '%s\n' "$MATCHED_STATUS"
+  if [[ $outcome != INVALID ]]; then
+    blackbox_die "expected bootstrap rejection finalized as $outcome"
+    return 1
+  fi
+  if [[ -n $BLACKBOX_MONITOR_METRICS_PATH ]]; then
+    wait_for_owned_monitor_exit || return 1
+    if (( MONITOR_EXIT_STATUS != 4 )); then
+      blackbox_die \
+        "audited monitor exited $MONITOR_EXIT_STATUS after expected INVALID"
+      return 1
+    fi
+    validate_audited_measurement INVALID || return 1
+  fi
+  return 4
+}
+
+
 run_loader_and_close_bootstrap() {
   if run_client_phase loader "$BLACKBOX_LOADER_COMMAND" "$BLACKBOX_LOADER_TIMEOUT_SECONDS"; then
     :
@@ -863,6 +907,17 @@ run_loader_and_close_bootstrap() {
     close_failed_run COMMIT_OUTCOME_AMBIGUOUS \
       "LOAD_FINISHED commit did not complete with a known outcome" 0
     return 1
+  fi
+  if (( BLACKBOX_EXPECT_BOOTSTRAP_REJECTION == 1 )); then
+    blackbox_log \
+      "closing the quiescent run without workload admission after expected bootstrap rejection"
+    local rejection_status
+    if close_expected_bootstrap_rejection; then
+      rejection_status=0
+    else
+      rejection_status=$?
+    fi
+    return "$rejection_status"
   fi
   blackbox_log "waiting for LOAD_FINISHED_SEEN"
   if ! blackbox_wait_for_status LOAD_FINISHED_SEEN; then

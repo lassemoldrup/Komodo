@@ -64,7 +64,8 @@ run delivery-acceptance run_tpcc_delivery_acceptance.sh --duration-seconds 90
 
 step "starting resource-exhaustion reference probe (expected INVALID)"
 set +e
-TPCC_ACCEPTANCE_BACKEND=yugabytedb_ysql \
+BLACKBOX_EXPECT_BOOTSTRAP_REJECTION=1 \
+  TPCC_ACCEPTANCE_BACKEND=yugabytedb_ysql \
   "$ROOT/tests/run_tpcc_stock_level_acceptance.sh" "${common[@]}" \
   --output-dir "$OUTPUT_ROOT/resource-exhaustion-probe" \
   --monitor-max-bootstrap-state-bytes 268435456

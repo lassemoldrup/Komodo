@@ -233,6 +233,11 @@ else:
     elif [[ $cursor == 1-0 && ${EMIT_LIFECYCLE_REGRESSION:-0} == 1 ]]; then
       lifecycle=STARTING
       entry_id=1-1
+    elif [[ $cursor != 3-0 && ${BLACKBOX_EXPECT_BOOTSTRAP_REJECTION:-0} == 1 ]] && \
+        grep -q '^publish:schema_attestation:FINAL$' "$EVENT_LOG" && \
+        grep -q '^fence:END_FENCE$' "$EVENT_LOG"; then
+      lifecycle=FINAL
+      entry_id=3-0
     elif [[ $cursor == 1-0 ]] && grep -q '^fence:LOAD_FINISHED$' "$EVENT_LOG"; then
       lifecycle=LOAD_FINISHED_SEEN
       entry_id=2-0
@@ -255,7 +260,10 @@ import sys
 stream, run_id, lifecycle, entry_id = sys.argv[1:]
 with open(__import__("os").environ["EVENT_LOG"], encoding="utf-8") as event_file:
     event_lines = {line.rstrip("\n") for line in event_file}
-failed = lifecycle == "FINAL" and "publish:run_failed" in event_lines
+failed = lifecycle == "FINAL" and (
+    "publish:run_failed" in event_lines
+    or __import__("os").environ.get("BLACKBOX_EXPECT_BOOTSTRAP_REJECTION") == "1"
+)
 end_seen = "fence:END_FENCE" in event_lines
 record = {
     "kind": "status",
@@ -372,7 +380,8 @@ if [[ $processing_mode == join-only ]]; then
   completed=true
   reconciled=true
   exit_status=0
-  if grep -q '^publish:run_failed$' "$EVENT_LOG"; then
+  if grep -q '^publish:run_failed$' "$EVENT_LOG" || \
+      [[ ${BLACKBOX_EXPECT_BOOTSTRAP_REJECTION:-0} == 1 ]]; then
     completion_status=failed
     completed=false
     reconciled=false
@@ -436,7 +445,8 @@ if [[ -n $metrics_output ]]; then
   reconciled=true
   outcome=PASS
   exit_status=0
-  if grep -q '^publish:run_failed$' "$EVENT_LOG"; then
+  if grep -q '^publish:run_failed$' "$EVENT_LOG" || \
+      [[ ${BLACKBOX_EXPECT_BOOTSTRAP_REJECTION:-0} == 1 ]]; then
     completion_status=failed
     completed=false
     reconciled=false
@@ -485,7 +495,9 @@ measurement = {
     "joiner": {"released_phase_anchor_transactions": 1},
     "checker": {"consumed_transactions": 1},
     "reconciliation": {"evidence_reconciled": reconciled},
-    "diagnostics": [],
+    "diagnostics": ([{"category": "PROTOCOL", "code": "RESOURCE_EXHAUSTED",
+                     "message": "injected bootstrap rejection"}]
+                    if outcome == "INVALID" else []),
 }
 with open(path, "x", encoding="utf-8") as output:
     json.dump(measurement, output, separators=(",", ":"))
@@ -731,6 +743,7 @@ run_case() {
       BLACKBOX_DB_PORT=0 \
       BLACKBOX_MONITOR_COMMAND="$case_root/bin/monitor" \
       BLACKBOX_PROCESSING_MODE="$processing_mode" \
+      BLACKBOX_EXPECT_BOOTSTRAP_REJECTION="${TEST_EXPECT_BOOTSTRAP_REJECTION:-0}" \
       BLACKBOX_MONITOR_METRICS_PATH="$metrics_path" \
       BLACKBOX_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS="${TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS:-}" \
       BLACKBOX_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION="${TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION:-}" \
@@ -798,6 +811,28 @@ final_line=$(line_of 'status:FINAL' "$CASE_LOG")
 (( load_fence_line < load_ack_line && load_ack_line < workload_line )) || fail 'workload bypassed LOAD acknowledgement'
 (( workload_line < end_fence_line && end_fence_line < final_schema_line && final_schema_line < final_line )) ||
   fail 'END_FENCE/FINAL attestation/final-result order is wrong'
+
+export TEST_EXPECT_BOOTSTRAP_REJECTION=1
+run_case expected_bootstrap_rejection 0 0 0 0 0 0 '' audited 1
+unset TEST_EXPECT_BOOTSTRAP_REJECTION
+[[ $CASE_STATUS == 4 ]] ||
+  fail "expected bootstrap rejection exited $CASE_STATUS instead of 4: $(cat "$CASE_ROOT/stderr")"
+grep -q '^status:FINAL$' "$CASE_LOG" ||
+  fail 'expected bootstrap rejection did not observe FINAL'
+grep -q '^fence:END_FENCE$' "$CASE_LOG" ||
+  fail 'expected bootstrap rejection did not close with END_FENCE'
+grep -q '^publish:schema_attestation:FINAL$' "$CASE_LOG" ||
+  fail 'expected bootstrap rejection did not publish FINAL attestation'
+if grep -q '^phase:workload$' "$CASE_LOG"; then
+  fail 'expected bootstrap rejection admitted workload'
+fi
+if grep -q '^publish:run_failed$' "$CASE_LOG"; then
+  fail 'expected bootstrap rejection masked the monitor diagnostic with RunFailed'
+fi
+[[ $(jq -r '.outcome' "$CASE_ROOT/monitor-metrics.json") == INVALID ]] ||
+  fail 'expected bootstrap rejection metrics did not retain INVALID'
+[[ $(jq -r '.diagnostics[0].code' "$CASE_ROOT/monitor-metrics.json") == RESOURCE_EXHAUSTED ]] ||
+  fail 'expected bootstrap rejection metrics lost the monitor-owned diagnostic'
 [[ $(jq -r '.loader_batch_size' "$CASE_ROOT/loader-validation.json") == 128 ]] ||
   fail 'loader validation did not record the default batch size'
 [[ $(jq -r '.benchmark' "$CASE_ROOT/loader-declaration.json") == ycsb ]] ||
