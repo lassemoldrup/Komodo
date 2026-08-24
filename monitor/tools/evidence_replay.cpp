@@ -41,6 +41,7 @@ struct Options {
   std::string client_input;
   std::string cdc_input;
   std::vector<ProtocolBackendFact> expected_backend_facts;
+  blackbox::TransactionJoinerLimits joiner_limits;
 };
 
 struct StreamId {
@@ -99,6 +100,31 @@ struct EvidenceRecord {
       options.client_input = value;
     } else if (argument == "--cdc-input") {
       options.cdc_input = value;
+    } else if (argument == "--max-pending-client-records") {
+      options.joiner_limits.max_pending_client_records =
+          decimal(value, argument);
+    } else if (argument == "--max-pending-client-bytes") {
+      options.joiner_limits.max_pending_client_bytes = decimal(value, argument);
+    } else if (argument == "--max-pending-cdc-slots") {
+      options.joiner_limits.max_pending_cdc_slots = decimal(value, argument);
+    } else if (argument == "--max-pending-cdc-bytes") {
+      options.joiner_limits.max_pending_cdc_bytes = decimal(value, argument);
+    } else if (argument == "--max-retained-identity-records") {
+      options.joiner_limits.max_retained_identity_records =
+          decimal(value, argument);
+    } else if (argument == "--max-retained-identity-bytes") {
+      options.joiner_limits.max_retained_identity_bytes =
+          decimal(value, argument);
+    } else if (argument == "--max-events-per-transaction") {
+      options.joiner_limits.max_events_per_transaction =
+          decimal(value, argument);
+    } else if (argument == "--max-bootstrap-state-rows") {
+      options.joiner_limits.max_bootstrap_state_rows = decimal(value, argument);
+    } else if (argument == "--max-bootstrap-state-bytes") {
+      options.joiner_limits.max_bootstrap_state_bytes =
+          decimal(value, argument);
+    } else if (argument == "--max-checker-state-bytes") {
+      options.joiner_limits.max_checker_state_bytes = decimal(value, argument);
     } else if (argument == "--expected-backend-fact") {
       const auto separator = value.find('=');
       if (separator == std::string::npos || separator == 0U ||
@@ -204,6 +230,7 @@ int run(const Options &options) {
       blackbox::BenchmarkAdapterRegistry::require(manifest.benchmark);
   blackbox::RunControllerConfig controller_config;
   controller_config.expected_backend_facts = options.expected_backend_facts;
+  controller_config.joiner_limits = options.joiner_limits;
   RunController controller(manifest, std::move(controller_config));
   controller.setLastClientStreamId(manifest_entry.stream_id);
   DebeziumTxnAssembler assembler(DebeziumAssemblerConfig{
