@@ -4,6 +4,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUTPUT_ROOT=${1:?}
 MONITOR_BIN=${2:?}
 DIST="$OUTPUT_ROOT/benchbase-postgres"
+REMOTE_BOOTSTRAP_MAX_ROWS=${BLACKBOX_TPCC_REMOTE_BOOTSTRAP_MAX_ROWS:-1200000}
 step() { printf '=== %s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 common=(
   --benchbase-dist "$DIST"
@@ -25,10 +26,12 @@ run() {
 run payment-acceptance run_tpcc_payment_acceptance.sh
 BLACKBOX_REDIS_MAXMEMORY_BYTES=4294967296 \
   run new-order-remote-acceptance run_tpcc_new_order_acceptance.sh \
-    --warehouses 2 --duration-seconds 30
+    --warehouses 2 --duration-seconds 30 \
+    --monitor-max-bootstrap-state-rows "$REMOTE_BOOTSTRAP_MAX_ROWS"
 BLACKBOX_REDIS_MAXMEMORY_BYTES=4294967296 \
   run payment-remote-acceptance run_tpcc_payment_acceptance.sh \
-    --warehouses 2 --duration-seconds 30
+    --warehouses 2 --duration-seconds 30 \
+    --monitor-max-bootstrap-state-rows "$REMOTE_BOOTSTRAP_MAX_ROWS"
 run delivery-acceptance run_tpcc_delivery_acceptance.sh --duration-seconds 90
 step "starting resource-exhaustion reference probe (expected INVALID)"
 set +e
