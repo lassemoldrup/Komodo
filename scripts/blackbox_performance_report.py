@@ -885,8 +885,7 @@ def fence_stream_time(
     require(phase in {"RUN_START", "LOAD_FINISHED", "END_FENCE"}, "unknown fence phase")
     require(isinstance(document, list), "CDC XRANGE artifact is not an array")
     phases: dict[str, int] = {}
-    requested_phase_seen = False
-    fence_transaction_id: str | None = None
+    fence_row_seen = False
     for entry in document:
         stream_id, fields = xrange_fields(entry, "CDC")
         stream_ms = stream_id_milliseconds(stream_id)
@@ -901,19 +900,18 @@ def fence_stream_time(
             entry_phases: dict[str, int] = {}
             find_phase(envelope, run_id, entry_phases, stream_ms)
             if phase in entry_phases:
-                transaction = envelope.get("transaction")
-                if isinstance(transaction, dict) and isinstance(transaction.get("id"), str):
-                    fence_transaction_id = transaction["id"]
+                fence_row_seen = True
+            # Frames are contiguous and never interleave, so the first END at
+            # or after the fence row closes the fence's own transaction.
+            # Connector transaction IDs stay per-record diagnostics: the
+            # pinned YugabyteDB connector never repeats one ID across records.
             if (
                 transaction_end
-                and requested_phase_seen
-                and fence_transaction_id is not None
+                and fence_row_seen
                 and envelope.get("status") == "END"
-                and envelope.get("id") == fence_transaction_id
+                and isinstance(envelope.get("id"), str)
             ):
                 return stream_ms
-        if phase in phases:
-            requested_phase_seen = True
     require(phase in phases, f"CDC artifact has no {phase} fence row")
     if transaction_end:
         raise ReportError(f"CDC artifact has no transaction END after {phase}")
@@ -925,7 +923,7 @@ def component_fence_window(document: Any, run_id: str) -> dict[str, Any]:
 
     require(isinstance(document, list), "CDC XRANGE artifact is not an array")
     requested = ("LOAD_FINISHED", "END_FENCE")
-    transaction_ids: dict[str, str] = {}
+    fence_rows_seen: set[str] = set()
     boundaries: dict[str, str] = {}
     for entry in document:
         stream_id, fields = xrange_fields(entry, "CDC")
@@ -948,16 +946,18 @@ def component_fence_window(document: Any, run_id: str) -> dict[str, Any]:
                     and transaction["id"] != "",
                     f"CDC {phase} row has no transaction ID",
                 )
-                transaction_ids.setdefault(phase, transaction["id"])
+                fence_rows_seen.add(phase)
             if envelope.get("status") != "END" or not isinstance(envelope.get("id"), str):
                 continue
-            for phase, transaction_id in transaction_ids.items():
-                if envelope["id"] == transaction_id:
-                    boundaries.setdefault(phase, stream_id)
+            # The first END at or after a fence row closes that fence's own
+            # transaction; frames never interleave and connector transaction
+            # IDs are per-record diagnostics, not cross-record identities.
+            for phase in fence_rows_seen:
+                boundaries.setdefault(phase, stream_id)
 
     result: dict[str, Any] = {}
     for phase in requested:
-        require(phase in transaction_ids, f"CDC artifact has no {phase} fence row")
+        require(phase in fence_rows_seen, f"CDC artifact has no {phase} fence row")
         require(
             phase in boundaries,
             f"CDC artifact has no transaction END after {phase}",
