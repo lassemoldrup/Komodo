@@ -12,6 +12,91 @@
       "report": "normalization-report.json",
       "report_sha256": "8257bea46779ea25804a1ba945c26233b90774a2093ed22c38325514cd4c339e",
       "regular_file_count": 25
+    },
+    {
+      "purpose": "tpcc_stock_level_workload",
+      "bundle_path": "fixtures/tpcc_stock_level_workload_gate",
+      "archive_path": "evidence/archives/tpcc_stock_level_workload.tar.gz",
+      "archive_sha256": "9520949131d427a8d0d2e17f07447b1be9325dfcebc2efa41763d23b6b3be4cd",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "df5bc74f0239f7baf16f6c25ce2f7825e504a425e8cf8f3e321f6915dbda3256",
+      "report": "acceptance-report.json",
+      "report_sha256": "0baabdd574156b4516dc0f293387af4e9fbe9c4e64632b8a5cc8f930733d45cd",
+      "run_ids": [
+        "f18f0bc5-00f2-4244-8a28-c88c4e5d6775"
+      ],
+      "regular_file_count": 13
+    },
+    {
+      "purpose": "tpcc_order_status_workload",
+      "bundle_path": "fixtures/tpcc_order_status_workload_gate",
+      "archive_path": "evidence/archives/tpcc_order_status_workload.tar.gz",
+      "archive_sha256": "f606e8d74c028ab925caaa8d79fa16f4530d522a82a45b965478e936778adb84",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "d1cbc796ad46b8357660abeea907c6212748e7e83442710437a58a6ed84432d6",
+      "report": "acceptance-report.json",
+      "report_sha256": "95b717a5a42980a09c2243eb6ad946e1acbdf5a70472731736c7e4e8001b0511",
+      "run_ids": [
+        "0d67346f-4419-44f2-88aa-d0a574135c67"
+      ],
+      "regular_file_count": 14
+    },
+    {
+      "purpose": "tpcc_new_order_workload",
+      "bundle_path": "fixtures/tpcc_new_order_workload_gate",
+      "archive_path": "evidence/archives/tpcc_new_order_workload.tar.gz",
+      "archive_sha256": "3a64129b478b9c517aaa175e9bf21ca1f80aab6578ae03f3176d2eeeebac88d3",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "32ba8fc9078b1cf4a9d6004a85cdec503a083f1310bf0baa9d02d77484ebdfc6",
+      "report": "acceptance-report.json",
+      "report_sha256": "9794bd2893b0188bd0c1bb57fdbf397ea3f6b1d7a65f452a2939c2cc8c22a2d6",
+      "run_ids": [
+        "1ab84007-1cf3-42f7-8f62-13dd18b51c86"
+      ],
+      "regular_file_count": 13
+    },
+    {
+      "purpose": "tpcc_payment_workload",
+      "bundle_path": "fixtures/tpcc_payment_workload_gate",
+      "archive_path": "evidence/archives/tpcc_payment_workload.tar.gz",
+      "archive_sha256": "f42a1a65f4e8e00b161ac6d8902d89e6198618440a19d97b8aca0730695511bf",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "3d854cb6dec67ab5173bbe5b068260f1450c2808829348c21a9ae71ea5004746",
+      "report": "acceptance-report.json",
+      "report_sha256": "742f8a753b73b9311da7c6fb543c799d973604a871a59b60eb13ded34f7d2484",
+      "run_ids": [
+        "8519c0c9-bc25-41b2-9fcf-fdee7b248484"
+      ],
+      "regular_file_count": 15
+    },
+    {
+      "purpose": "tpcc_delivery_workload",
+      "bundle_path": "fixtures/tpcc_delivery_workload_gate",
+      "archive_path": "evidence/archives/tpcc_delivery_workload.tar.gz",
+      "archive_sha256": "ca76b7067ceaff85a808df554d44199701fea317b55346e8c9837ae30797e87a",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "aeb1658cb68a75b7f5c9961962e312622c237748f4928fdd0d34b89e8fd5008f",
+      "report": "acceptance-report.json",
+      "report_sha256": "5d46406dbf7dc2e8418a024d8cd648baea359dc5f1513f7993b1eb4d549e736e",
+      "run_ids": [
+        "be9e2afb-7813-4acf-8d1b-7a7b13ce6bca"
+      ],
+      "regular_file_count": 13
+    },
+    {
+      "purpose": "tpcc_full_mix_workload",
+      "bundle_path": "fixtures/tpcc_full_mix_workload_gate",
+      "archive_path": "evidence/archives/tpcc_full_mix_workload.tar.gz",
+      "archive_sha256": "ac6017f4d1873d4fff0f3c5dbfd8491c2d779813ea77537b41e8a2ddf2f31ea9",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "fe00722aa35d5185d5b04e13038427c84ffa9403600f0fa2d68d357909ad85b9",
+      "report": "acceptance-report.json",
+      "report_sha256": "d5d6f7a01118dbbb4240f560bef93a9f41cab2dff3633fee68bf820d0527b447",
+      "run_ids": [
+        "4b3f05b0-a38a-4527-97bf-d496e55c155f"
+      ],
+      "regular_file_count": 15,
+      "requires_local_artifacts": true
     }
   ]
 }

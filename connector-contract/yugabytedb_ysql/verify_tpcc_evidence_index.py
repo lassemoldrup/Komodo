@@ -84,8 +84,8 @@ def replay_bundle(directory: Path, purpose: str, saved_report: Path) -> None:
             }[slug]
             extra_files = {
                 "benchbase-log": "e2e.log",
-                "customer-catalog": "customer-catalog.json",
-                "history-catalog": "history-catalog.json",
+                "customer-catalog": "customer-catalog.jsonl",
+                "history-catalog": "history-catalog.jsonl",
                 "loader-validation": "loader-validation.json",
                 "replay-manifest": "replay-manifest.json",
             }
