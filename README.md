@@ -335,7 +335,23 @@ corpus with:
 The profile fixes weights `45,43,4,4,4`, requires positive results for every
 transaction type, validates all four sessions and all nine bootstrap tables,
 and accepts only reconciled `PASS` or checker-attributed `VIOLATION`. It records
-stream checksums and a size-bounded full CDC/client replay manifest. Run the
+stream checksums and a size-bounded full CDC/client replay manifest.
+
+Every focused TPC-C acceptance driver and the full-mix driver select their
+backend through the coordinator backend-driver registry. The default remains
+MariaDB; setting `TPCC_ACCEPTANCE_BACKEND=yugabytedb_ysql` (with a
+`benchbase-postgres` distribution) runs the identical profile against the
+pinned YugabyteDB YSQL stack, whose loader is markedly slower — raise
+`--loader-timeout-seconds`, `--status-timeout-seconds`, and
+`--case-timeout-seconds` accordingly. Validators resolve the expected
+connector source ID and connector-transaction-ID stability from the run
+configuration's backend; the pinned YugabyteDB connector emits per-record
+composite IDs that are bounded diagnostics only. The
+`connector-contract/yugabytedb_ysql` capture
+`run_tpcc_normalization_capture.sh` seals the TPC-C boundary-value gate proving
+Java JDBC capture, C++ CDC normalization, and the rendered bootstrap scan
+byte-identical on one live pinned stack; its archive is replay-verified by
+`verify_tpcc_evidence_index.py` and the associated suite test. Run the
 required offline fail-closed injections against that capture with:
 
 ```bash
