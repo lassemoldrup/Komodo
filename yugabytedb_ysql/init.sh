@@ -6,6 +6,11 @@ readonly database_name=benchbase
 readonly slot_name=${BLACKBOX_YSQL_SLOT_NAME:?BLACKBOX_YSQL_SLOT_NAME is required}
 readonly publication_name=${BLACKBOX_YSQL_PUBLICATION_NAME:?BLACKBOX_YSQL_PUBLICATION_NAME is required}
 readonly capture_tables=${BLACKBOX_YSQL_CAPTURE_TABLES:?BLACKBOX_YSQL_CAPTURE_TABLES is required}
+readonly create_capture_objects=${BLACKBOX_YSQL_CREATE_CAPTURE_OBJECTS:-true}
+if [[ $create_capture_objects != true && $create_capture_objects != false ]]; then
+  echo "invalid BLACKBOX_YSQL_CREATE_CAPTURE_OBJECTS: $create_capture_objects" >&2
+  exit 2
+fi
 
 for identifier in "$slot_name" "$publication_name"; do
   if [[ ! $identifier =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then
@@ -48,7 +53,9 @@ ysql_admin benchbase --command \
   "GRANT USAGE ON SCHEMA benchbase TO blackbox_application; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA benchbase TO blackbox_application"
 ysql_admin benchbase --command \
   "GRANT USAGE ON SCHEMA benchbase TO blackbox_replication; GRANT SELECT ON ALL TABLES IN SCHEMA benchbase TO blackbox_replication"
-ysql_admin benchbase --command \
-  "CREATE PUBLICATION $publication_name FOR TABLE $capture_tables"
-ysql_admin benchbase --command \
-  "SELECT * FROM pg_create_logical_replication_slot('$slot_name', 'pgoutput', false, false, 'SEQUENCE')"
+if [[ $create_capture_objects == true ]]; then
+  ysql_admin benchbase --command \
+    "CREATE PUBLICATION $publication_name FOR TABLE $capture_tables"
+  ysql_admin benchbase --command \
+    "SELECT * FROM pg_create_logical_replication_slot('$slot_name', 'pgoutput', false, false, 'SEQUENCE')"
+fi

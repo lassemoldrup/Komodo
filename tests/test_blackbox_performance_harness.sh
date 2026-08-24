@@ -102,7 +102,7 @@ awk '
 ' "$RUNNER" >"$config_generator"
 python3 "$config_generator" \
   "$TEST_ROOT/tpcc-disabled.xml" "$TEST_ROOT/tpcc-audited.xml" \
-  4 1 32 1 128 0 2 3 tpcc 45,43,4,4,4 unlimited 2000-01-01T00:00:00Z
+  4 1 32 1 128 0 2 3 tpcc 45,43,4,4,4 unlimited 2000-01-01T00:00:00Z mariadb
 grep -F "<mode>\${env:BLACKBOX_MEASUREMENT_MODE}</mode>" \
   "$TEST_ROOT/tpcc-audited.xml" >/dev/null ||
   fail 'generated TPC-C configuration lost the measurement-mode placeholder'
@@ -114,6 +114,18 @@ if grep -F '<runId>' "$TEST_ROOT/tpcc-disabled.xml" >/dev/null; then
 fi
 grep -F '<benchmark>tpcc</benchmark>' "$TEST_ROOT/tpcc-audited.xml" >/dev/null ||
   fail 'generated full-E2E configuration selected the wrong adapter'
+grep -F '<backend>mariadb</backend>' "$TEST_ROOT/tpcc-audited.xml" >/dev/null ||
+  fail 'generated full-E2E configuration lost the backend selection'
+python3 "$config_generator" \
+  "$TEST_ROOT/ysql-disabled.xml" "$TEST_ROOT/ysql-audited.xml" \
+  4 1 32 1 128 0 2 3 tpcc 45,43,4,4,4 unlimited 2000-01-01T00:00:00Z yugabytedb_ysql
+grep -F '<type>POSTGRES</type>' "$TEST_ROOT/ysql-audited.xml" >/dev/null ||
+  fail 'generated YugabyteDB configuration lost the POSTGRES dialect'
+grep -F '<backend>yugabytedb_ysql</backend>' "$TEST_ROOT/ysql-audited.xml" >/dev/null ||
+  fail 'generated YugabyteDB configuration lost the backend selection'
+if grep -F '<blackbox>' "$TEST_ROOT/ysql-disabled.xml" >/dev/null; then
+  fail 'generated YugabyteDB uninstrumented configuration is instrumented'
+fi
 for generated_config in "$TEST_ROOT/tpcc-disabled.xml" "$TEST_ROOT/tpcc-audited.xml"; do
   grep -F '<loaderTimestamp>2000-01-01T00:00:00Z</loaderTimestamp>' \
     "$generated_config" >/dev/null ||

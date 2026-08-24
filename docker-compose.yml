@@ -120,6 +120,7 @@ services:
       BLACKBOX_YSQL_SLOT_NAME: ${BLACKBOX_YSQL_SLOT_NAME:-blackbox_slot}
       BLACKBOX_YSQL_PUBLICATION_NAME: ${BLACKBOX_YSQL_PUBLICATION_NAME:-blackbox_publication}
       BLACKBOX_YSQL_CAPTURE_TABLES: ${BLACKBOX_YSQL_CAPTURE_TABLES:-benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn}
+      BLACKBOX_YSQL_CREATE_CAPTURE_OBJECTS: ${BLACKBOX_YSQL_CREATE_CAPTURE_OBJECTS:-true}
     volumes:
       - ./yugabytedb_ysql/init.sh:/blackbox/init.sh:ro
       - ./yugabytedb_ysql/initdb/02-common-schema.sql:/blackbox/common-schema.sql:ro

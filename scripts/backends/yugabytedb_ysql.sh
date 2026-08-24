@@ -63,9 +63,7 @@ blackbox_backend_teardown() {
   blackbox_compose down --volumes --remove-orphans
 }
 
-blackbox_backend_start_database_schema() {
-  blackbox_compose up --detach --force-recreate redis \
-    "$BLACKBOX_DATABASE_SERVICE" yugabytedb_ysql_init
+blackbox_backend_wait_for_schema_initialization() {
   local deadline=$(( $(date +%s) + BLACKBOX_STACK_TIMEOUT_SECONDS ))
   while (( $(date +%s) <= deadline )); do
     local status exit_code
@@ -83,6 +81,30 @@ blackbox_backend_start_database_schema() {
     sleep 1
   done
   blackbox_die "timed out waiting for YugabyteDB schema/capture initialization"
+}
+
+blackbox_backend_start_database_schema() {
+  blackbox_compose up --detach --force-recreate redis \
+    "$BLACKBOX_DATABASE_SERVICE" yugabytedb_ysql_init
+  blackbox_backend_wait_for_schema_initialization
+}
+
+# Database plus schema only: initialization runs with capture-object creation
+# disabled so no publication or slot exists in the evidence-disabled mode.
+blackbox_backend_start_uninstrumented_database() {
+  BLACKBOX_YSQL_CREATE_CAPTURE_OBJECTS=false blackbox_compose up --detach \
+    --force-recreate "$BLACKBOX_DATABASE_SERVICE" yugabytedb_ysql_init
+  blackbox_backend_wait_for_schema_initialization
+}
+
+blackbox_backend_verify_session_isolation() {
+  local session_isolation
+  session_isolation=$(blackbox_backend_database_query \
+    "SELECT current_setting('default_transaction_isolation') || '|' || current_setting('yb_read_from_followers')") || return 1
+  [[ ${session_isolation//[[:space:]]/} == "repeatableread|off" ]] || {
+    blackbox_die "YugabyteDB session isolation contract differs"
+    return 1
+  }
 }
 
 blackbox_backend_start_connector() {

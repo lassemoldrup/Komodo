@@ -24,6 +24,12 @@ NEED_CURRENT_BENCHBASE=0
 NEED_MONITOR=0
 
 OUTPUT_ROOT=${BLACKBOX_PERFORMANCE_OUTPUT_ROOT:-}
+BACKEND=${BLACKBOX_PERFORMANCE_BACKEND:-mariadb}
+# BenchBase Maven build profile for each registered coordinator backend.
+declare -A BACKEND_BENCHBASE_PROFILES=(
+  [mariadb]=mariadb
+  [yugabytedb_ysql]=postgres
+)
 BENCHMARK=${BLACKBOX_PERFORMANCE_BENCHMARK:-ycsb}
 REPETITIONS=${BLACKBOX_PERFORMANCE_REPETITIONS:-3}
 TERMINALS=${BLACKBOX_PERFORMANCE_TERMINALS:-4}
@@ -99,6 +105,8 @@ usage: run_blackbox_performance.sh [--benchmark ycsb|tpcc] [--output-root PATH] 
 Options:
   --smoke                    Run selected formal modes once with the smoke configuration.
   --benchmark NAME           ycsb (default) or tpcc.
+  --backend NAME             Registered coordinator backend driver
+                             (default: mariadb).
   --mode NAME                Run this mode; repeat to select multiple modes (default: both).
                              Selection uses canonical order; duplicate names are rejected.
                              Names: benchbase_uninstrumented, full_e2e.
@@ -309,6 +317,10 @@ parse_arguments() {
     case "$1" in
       --benchmark)
         BENCHMARK=${2:?missing --benchmark value}
+        shift 2
+        ;;
+      --backend)
+        BACKEND=${2:?missing --backend value}
         shift 2
         ;;
       --output-root)
@@ -687,7 +699,7 @@ verify_repositories_unchanged() {
 
 compose() {
   timeout --foreground --signal=TERM --kill-after=10 "$COMPOSE_TIMEOUT_SECONDS" \
-    docker compose --file "$ROOT/docker-compose.yml" --profile mariadb "$@"
+    docker compose --file "$ROOT/docker-compose.yml" --profile "$BACKEND" "$@"
 }
 
 
@@ -700,7 +712,9 @@ capture_stack_artifacts() {
   docker ps --no-trunc --format json >"$trial_dir/docker_ps_all_after.jsonl" 2>/dev/null || true
   docker stats --no-stream --format json >"$trial_dir/docker_stats_all_after.jsonl" 2>/dev/null || true
   docker inspect --format '{{json .}}' \
-    cdc-mariadb cdc-redis cdc-debezium >"$trial_dir/container_inspect.jsonl" 2>/dev/null || true
+    "$BLACKBOX_DATABASE_CONTAINER" cdc-redis "$BLACKBOX_CONNECTOR_CONTAINER" \
+    >"$trial_dir/container_inspect.jsonl" 2>/dev/null || true
+  blackbox_backend_status >"$trial_dir/backend_status.txt" 2>&1 || true
   ACTIVE_TRIAL_CAPTURED=1
 }
 
@@ -949,14 +963,14 @@ generate_configs() {
     "$BASELINE_CONFIG" "$CURRENT_CONFIG" "$TERMINALS" "$SCALE_FACTOR" \
     "$FIELD_SIZE" "$LOADER_THREADS" "$LOADER_BATCH_SIZE" "$WARMUP_SECONDS" \
     "$DURATION_SECONDS" "$RANDOM_SEED" "$BENCHMARK" "$TRANSACTION_MIX" "$RATE" \
-    "$LOADER_TIMESTAMP_UTC" <<'PY'
+    "$LOADER_TIMESTAMP_UTC" "$BACKEND" <<'PY'
 import sys
 from pathlib import Path
 
 baseline, current = (Path(sys.argv[1]), Path(sys.argv[2]))
 (
     terminals, scale, field_size, loader_threads, loader_batch_size, warmup,
-    duration, seed, benchmark, mix, rate, loader_timestamp_utc,
+    duration, seed, benchmark, mix, rate, loader_timestamp_utc, backend,
 ) = sys.argv[3:]
 
 def document(instrumented: bool) -> str:
@@ -967,6 +981,7 @@ def document(instrumented: bool) -> str:
     blackbox = "" if not instrumented else f"""
     <blackbox>
         <mode>${{env:BLACKBOX_MEASUREMENT_MODE}}</mode>
+        <backend>{backend}</backend>
         <runId>${{env:BLACKBOX_ACTIVE_RUN_ID}}</runId>
         <redis>
             <host>${{env:BLACKBOX_REDIS_HOST}}</host>
@@ -994,13 +1009,21 @@ def document(instrumented: bool) -> str:
         <transactiontype><name>UpdateRecord</name></transactiontype>
         <transactiontype><name>DeleteRecord</name></transactiontype>
         <transactiontype><name>ReadModifyWriteRecord</name></transactiontype>"""
-    return f"""<?xml version=\"1.0\"?>
-<parameters>
-    <type>MARIADB</type>
+    connection_blocks = {
+        "mariadb": """    <type>MARIADB</type>
     <driver>org.mariadb.jdbc.Driver</driver>
     <url>jdbc:mariadb://host.docker.internal:3306/benchbase?useServerPrepStmts=true</url>
     <username>app</username>
-    <password>app_pw</password>
+    <password>app_pw</password>""",
+        "yugabytedb_ysql": """    <type>POSTGRES</type>
+    <driver>org.postgresql.Driver</driver>
+    <url>jdbc:postgresql://host.docker.internal:5433/benchbase?sslmode=disable</url>
+    <username>blackbox_application</username>
+    <password>blackbox_application_password</password>""",
+    }
+    return f"""<?xml version=\"1.0\"?>
+<parameters>
+{connection_blocks[backend]}
     <isolation>TRANSACTION_REPEATABLE_READ</isolation>
     <batchsize>{loader_batch_size}</batchsize>
     <loaderTimestamp>{loader_timestamp_utc}</loaderTimestamp>
@@ -1040,7 +1063,7 @@ build_artifacts() {
   local build_commands="$OUTPUT_ROOT/build-commands.txt"
   local common_maven=(
     --batch-mode
-    --activate-profiles mariadb
+    --activate-profiles "${BACKEND_BENCHBASE_PROFILES[$BACKEND]}"
     -Dmaven.gitcommitid.skip=true
     -DskipTests
     -Ddescriptors=src/main/assembly/dir.xml
@@ -1099,9 +1122,9 @@ wait_for_container() {
 
 
 verify_empty_schema() {
-  local fence_rows marker_rows isolation tables expected_tables
+  local fence_rows marker_rows tables expected_tables
   tables=$(blackbox_database_query \
-    "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='benchbase' ORDER BY TABLE_NAME")
+    "SELECT table_name FROM information_schema.tables WHERE table_schema='benchbase' ORDER BY table_name")
   expected_tables=$(
     blackbox_adapter_contract |
       jq -r '[.application_tables[] | split(".")[1]] +
@@ -1109,23 +1132,21 @@ verify_empty_schema() {
   )
   [[ $tables == "$expected_tables" ]] ||
     die "fresh trial schema does not have the exact expected table roster"
-  local qualified table application_rows
+  local qualified application_rows
   while IFS= read -r qualified; do
     [[ -n $qualified ]] || continue
-    table=${qualified#benchbase.}
-    application_rows=$(blackbox_database_query "SELECT COUNT(*) FROM \`$table\`")
+    application_rows=$(blackbox_backend_count_table "$qualified")
     application_rows=${application_rows//[[:space:]]/}
     [[ $application_rows == 0 ]] || die "fresh trial table $qualified contains rows"
   done < <(blackbox_adapter_contract | jq -r '.application_tables[]')
-  fence_rows=$(blackbox_database_query 'SELECT COUNT(*) FROM checker_run_fence')
-  marker_rows=$(blackbox_database_query 'SELECT COUNT(*) FROM session_txn')
-  isolation=$(blackbox_database_query 'SELECT @@innodb_snapshot_isolation')
+  fence_rows=$(blackbox_backend_count_table benchbase.checker_run_fence)
+  marker_rows=$(blackbox_backend_count_table benchbase.session_txn)
   fence_rows=${fence_rows//[[:space:]]/}
   marker_rows=${marker_rows//[[:space:]]/}
-  isolation=${isolation//[[:space:]]/}
   [[ $fence_rows == 0 && $marker_rows == 0 ]] ||
     die "fresh trial schema contains rows"
-  [[ $isolation == 1 ]] || die "MariaDB snapshot isolation is disabled"
+  blackbox_backend_verify_session_isolation ||
+    die "backend session isolation contract differs"
   if [[ $(blackbox_redis --raw PING 2>/dev/null || true) == PONG ]]; then
     local redis_keys
     redis_keys=$(blackbox_redis --raw DBSIZE)
@@ -1141,9 +1162,10 @@ start_direct_stack() {
   record_command "$ACTIVE_TRIAL_DIR/commands.txt" compose down --volumes --remove-orphans
   reset_stack
   STACK_MAY_BE_RUNNING=1
-  record_command "$ACTIVE_TRIAL_DIR/commands.txt" compose up --detach --force-recreate mariadb
-  compose up --detach --force-recreate mariadb
-  wait_for_container cdc-mariadb
+  record_command "$ACTIVE_TRIAL_DIR/commands.txt" \
+    blackbox_backend_start_uninstrumented_database
+  blackbox_backend_start_uninstrumented_database
+  wait_for_container "$BLACKBOX_DATABASE_CONTAINER"
   verify_empty_schema
 }
 
@@ -1286,7 +1308,7 @@ document = {
         "cdc_collection": (
             "disabled"
             if values[0] == "benchbase_uninstrumented"
-            else "MariaDB row binlog consumed and published by Debezium Server"
+            else "backend change stream consumed and published by Debezium Server"
         ),
         "cpp_monitor": (
             "disabled"
@@ -1331,7 +1353,7 @@ capture_host_before() {
 
 capture_versions() {
   local trial_dir=$1
-  blackbox_database_query 'SELECT VERSION()' >"$trial_dir/mariadb_version.txt" || true
+  blackbox_database_query 'SELECT VERSION()' >"$trial_dir/database_version.txt" || true
   blackbox_redis --raw INFO server >"$trial_dir/redis_info_server.txt" 2>/dev/null || true
   compose config --images >"$trial_dir/compose_images.txt"
   local image
@@ -1446,12 +1468,12 @@ validate_bootstrap() {
 workload_container_arguments() {
   local include_redis=$1
   local include_cdc=$2
-  WORKLOAD_CONTAINERS=(--container mariadb=cdc-mariadb)
+  WORKLOAD_CONTAINERS=(--container "$BACKEND=$BLACKBOX_DATABASE_CONTAINER")
   if (( include_redis == 1 )); then
     WORKLOAD_CONTAINERS+=(--container redis=cdc-redis)
   fi
   if (( include_cdc == 1 )); then
-    WORKLOAD_CONTAINERS+=(--container debezium=cdc-debezium)
+    WORKLOAD_CONTAINERS+=(--container "debezium=$BLACKBOX_CONNECTOR_CONTAINER")
   fi
 }
 
@@ -1491,10 +1513,8 @@ run_direct_workload() {
 
 assert_no_transaction_markers() {
   local trial_dir=$1
-  record_command "$trial_dir/commands.txt" mariadb \
-    --skip-ssl --host=host.docker.internal --port=3306 --user=app \
-    --password=app_pw --database=benchbase --batch --raw --skip-column-names \
-    --execute 'SELECT COUNT(*) FROM session_txn'
+  record_command "$trial_dir/commands.txt" blackbox_backend_count_table \
+    benchbase.session_txn
   local marker_rows
   marker_rows=$(blackbox_database_query 'SELECT COUNT(*) FROM session_txn')
   marker_rows=${marker_rows//[[:space:]]/}
@@ -2027,7 +2047,12 @@ main() {
     print_mode_order
     return 0
   fi
-  BLACKBOX_ADAPTER_SCHEMA_FILE="$ROOT/mariadb/initdb/adapters/${BENCHMARK}.sql"
+  [[ -v "BACKEND_BENCHBASE_PROFILES[$BACKEND]" ]] ||
+    die "unsupported performance backend: $BACKEND"
+  [[ -f "$ROOT/scripts/backends/$BACKEND.sh" ]] ||
+    die "registered coordinator backend driver is missing: $BACKEND"
+  export BLACKBOX_BACKEND="$BACKEND"
+  BLACKBOX_ADAPTER_SCHEMA_FILE="$ROOT/$BACKEND/initdb/adapters/${BENCHMARK}.sql"
   [[ -f $BLACKBOX_ADAPTER_SCHEMA_FILE ]] ||
     die "selected adapter schema file is missing: $BLACKBOX_ADAPTER_SCHEMA_FILE"
   export BLACKBOX_ADAPTER_SCHEMA_FILE

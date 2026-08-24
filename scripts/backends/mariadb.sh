@@ -47,6 +47,22 @@ blackbox_backend_start_database_schema() {
   blackbox_compose up --detach --force-recreate redis "$BLACKBOX_DATABASE_SERVICE"
 }
 
+# Database plus schema only, without Redis or CDC capture objects, for the
+# evidence-disabled formal performance mode.
+blackbox_backend_start_uninstrumented_database() {
+  blackbox_compose up --detach --force-recreate "$BLACKBOX_DATABASE_SERVICE"
+}
+
+blackbox_backend_verify_session_isolation() {
+  local snapshot_isolation
+  snapshot_isolation=$(blackbox_backend_database_query \
+    'SELECT @@innodb_snapshot_isolation') || return 1
+  [[ ${snapshot_isolation//[[:space:]]/} == 1 ]] || {
+    blackbox_die "MariaDB snapshot isolation is disabled"
+    return 1
+  }
+}
+
 blackbox_backend_start_connector() {
   blackbox_compose up --detach --no-deps --force-recreate \
     "$BLACKBOX_CONNECTOR_SERVICE"

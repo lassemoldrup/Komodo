@@ -66,8 +66,9 @@ blackbox_load_backend_driver() {
   for operation in initialize prepare_run require_commands database \
     database_query capture_schema_metadata verify_schema count_table commit_fence \
     active_external_connections wait_for_connector_progress \
-    capture_attestation_inputs start_database_schema start_connector teardown \
-    status; do
+    capture_attestation_inputs start_database_schema \
+    start_uninstrumented_database verify_session_isolation start_connector \
+    teardown status; do
     declare -F "blackbox_backend_$operation" >/dev/null || {
       blackbox_die "backend driver lacks operation: $operation"
       return 1

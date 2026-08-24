@@ -43,6 +43,13 @@ blackbox_backend_capture_attestation_inputs() {
 blackbox_backend_start_database_schema() {
   mock_driver_gate start_database_schema && printf 'stack:database\n' >>"$MOCK_EVENT_LOG"
 }
+blackbox_backend_start_uninstrumented_database() {
+  mock_driver_gate start_uninstrumented_database &&
+    printf 'stack:uninstrumented-database\n' >>"$MOCK_EVENT_LOG"
+}
+blackbox_backend_verify_session_isolation() {
+  mock_driver_gate verify_session_isolation
+}
 blackbox_backend_start_connector() {
   mock_driver_gate start_connector && printf 'stack:connector\n' >>"$MOCK_EVENT_LOG"
 }

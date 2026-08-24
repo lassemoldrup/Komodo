@@ -611,6 +611,13 @@ blackbox_backend_start_database_schema() {
   mock_driver_gate start_database_schema || return 1
   printf 'stack:database\n' >>"$EVENT_LOG"
 }
+blackbox_backend_start_uninstrumented_database() {
+  mock_driver_gate start_uninstrumented_database || return 1
+  printf 'stack:uninstrumented-database\n' >>"$EVENT_LOG"
+}
+blackbox_backend_verify_session_isolation() {
+  mock_driver_gate verify_session_isolation
+}
 blackbox_backend_start_connector() {
   mock_driver_gate start_connector || return 1
   printf 'stack:cdc\n' >>"$EVENT_LOG"
