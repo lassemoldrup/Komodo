@@ -1735,6 +1735,9 @@ document = {
     "keys": keys,
     "total_bytes": sum(value for value in keys.values() if value is not None) if available else None,
 }
+Path(sys.argv[1]).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
 
 
 capture_marker_storage() {
@@ -1760,9 +1763,6 @@ capture_marker_storage() {
       complete_run_end_row_count: $complete_run_end_row_count,
       complete_run_end_allocated_bytes: $complete_run_end_allocated_bytes}' \
     >"$trial_dir/marker_storage.json"
-}
-Path(sys.argv[1]).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
 }
 
 
