@@ -473,9 +473,14 @@ def validate_workload_rows(
         for number in range(1, item_count + 1)
     ]
     remote_transaction = any(supply != home_warehouse for supply, _ in supply_pairs)
+    # BenchBase records the generator's remote intent: a sampled remote item
+    # degenerates to the home warehouse at W=1 yet still clears o_all_local,
+    # so an all-local supply set admits either flag value. A genuinely remote
+    # supply warehouse must never claim an all-local order.
     require(
-        order_after["o_all_local"] == (0 if remote_transaction else 1),
-        f"{label} o_all_local differs from supply warehouses",
+        order_after["o_all_local"] in {0, 1}
+        and not (remote_transaction and order_after["o_all_local"] == 1),
+        f"{label} o_all_local contradicts the supply warehouses",
     )
     for number, item in enumerate(shape["items"], start=1):
         line = lines_by_number[number]

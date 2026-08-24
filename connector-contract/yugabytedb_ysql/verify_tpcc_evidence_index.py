@@ -52,7 +52,9 @@ EXPECTED_PURPOSES = {
     "tpcc_stock_level_workload",
     "tpcc_order_status_workload",
     "tpcc_new_order_workload",
+    "tpcc_new_order_remote_workload",
     "tpcc_payment_workload",
+    "tpcc_payment_remote_workload",
     "tpcc_delivery_workload",
     "tpcc_full_mix_workload",
 }
@@ -159,15 +161,13 @@ def replay_bundle(
                 "--report", str(output),
             ]
             run_command(command, "TPC-C normalization raw replay")
-        elif purpose in {
-            "tpcc_new_order_workload",
-            "tpcc_payment_workload",
-            "tpcc_order_status_workload",
-            "tpcc_delivery_workload",
-            "tpcc_stock_level_workload",
-            "tpcc_full_mix_workload",
-        }:
-            slug = purpose.removeprefix("tpcc_").removesuffix("_workload")
+        elif purpose in EXPECTED_PURPOSES - {"tpcc_value_normalization"}:
+            # The remote profiles reuse the base validators with W>=2 configs.
+            slug = (
+                purpose.removeprefix("tpcc_")
+                .removesuffix("_workload")
+                .removesuffix("_remote")
+            )
             validator = ROOT.parents[1] / "tests" / f"verify_tpcc_{slug}_acceptance.py"
             extra_flags = {
                 "new_order": ("benchbase-log",),

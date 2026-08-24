@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "connector-contract" / "yugabytedb_ysql"
+REPLAY_BIN = Path(os.environ.get("BLACKBOX_EVIDENCE_REPLAY_BIN", ""))
 sys.path.insert(0, str(CONTRACT))
 
 from evidence_archive import archived_bundle  # noqa: E402
@@ -41,9 +43,19 @@ def normalization_bundle() -> dict[str, object]:
 
 
 class YugabyteYsqlTpccEvidenceTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not REPLAY_BIN.is_file():
+            raise RuntimeError("BLACKBOX_EVIDENCE_REPLAY_BIN is required")
+
     def test_tpcc_index_verifies_archives_from_a_clean_checkout(self) -> None:
         result = subprocess.run(
-            [sys.executable, str(CONTRACT / "verify_tpcc_evidence_index.py")],
+            [
+                sys.executable,
+                str(CONTRACT / "verify_tpcc_evidence_index.py"),
+                "--evidence-replay-bin",
+                str(REPLAY_BIN),
+            ],
             text=True,
             capture_output=True,
             check=True,
@@ -70,6 +82,7 @@ class YugabyteYsqlTpccEvidenceTest(unittest.TestCase):
                         directory,
                         "tpcc_value_normalization",
                         directory / "normalization-report.json",
+                        REPLAY_BIN,
                     )
 
     def test_mutated_cdc_timestamp_text_fails_closed(self) -> None:
@@ -90,7 +103,20 @@ class YugabyteYsqlTpccEvidenceTest(unittest.TestCase):
                         directory,
                         "tpcc_value_normalization",
                         directory / "normalization-report.json",
+                        REPLAY_BIN,
                     )
+
+    def test_gutted_purpose_roster_fails_closed(self) -> None:
+        verifier = load_index_verifier()
+        index = json.loads(
+            (CONTRACT / "evidence" / "tpcc_acceptance_bundles.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            {bundle["purpose"] for bundle in index["bundles"]},
+            verifier.EXPECTED_PURPOSES,
+        )
 
 
 if __name__ == "__main__":
