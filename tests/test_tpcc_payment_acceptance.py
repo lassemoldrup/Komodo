@@ -421,7 +421,8 @@ class TpccPaymentAcceptanceTest(unittest.TestCase):
             "rate": "unlimited", "loader_threads": 1, "loader_batch_size": 128,
             "minimum_transactions": 4, "minimum_id_transactions": 1,
             "minimum_last_name_transactions": 1, "minimum_good_credit_transactions": 1,
-            "minimum_bad_credit_transactions": 1, "minimum_retries": 0,
+            "minimum_bad_credit_transactions": 1,
+            "minimum_remote_customer_transactions": 0, "minimum_retries": 0,
             "remote_customer_live_applicable": False,
             "monitor_max_bootstrap_state_rows": 1_000_000,
             "monitor_max_bootstrap_state_bytes": 1_073_741_824,
@@ -562,7 +563,9 @@ Unknown Status Transactions:
         envelope["after"]["c_w_id"] = 2
         customer[1][0] = json.dumps(key)
         customer[1][1] = json.dumps(envelope)
-        with self.assertRaisesRegex(ACCEPTANCE.AcceptanceError, "remote customer"):
+        with self.assertRaisesRegex(
+            ACCEPTANCE.AcceptanceError, "customer warehouse differs"
+        ):
             self.validate(docs)
 
     def test_customer_balance_cent_and_ytd_ulp_mutations_are_rejected(self):

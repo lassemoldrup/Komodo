@@ -59,6 +59,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "minimum_transactions",
         "minimum_invalid_item_aborts",
         "minimum_repeated_key_transactions",
+        "minimum_remote_item_transactions",
         "minimum_retries",
         "remote_item_live_applicable",
         "monitor_max_bootstrap_state_rows",
@@ -81,9 +82,21 @@ def load_config(path: Path) -> dict[str, Any]:
     require(config["benchmark"] == "tpcc", "run benchmark")
     common.expected_source_id(config)
     require(config["declared_isolation"] == "REPEATABLE_READ", "run isolation is not RR")
-    require(config["warehouses"] == 1, "acceptance run must use one warehouse")
+    require(config["warehouses"] >= 1, "acceptance run needs a positive warehouse count")
     require(config["weights"] == EXPECTED_WEIGHTS, "acceptance weights are not NewOrder-only")
-    require(config["remote_item_live_applicable"] is False, "remote-item applicability differs at W=1")
+    require(
+        config["remote_item_live_applicable"] is (config["warehouses"] >= 2),
+        "remote-item applicability differs from the warehouse count",
+    )
+    require(
+        isinstance(config["minimum_remote_item_transactions"], int)
+        and config["minimum_remote_item_transactions"] >= 0
+        and (
+            not config["remote_item_live_applicable"]
+            or config["minimum_remote_item_transactions"] >= 1
+        ),
+        "remote-item minimum differs from applicability",
+    )
     positive_fields = (
         "terminals",
         "duration_seconds",
@@ -167,6 +180,7 @@ def decode_clients(
     require(len(done_records) == config["terminals"], "SessionDone count differs")
 
     shapes: dict[tuple[str, int], dict[str, Any]] = {}
+    home_by_session: dict[str, int] = {}
     by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
     logical_ids: set[str] = set()
     attempt_ids: set[str] = set()
@@ -220,7 +234,14 @@ def decode_clients(
         warehouse = decoded[1][2]
         items = [row for _, _, row in decoded[2:]]
         require(5 <= len(items) <= 15, f"{label} item read count is outside [5,15]")
-        require(customer["c_w_id"] == warehouse["w_id"] == 1, f"{label} customer/warehouse key differs")
+        home_warehouse = warehouse["w_id"]
+        require(
+            1 <= home_warehouse <= config["warehouses"]
+            and customer["c_w_id"] == home_warehouse,
+            f"{label} customer/warehouse key differs",
+        )
+        session_home = home_by_session.setdefault(client["session_id"], home_warehouse)
+        require(session_home == home_warehouse, f"{label} session home warehouse differs")
         item_ids = [row["i_id"] for row in items]
         if len(set(item_ids)) < len(item_ids):
             repeated_key_transactions += 1
@@ -355,7 +376,8 @@ def validate_workload_rows(
     label: str,
     shape: dict[str, Any],
     rows: list[tuple[dict[str, Any], dict[str, Any]]],
-) -> tuple[int, bool]:
+    warehouse_count: int,
+) -> tuple[int, bool, bool]:
     by_table: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
     for key, envelope in rows:
         source = envelope["source"]
@@ -372,6 +394,7 @@ def validate_workload_rows(
         "benchbase.order_line": item_count,
     }
     require({table: len(values) for table, values in by_table.items()} == expected_counts, f"{label} CDC table/event counts differ")
+    home_warehouse = shape["warehouse"]["w_id"]
 
     district_key, district = by_table["benchbase.district"][0]
     before_district = district.get("before")
@@ -380,8 +403,8 @@ def validate_workload_rows(
         district.get("op") == "u"
         and isinstance(before_district, dict)
         and isinstance(after_district, dict)
-        and district_key == {"d_w_id": 1, "d_id": after_district["d_id"]}
-        and after_district["d_w_id"] == 1
+        and district_key == {"d_w_id": home_warehouse, "d_id": after_district["d_id"]}
+        and after_district["d_w_id"] == home_warehouse
         and after_district["d_id"] == shape["customer"]["c_d_id"]
         and after_district["d_next_o_id"] == before_district["d_next_o_id"] + 1,
         f"{label} district update differs",
@@ -395,7 +418,8 @@ def validate_workload_rows(
         order.get("op") == "c"
         and order.get("before") is None
         and isinstance(order_after, dict)
-        and order_key == {"o_w_id": 1, "o_d_id": after_district["d_id"], "o_id": order_id}
+        and order_key
+        == {"o_w_id": home_warehouse, "o_d_id": after_district["d_id"], "o_id": order_id}
         and order_after["o_w_id"] == order_key["o_w_id"]
         and order_after["o_d_id"] == order_key["o_d_id"]
         and order_after["o_id"] == order_key["o_id"]
@@ -410,7 +434,7 @@ def validate_workload_rows(
         new_order.get("op") == "c"
         and new_order.get("before") is None
         and new_order.get("after")
-        == {"no_w_id": 1, "no_d_id": after_district["d_id"], "no_o_id": order_id}
+        == {"no_w_id": home_warehouse, "no_d_id": after_district["d_id"], "no_o_id": order_id}
         and new_order_key == new_order["after"],
         f"{label} new_order insert differs",
     )
@@ -424,7 +448,7 @@ def validate_workload_rows(
             and isinstance(after, dict)
             and line_key
             == {
-                "ol_w_id": 1,
+                "ol_w_id": home_warehouse,
                 "ol_d_id": after_district["d_id"],
                 "ol_o_id": order_id,
                 "ol_number": after["ol_number"],
@@ -432,7 +456,7 @@ def validate_workload_rows(
             and after["ol_w_id"] == line_key["ol_w_id"]
             and after["ol_d_id"] == line_key["ol_d_id"]
             and after["ol_o_id"] == line_key["ol_o_id"]
-            and after["ol_supply_w_id"] == 1
+            and 1 <= after["ol_supply_w_id"] <= warehouse_count
             and after["ol_delivery_d"] is None,
             f"{label} order_line insert differs",
         )
@@ -444,7 +468,15 @@ def validate_workload_rows(
         == item_ids,
         f"{label} item reads/order-line item IDs differ",
     )
-    require(order_after["o_all_local"] in {0, 1}, f"{label} o_all_local domain differs")
+    supply_pairs = [
+        (lines_by_number[number]["ol_supply_w_id"], lines_by_number[number]["ol_i_id"])
+        for number in range(1, item_count + 1)
+    ]
+    remote_transaction = any(supply != home_warehouse for supply, _ in supply_pairs)
+    require(
+        order_after["o_all_local"] == (0 if remote_transaction else 1),
+        f"{label} o_all_local differs from supply warehouses",
+    )
     for number, item in enumerate(shape["items"], start=1):
         line = lines_by_number[number]
         require(
@@ -453,24 +485,32 @@ def validate_workload_rows(
             f"{label} order-line amount differs from captured item price and quantity",
         )
 
-    stock_by_item: dict[int, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
+    stock_by_item: dict[tuple[int, int], list[tuple[dict[str, Any], dict[str, Any]]]] = (
+        defaultdict(list)
+    )
     for stock_key, stock in by_table["benchbase.stock"]:
         after = stock.get("after")
         require(
             stock.get("op") == "u"
             and isinstance(stock.get("before"), dict)
             and isinstance(after, dict)
-            and stock_key == {"s_w_id": 1, "s_i_id": after["s_i_id"]}
-            and after["s_w_id"] == 1,
+            and stock_key == {"s_w_id": after["s_w_id"], "s_i_id": after["s_i_id"]}
+            and 1 <= after["s_w_id"] <= warehouse_count,
             f"{label} stock update key/shape differs",
         )
-        stock_by_item[after["s_i_id"]].append((stock_key, stock))
-    require(Counter(item_ids) == Counter({item: len(events) for item, events in stock_by_item.items()}), f"{label} stock update multiset differs from item reads")
+        stock_by_item[(after["s_w_id"], after["s_i_id"])].append((stock_key, stock))
+    require(
+        Counter(supply_pairs)
+        == Counter({pair: len(events) for pair, events in stock_by_item.items()}),
+        f"{label} stock update multiset differs from supply warehouses/items",
+    )
 
-    quantities_by_item: dict[int, list[int]] = defaultdict(list)
+    quantities_by_item: dict[tuple[int, int], list[int]] = defaultdict(list)
     for number in range(1, item_count + 1):
         line = lines_by_number[number]
-        quantities_by_item[line["ol_i_id"]].append(line["ol_quantity"])
+        quantities_by_item[(line["ol_supply_w_id"], line["ol_i_id"])].append(
+            line["ol_quantity"]
+        )
     for item_id, events in stock_by_item.items():
         previous_after: dict[str, Any] | None = None
         initial_quantity = events[0][1]["before"]["s_quantity"]
@@ -486,12 +526,15 @@ def validate_workload_rows(
                 if initial_quantity - quantity >= 10
                 else initial_quantity - quantity + 91
             )
+            expected_remote = before["s_remote_cnt"] + (
+                1 if item_id[0] != home_warehouse else 0
+            )
             require(
                 after["s_quantity"] == expected_quantity
                 and decimal(after["s_ytd"], f"{label} stock ytd")
                 == decimal(before["s_ytd"], f"{label} stock ytd") + quantity
                 and after["s_order_cnt"] == before["s_order_cnt"] + 1
-                and after["s_remote_cnt"] == before["s_remote_cnt"],
+                and after["s_remote_cnt"] == expected_remote,
                 f"{label} stock arithmetic differs at item {item_id} event {event_index}",
             )
             unchanged_except(
@@ -502,8 +545,8 @@ def validate_workload_rows(
             )
             previous_after = after
 
-    normalized_writes = 3 + item_count + len(set(item_ids))
-    return normalized_writes, len(set(item_ids)) < item_count
+    normalized_writes = 3 + item_count + len(set(supply_pairs))
+    return normalized_writes, len(set(item_ids)) < item_count, remote_transaction
 
 
 def validate_cdc_tail(
@@ -512,6 +555,7 @@ def validate_cdc_tail(
     load_finished_stream_id: str,
     shapes: dict[tuple[str, int], dict[str, Any]],
     profile: dict[str, Any],
+    warehouse_count: int,
 ) -> dict[str, int]:
     entries = common.raw_cdc_records(path)
     require(entries, "CDC tail is empty")
@@ -542,6 +586,7 @@ def validate_cdc_tail(
     end_fences = 0
     normalized_writes = 0
     repeated_transactions = 0
+    remote_item_transactions = 0
     for transaction_index, transaction in enumerate(transactions):
         label = f"CDC transaction {transaction_index}"
         begin = transaction[0][2]
@@ -630,9 +675,12 @@ def validate_cdc_tail(
         marker_progress[marker_after["session_id"]] = marker_after["txn_id"]
         correlations.add(identity)
         application_rows = [row for row in parsed_rows if row is not marker_rows[0]]
-        write_count, repeated = validate_workload_rows(label, shapes[identity], application_rows)
+        write_count, repeated, remote = validate_workload_rows(
+            label, shapes[identity], application_rows, warehouse_count
+        )
         normalized_writes += write_count
         repeated_transactions += int(repeated)
+        remote_item_transactions += int(remote)
 
     require(end_fences == 1, "CDC tail must contain exactly one END_FENCE")
     require(correlations == set(shapes), "CDC marker/client correlation sets differ")
@@ -642,6 +690,7 @@ def validate_cdc_tail(
         "end_fences": 1,
         "normalized_writes": normalized_writes,
         "repeated_key_transactions": repeated_transactions,
+        "remote_item_transactions": remote_item_transactions,
     }
 
 
@@ -704,13 +753,23 @@ def validate_acceptance(
     load_status = common.one_status(status_records, "LOAD_FINISHED_SEEN")
     cdc = validate_cdc_tail(
         cdc_path, run_id, load_status["last_cdc_stream_id"], shapes,
-        common.backend_profile(config),
+        common.backend_profile(config), config["warehouses"],
     )
     require(cdc["markers"] == len(clients), "marker count differs from successful clients")
     require(
         cdc["repeated_key_transactions"] >= config["minimum_repeated_key_transactions"],
         "raw repeated stock-key execution lacks positive proof",
     )
+    if config["remote_item_live_applicable"]:
+        require(
+            cdc["remote_item_transactions"] >= config["minimum_remote_item_transactions"],
+            "remote-item execution lacks positive live proof",
+        )
+    else:
+        require(
+            cdc["remote_item_transactions"] == 0,
+            "remote-item transactions are impossible at one warehouse",
+        )
     final, _ = validate_status_and_metrics(
         config,
         run_id,
@@ -738,7 +797,7 @@ def validate_acceptance(
             "unmatched_client_records": 0,
             "unmatched_workload_cdc_slots": 0,
         },
-        "remote_item_live_applicable": False,
+        "remote_item_live_applicable": config["remote_item_live_applicable"],
         "final_outcome": "PASS",
     }
 

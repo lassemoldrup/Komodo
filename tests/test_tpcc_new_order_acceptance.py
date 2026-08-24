@@ -541,6 +541,7 @@ class TpccNewOrderAcceptanceTest(unittest.TestCase):
             "minimum_transactions": 2,
             "minimum_invalid_item_aborts": 1,
             "minimum_repeated_key_transactions": 1,
+            "minimum_remote_item_transactions": 0,
             "minimum_retries": 1,
             "remote_item_live_applicable": False,
             "monitor_max_bootstrap_state_rows": 1_000_000,

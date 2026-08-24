@@ -28,6 +28,9 @@ MINIMUM_BAD_CREDIT_TRANSACTIONS=$(
   tpcc_acceptance_setting MINIMUM_BAD_CREDIT_TRANSACTIONS 1
 )
 MINIMUM_RETRIES=$(tpcc_acceptance_setting MINIMUM_RETRIES 0)
+MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS=$(
+  tpcc_acceptance_setting MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS ""
+)
 
 
 usage() {
@@ -74,6 +77,9 @@ while (( $# > 0 )); do
     --minimum-bad-credit-transactions)
       tpcc_acceptance_need_value "$@"; MINIMUM_BAD_CREDIT_TRANSACTIONS=$2; shift 2
       ;;
+    --minimum-remote-customer-transactions)
+      tpcc_acceptance_need_value "$@"; MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS=$2; shift 2
+      ;;
     --minimum-retries)
       tpcc_acceptance_need_value "$@"; MINIMUM_RETRIES=$2; shift 2
       ;;
@@ -84,14 +90,28 @@ done
 
 
 tpcc_acceptance_validate_profile_controls() {
-  [[ $TPCC_WAREHOUSES == 1 ]] || {
-    printf 'warehouses must be 1 for this acceptance run\n' >&2
-    exit 2
-  }
+  tpcc_acceptance_require_positive warehouses "$TPCC_WAREHOUSES"
   [[ $TPCC_WEIGHTS == 0,100,0,0,0 ]] || {
     printf 'weights must be exactly 0,100,0,0,0\n' >&2
     exit 2
   }
+  # A remote customer cannot be selected at one warehouse; at two or more the
+  # live run must positively prove the remote branch.
+  if (( TPCC_WAREHOUSES >= 2 )); then
+    REMOTE_CUSTOMER_LIVE_APPLICABLE=true
+    [[ -n $MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS ]] ||
+      MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS=1
+    tpcc_acceptance_require_positive \
+      minimum-remote-customer-transactions "$MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS"
+  else
+    REMOTE_CUSTOMER_LIVE_APPLICABLE=false
+    [[ -z $MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS \
+       || $MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS == 0 ]] || {
+      printf 'remote-customer transactions are impossible at one warehouse\n' >&2
+      exit 2
+    }
+    MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS=0
+  fi
   tpcc_acceptance_require_positive minimum-transactions "$MINIMUM_TRANSACTIONS"
   tpcc_acceptance_require_positive minimum-id-transactions "$MINIMUM_ID_TRANSACTIONS"
   tpcc_acceptance_require_positive \
@@ -105,10 +125,11 @@ tpcc_acceptance_validate_profile_controls() {
 
 
 tpcc_acceptance_config_extras() {
-  printf '{"minimum_transactions":%s,"minimum_id_transactions":%s,"minimum_last_name_transactions":%s,"minimum_good_credit_transactions":%s,"minimum_bad_credit_transactions":%s,"minimum_retries":%s,"remote_customer_live_applicable":false}\n' \
+  printf '{"minimum_transactions":%s,"minimum_id_transactions":%s,"minimum_last_name_transactions":%s,"minimum_good_credit_transactions":%s,"minimum_bad_credit_transactions":%s,"minimum_remote_customer_transactions":%s,"minimum_retries":%s,"remote_customer_live_applicable":%s}\n' \
     "$MINIMUM_TRANSACTIONS" "$MINIMUM_ID_TRANSACTIONS" \
     "$MINIMUM_LAST_NAME_TRANSACTIONS" "$MINIMUM_GOOD_CREDIT_TRANSACTIONS" \
-    "$MINIMUM_BAD_CREDIT_TRANSACTIONS" "$MINIMUM_RETRIES"
+    "$MINIMUM_BAD_CREDIT_TRANSACTIONS" "$MINIMUM_REMOTE_CUSTOMER_TRANSACTIONS" \
+    "$MINIMUM_RETRIES" "$REMOTE_CUSTOMER_LIVE_APPLICABLE"
 }
 
 

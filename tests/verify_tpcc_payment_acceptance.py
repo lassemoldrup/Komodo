@@ -61,6 +61,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "minimum_last_name_transactions",
         "minimum_good_credit_transactions",
         "minimum_bad_credit_transactions",
+        "minimum_remote_customer_transactions",
         "minimum_retries",
         "remote_customer_live_applicable",
         "monitor_max_bootstrap_state_rows",
@@ -83,9 +84,21 @@ def load_config(path: Path) -> dict[str, Any]:
     require(config["benchmark"] == "tpcc", "run benchmark")
     common.expected_source_id(config)
     require(config["declared_isolation"] == "REPEATABLE_READ", "run isolation is not RR")
-    require(config["warehouses"] == 1, "acceptance run must use one warehouse")
+    require(config["warehouses"] >= 1, "acceptance run needs a positive warehouse count")
     require(config["weights"] == EXPECTED_WEIGHTS, "acceptance weights are not Payment-only")
-    require(config["remote_customer_live_applicable"] is False, "remote applicability differs at W=1")
+    require(
+        config["remote_customer_live_applicable"] is (config["warehouses"] >= 2),
+        "remote-customer applicability differs from the warehouse count",
+    )
+    require(
+        isinstance(config["minimum_remote_customer_transactions"], int)
+        and config["minimum_remote_customer_transactions"] >= 0
+        and (
+            not config["remote_customer_live_applicable"]
+            or config["minimum_remote_customer_transactions"] >= 1
+        ),
+        "remote-customer minimum differs from applicability",
+    )
     for field in (
         "terminals",
         "duration_seconds",
@@ -135,7 +148,7 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def load_customer_catalog(path: Path) -> tuple[
+def load_customer_catalog(path: Path, warehouse_count: int) -> tuple[
     dict[tuple[int, int, int], dict[str, Any]],
     dict[tuple[int, int, str], set[tuple[int, int, int]]],
 ]:
@@ -162,7 +175,7 @@ def load_customer_catalog(path: Path) -> tuple[
         group = (row["c_w_id"], row["c_d_id"], row["c_last"])
         require(
             all(isinstance(value, int) and value > 0 for value in key)
-            and row["c_w_id"] == 1
+            and 1 <= row["c_w_id"] <= warehouse_count
             and isinstance(row["c_last"], str)
             and isinstance(row["c_first"], str)
             and row["c_credit"] in {"GC", "BC"}
@@ -216,6 +229,8 @@ def decode_clients(
     confirmed_id = 0
     confirmed_name = 0
     ambiguous_single = 0
+    remote_customer_transactions = 0
+    home_by_session: dict[str, int] = {}
     total_reads = 0
     for client_index, client in enumerate(clients):
         label = f"ClientTxn[{client_index}]"
@@ -269,6 +284,14 @@ def decode_clients(
             f"{label} local/snapshot read sequence differs",
         )
         require({read["table"] for read in decoded} == EXPECTED_READ_TABLES, f"{label} read table roster differs")
+        home_warehouse = decoded[0]["row"]["w_id"]
+        require(
+            1 <= home_warehouse <= config["warehouses"]
+            and decoded[1]["row"]["d_w_id"] == home_warehouse,
+            f"{label} warehouse/district home identity differs",
+        )
+        session_home = home_by_session.setdefault(client["session_id"], home_warehouse)
+        require(session_home == home_warehouse, f"{label} session home warehouse differs")
         customer_reads = decoded[2:]
         cdata_reread = False
         selection_reads = customer_reads
@@ -291,6 +314,10 @@ def decode_clients(
             for read in selection_reads
         }
         require(len(selection_keys) == len(selection_reads), f"{label} repeats selection customer")
+        selection_warehouses = {key[0] for key in selection_keys}
+        require(len(selection_warehouses) == 1, f"{label} selection spans customer warehouses")
+        remote_customer = next(iter(selection_warehouses)) != home_warehouse
+        remote_customer_transactions += int(remote_customer)
         group_ids: set[tuple[int, int, str]] = set()
         for read in selection_reads:
             key = (read["row"]["c_w_id"], read["row"]["c_d_id"], read["row"]["c_id"])
@@ -324,6 +351,8 @@ def decode_clients(
             "customer_selection": selection_reads,
             "cdata_reread": cdata_reread,
             "branch": branch,
+            "home_warehouse": home_warehouse,
+            "remote_customer": remote_customer,
         }
 
     require(confirmed_id >= config["minimum_id_transactions"], "ID branch lacks positive proof")
@@ -375,6 +404,7 @@ def decode_clients(
         "confirmed_id": confirmed_id,
         "confirmed_last_name": confirmed_name,
         "ambiguous_single": ambiguous_single,
+        "remote_customer_transactions": remote_customer_transactions,
         "retries": retries,
         "retry_surplus_increases": retry_surplus_increases,
     }
@@ -418,6 +448,7 @@ def validate_payment_rows(
     shape: dict[str, Any],
     rows: list[tuple[dict[str, Any], dict[str, Any]]],
     codec: TpccCodec,
+    warehouse_count: int,
 ) -> tuple[int, str]:
     by_table: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
     for key, envelope in rows:
@@ -454,14 +485,15 @@ def validate_payment_rows(
     before_d, after_d = district["before"], district["after"]
     before_c, after_c = customer["before"], customer["after"]
     after_h = history["after"]
+    home_warehouse = shape["home_warehouse"]
     require(
-        warehouse_key == {"w_id": 1}
-        and before_w["w_id"] == after_w["w_id"] == 1,
+        warehouse_key == {"w_id": home_warehouse}
+        and before_w["w_id"] == after_w["w_id"] == home_warehouse,
         f"{label} warehouse key differs",
     )
     require(
-        district_key == {"d_w_id": 1, "d_id": after_d["d_id"]}
-        and before_d["d_w_id"] == after_d["d_w_id"] == 1,
+        district_key == {"d_w_id": home_warehouse, "d_id": after_d["d_id"]}
+        and before_d["d_w_id"] == after_d["d_w_id"] == home_warehouse,
         f"{label} district key differs",
     )
     require(customer_key == {
@@ -469,7 +501,11 @@ def validate_payment_rows(
         "c_d_id": after_c["c_d_id"],
         "c_id": after_c["c_id"],
     }, f"{label} customer key differs")
-    require(after_c["c_w_id"] == 1, f"{label} unexpectedly uses remote customer warehouse")
+    require(
+        1 <= after_c["c_w_id"] <= warehouse_count
+        and (after_c["c_w_id"] != home_warehouse) == shape["remote_customer"],
+        f"{label} customer warehouse differs from the captured selection",
+    )
     amount_w = decimal(after_w["w_ytd"], label) - decimal(before_w["w_ytd"], label)
     amount_d = decimal(after_d["d_ytd"], label) - decimal(before_d["d_ytd"], label)
     amount_h = decimal(after_h["h_amount"], label)
@@ -506,7 +542,7 @@ def validate_payment_rows(
         and after_h["h_c_w_id"] == after_c["c_w_id"]
         and after_h["h_c_d_id"] == after_c["c_d_id"]
         and after_h["h_c_id"] == after_c["c_id"]
-        and after_h["h_w_id"] == 1
+        and after_h["h_w_id"] == home_warehouse
         and after_h["h_d_id"] == after_d["d_id"],
         f"{label} generated history identity/relationships differ",
     )
@@ -541,6 +577,7 @@ def validate_cdc_tail(
     shapes: dict[tuple[str, int], dict[str, Any]],
     codec: TpccCodec,
     profile: dict[str, Any],
+    warehouse_count: int,
 ) -> dict[str, Any]:
     entries = common.raw_cdc_records(path)
     require(entries, "CDC tail is empty")
@@ -636,7 +673,9 @@ def validate_cdc_tail(
         marker_progress[after["session_id"]] = after["txn_id"]
         correlations.add(identity)
         application_rows = [row for row in parsed_rows if row is not marker_rows[0]]
-        history_id, credit = validate_payment_rows(label, shapes[identity], application_rows, codec)
+        history_id, credit = validate_payment_rows(
+            label, shapes[identity], application_rows, codec, warehouse_count
+        )
         require(history_id not in history_ids, f"{label} repeats generated history h_id")
         history_ids.add(history_id)
         good_credit += int(credit == "GC")
@@ -706,7 +745,7 @@ def validate_acceptance(
     contracts = load_adapter_contracts(schemas)
     decoder = common.CanonicalDecoder(contracts["tpcc"])
     codec = TpccCodec(contracts["tpcc"])
-    catalog, groups = load_customer_catalog(customer_catalog_path)
+    catalog, groups = load_customer_catalog(customer_catalog_path, config["warehouses"])
     client_entries = common.payload_records(client_path, "client stream")
     clients, shapes, coverage = decode_clients(
         config, run_id, [record for _, record in client_entries], decoder, catalog, groups
@@ -718,7 +757,7 @@ def validate_acceptance(
     status_records = [record for _, record in status_entries]
     load_status = common.one_status(status_records, "LOAD_FINISHED_SEEN")
     cdc = validate_cdc_tail(cdc_path, run_id, load_status["last_cdc_stream_id"], shapes, codec,
-                            common.backend_profile(config))
+                            common.backend_profile(config), config["warehouses"])
     require(cdc["markers"] == len(clients), "marker count differs from successful clients")
     require(
         cdc["good_credit_transactions"] >= config["minimum_good_credit_transactions"],
@@ -728,6 +767,17 @@ def validate_acceptance(
         cdc["bad_credit_transactions"] >= config["minimum_bad_credit_transactions"],
         "bad-credit path lacks positive proof",
     )
+    if config["remote_customer_live_applicable"]:
+        require(
+            coverage["remote_customer_transactions"]
+            >= config["minimum_remote_customer_transactions"],
+            "remote-customer execution lacks positive live proof",
+        )
+    else:
+        require(
+            coverage["remote_customer_transactions"] == 0,
+            "remote-customer transactions are impossible at one warehouse",
+        )
     final_history = load_history_ids(history_catalog_path)
     workload_history = cdc["history_ids"]
     bootstrap_history = final_history - workload_history
@@ -776,7 +826,7 @@ def validate_acceptance(
             "unmatched_client_records": 0,
             "unmatched_workload_cdc_slots": 0,
         },
-        "remote_customer_live_applicable": False,
+        "remote_customer_live_applicable": config["remote_customer_live_applicable"],
         "final_outcome": "PASS",
     }
 

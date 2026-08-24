@@ -24,6 +24,9 @@ MINIMUM_REPEATED_KEY_TRANSACTIONS=$(
   tpcc_acceptance_setting MINIMUM_REPEATED_KEY_TRANSACTIONS 1
 )
 MINIMUM_RETRIES=$(tpcc_acceptance_setting MINIMUM_RETRIES 0)
+MINIMUM_REMOTE_ITEM_TRANSACTIONS=$(
+  tpcc_acceptance_setting MINIMUM_REMOTE_ITEM_TRANSACTIONS ""
+)
 
 
 usage() {
@@ -38,6 +41,7 @@ Profile controls:
   --minimum-transactions N
   --minimum-invalid-item-aborts N
   --minimum-repeated-key-transactions N
+  --minimum-remote-item-transactions N
   --minimum-retries N
 
 Common controls (matching BLACKBOX_TPCC_NEW_ORDER_* environment variables):
@@ -62,6 +66,9 @@ while (( $# > 0 )); do
     --minimum-repeated-key-transactions)
       tpcc_acceptance_need_value "$@"; MINIMUM_REPEATED_KEY_TRANSACTIONS=$2; shift 2
       ;;
+    --minimum-remote-item-transactions)
+      tpcc_acceptance_need_value "$@"; MINIMUM_REMOTE_ITEM_TRANSACTIONS=$2; shift 2
+      ;;
     --minimum-retries)
       tpcc_acceptance_need_value "$@"; MINIMUM_RETRIES=$2; shift 2
       ;;
@@ -72,14 +79,28 @@ done
 
 
 tpcc_acceptance_validate_profile_controls() {
-  [[ $TPCC_WAREHOUSES == 1 ]] || {
-    printf 'warehouses must be 1 for this acceptance run\n' >&2
-    exit 2
-  }
+  tpcc_acceptance_require_positive warehouses "$TPCC_WAREHOUSES"
   [[ $TPCC_WEIGHTS == 100,0,0,0,0 ]] || {
     printf 'weights must be exactly 100,0,0,0,0\n' >&2
     exit 2
   }
+  # A remote item cannot be selected at one warehouse; at two or more the
+  # live run must positively prove the remote branch.
+  if (( TPCC_WAREHOUSES >= 2 )); then
+    REMOTE_ITEM_LIVE_APPLICABLE=true
+    [[ -n $MINIMUM_REMOTE_ITEM_TRANSACTIONS ]] ||
+      MINIMUM_REMOTE_ITEM_TRANSACTIONS=1
+    tpcc_acceptance_require_positive \
+      minimum-remote-item-transactions "$MINIMUM_REMOTE_ITEM_TRANSACTIONS"
+  else
+    REMOTE_ITEM_LIVE_APPLICABLE=false
+    [[ -z $MINIMUM_REMOTE_ITEM_TRANSACTIONS \
+       || $MINIMUM_REMOTE_ITEM_TRANSACTIONS == 0 ]] || {
+      printf 'remote-item transactions are impossible at one warehouse\n' >&2
+      exit 2
+    }
+    MINIMUM_REMOTE_ITEM_TRANSACTIONS=0
+  fi
   tpcc_acceptance_require_positive minimum-transactions "$MINIMUM_TRANSACTIONS"
   tpcc_acceptance_require_positive \
     minimum-invalid-item-aborts "$MINIMUM_INVALID_ITEM_ABORTS"
@@ -90,9 +111,10 @@ tpcc_acceptance_validate_profile_controls() {
 
 
 tpcc_acceptance_config_extras() {
-  printf '{"minimum_transactions":%s,"minimum_invalid_item_aborts":%s,"minimum_repeated_key_transactions":%s,"minimum_retries":%s,"remote_item_live_applicable":false}\n' \
+  printf '{"minimum_transactions":%s,"minimum_invalid_item_aborts":%s,"minimum_repeated_key_transactions":%s,"minimum_remote_item_transactions":%s,"minimum_retries":%s,"remote_item_live_applicable":%s}\n' \
     "$MINIMUM_TRANSACTIONS" "$MINIMUM_INVALID_ITEM_ABORTS" \
-    "$MINIMUM_REPEATED_KEY_TRANSACTIONS" "$MINIMUM_RETRIES"
+    "$MINIMUM_REPEATED_KEY_TRANSACTIONS" "$MINIMUM_REMOTE_ITEM_TRANSACTIONS" \
+    "$MINIMUM_RETRIES" "$REMOTE_ITEM_LIVE_APPLICABLE"
 }
 
 
