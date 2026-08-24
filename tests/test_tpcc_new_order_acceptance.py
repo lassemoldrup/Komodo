@@ -767,6 +767,15 @@ Unknown Status Transactions:
 
 
 class TpccNewOrderAcceptanceDriverTest(unittest.TestCase):
+    def test_bootstrap_scan_and_monitor_share_the_recorded_row_limit(self) -> None:
+        shared = (ROOT / "tests/tpcc_live_acceptance.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'BLACKBOX_BOOTSTRAP_MAX_ROWS="$TPCC_MONITOR_MAX_BOOTSTRAP_STATE_ROWS"',
+            shared,
+        )
+
     DRIVER = ROOT / "tests" / "run_tpcc_new_order_acceptance.sh"
 
     def run_driver(self, *arguments: str, environment: dict[str, str] | None = None):
