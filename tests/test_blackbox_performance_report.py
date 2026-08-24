@@ -799,7 +799,12 @@ class ReportTest(unittest.TestCase):
             )
             self.mutate_json(
                 trial / "marker_storage.json",
-                lambda value: value.__setitem__("complete_run_end_row_count", 119),
+                lambda value: value.update(
+                    {
+                        "workload_end_row_count": 119,
+                        "complete_run_end_row_count": 119,
+                    }
+                ),
             )
             with self.assertRaisesRegex(report.ReportError, "marker row count"):
                 report.trial_row(trial)
@@ -813,7 +818,12 @@ class ReportTest(unittest.TestCase):
             )
             self.mutate_json(
                 trial / "marker_storage.json",
-                lambda value: value.__setitem__("complete_run_end_row_count", 1),
+                lambda value: value.update(
+                    {
+                        "workload_end_row_count": 1,
+                        "complete_run_end_row_count": 1,
+                    }
+                ),
             )
             with self.assertRaisesRegex(report.ReportError, "uninstrumented mode"):
                 report.trial_row(trial)
