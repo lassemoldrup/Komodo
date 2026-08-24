@@ -11,7 +11,6 @@ SELECT format(
 \gexec
 SELECT pg_sleep(:delay_seconds);
 INSERT INTO session_txn (session_id, txn_id)
-VALUES ('resilience_transition', :txn_id)
-ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+VALUES ('resilience_transition', :txn_id);
 COMMIT;
 \echo ACK resilience_transition :txn_id

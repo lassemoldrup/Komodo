@@ -18,8 +18,6 @@ enum class CdcErrorCode {
   MarkerMultiple,
   MarkerMalformed,
   MarkerNotLast,
-  MarkerBeforeImageMissing,
-  MarkerChainMismatch,
   MarkerDuplicate,
   UnmarkedApplicationTransaction,
   CdcApplicationAfterEnd,

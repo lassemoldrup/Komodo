@@ -21,7 +21,7 @@ def catalog() -> str:
         (
             "benchbase.session_txn",
             [("session_id", "character varying", "NO", "64"), ("txn_id", "bigint", "NO", "-")],
-            ["session_id"],
+            ["session_id", "txn_id"],
         ),
         (
             "benchbase.usertable",
@@ -85,7 +85,7 @@ def tpcc_catalog() -> str:
                 {"name": "session_id", "sql_type": "VARCHAR(64)", "nullable": False},
                 {"name": "txn_id", "sql_type": "BIGINT", "nullable": False},
             ],
-            ["session_id"],
+            ["session_id", "txn_id"],
         ),
     ]
     tables = [

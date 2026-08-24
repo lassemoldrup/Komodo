@@ -1259,7 +1259,7 @@ void BackendAdapter::validateSchemaAttestation(
   const auto *fence = find_table("benchbase.checker_run_fence");
   const auto *marker = find_table("benchbase.session_txn");
   const std::vector<std::string> fence_key = {"run_id", "phase"};
-  const std::vector<std::string> marker_key = {"session_id"};
+  const std::vector<std::string> marker_key = {"session_id", "txn_id"};
   const auto matches_column = [](const ProtocolSchemaColumn &column,
                                  const std::string_view name,
                                  const std::string_view type) {

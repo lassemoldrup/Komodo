@@ -319,7 +319,7 @@ def verify_startup_schema_snapshot(
 
 
 def transaction_summary(
-    transaction: dict[str, Any], run_id: str, marker_state: dict[str, int]
+    transaction: dict[str, Any], run_id: str, marker_identities: set[tuple[str, int]]
 ) -> dict[str, Any]:
     rows = transaction["rows"]
     tables = {row["table"] for row in rows}
@@ -355,21 +355,15 @@ def transaction_summary(
     require(after.get("session_id") == "ycsb/worker/1", "workload marker session mismatch")
     session_id = after["session_id"]
     txn_id = integer(after.get("txn_id"), "marker txn_id")
-    previous = marker_state.get(session_id)
-    if previous is None:
-        require(marker["op"] == "c", "first workload marker is not an insert")
-        require(marker["before"] is None, "first workload marker has a before image")
-    else:
-        require(marker["op"] == "u", "later workload marker is not an update")
-        before = marker["before"]
-        require(isinstance(before, dict), "marker update lacks a before image")
-        require(before.get("session_id") == session_id, "marker before session mismatch")
-        require(
-            integer(before.get("txn_id"), "marker before txn_id") == previous,
-            "marker before-image chain mismatch",
-        )
-        require(txn_id > previous, "marker txn_id did not advance")
-    marker_state[session_id] = txn_id
+    identity = (session_id, txn_id)
+    require(marker["op"] == "c", "workload marker is not an insert")
+    require(marker["before"] is None, "workload marker has a before image")
+    require(
+        marker["key"] == {"session_id": session_id, "txn_id": txn_id},
+        "workload marker key/after identity mismatch",
+    )
+    require(identity not in marker_identities, "workload marker identity is reused")
+    marker_identities.add(identity)
     return {
         "classification": "workload_marked",
         "correlation_id": {"session_id": session_id, "txn_id": txn_id},
@@ -382,7 +376,7 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
     require(isinstance(entries, list), "XRANGE JSON root is not an array")
     active: dict[str, Any] | None = None
     completed: list[dict[str, Any]] = []
-    marker_state: dict[str, int] = {}
+    marker_identities: set[tuple[str, int]] = set()
     previous_stream_id: tuple[int, int] | None = None
     startup_schema = StartupSchemaState()
 
@@ -437,7 +431,7 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
                     collection.get("event_count"), "END data_collection event_count"
                 )
             require(collection_counts == declared_counts, "END per-table counts mismatch")
-            completed.append(transaction_summary(active, run_id, marker_state))
+            completed.append(transaction_summary(active, run_id, marker_identities))
             active = None
             continue
 
@@ -458,6 +452,7 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
             {
                 "table": table,
                 "collection": f"{database}.{table}",
+                "key": key,
                 "op": envelope["op"],
                 "before": envelope.get("before"),
                 "after": envelope.get("after"),
@@ -504,9 +499,9 @@ def verify_stream(entries: Any, run_id: str, backend_source_id: str) -> list[dic
     actual_operations = [item["operations"] for item in completed[3:10]]
     require(actual_operations == expected_operations, "unexpected workload row operations")
     require(
-        [item["correlation_id"]["txn_id"] for item in completed[3:10]]
+        sorted(item["correlation_id"]["txn_id"] for item in completed[3:10])
         == list(range(1, 8)),
-        "workload marker chain is not 1..7",
+        "workload marker identity set is not 1..7",
     )
     return completed
 

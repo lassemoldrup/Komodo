@@ -400,7 +400,7 @@ private:
     std::string stream_id;
   };
 
-  struct MarkerUpdate {
+  struct MarkerInsert {
     RunScopedCorrelationId correlation_id;
     std::string session_id;
     std::uint64_t txn_id = 0;
@@ -1005,14 +1005,10 @@ private:
     if (seen_marker_identities_.contains(marker.identity)) {
       fail(CdcErrorCode::MarkerDuplicate, "unified marker identity was reused");
     }
-    const auto new_session =
-        !last_marker_by_session_.contains(marker.session_id);
-    reserveRetainedIdentityBytes(marker.identity.size() +
-                                 (new_session ? marker.session_id.size() : 0U));
+    reserveRetainedIdentityBytes(marker.identity.size());
     // reserveRetainedIdentityBytes is intentionally before these insertions:
     // an allocation failure is sticky and cannot be mistaken for a valid run.
     seen_marker_identities_.insert(marker.identity);
-    last_marker_by_session_[marker.session_id] = marker.txn_id;
     return result;
   }
 
@@ -1095,12 +1091,14 @@ private:
     }
   }
 
-  [[nodiscard]] MarkerUpdate validateMarker(const RowEvent &row) const {
-    if (row.operation == "d" || !row.after.is_object()) {
+  [[nodiscard]] MarkerInsert validateMarker(const RowEvent &row) const {
+    if (row.operation != "c" || !row.before.is_null() ||
+        !row.after.is_object()) {
       fail(CdcErrorCode::MarkerMalformed,
-           "session_txn marker must have a complete after-image");
+           "session_txn marker must be an insert with a null before-image and "
+           "complete after-image");
     }
-    requireExactKeys(row.key, {"session_id"}, "session_txn key",
+    requireExactKeys(row.key, {"session_id", "txn_id"}, "session_txn key",
                      CdcErrorCode::MarkerMalformed);
     requireExactKeys(row.after, {"session_id", "txn_id"},
                      "session_txn after-image", CdcErrorCode::MarkerMalformed);
@@ -1108,6 +1106,11 @@ private:
         member(row.key, "session_id", "session_txn key",
                CdcErrorCode::MarkerMalformed),
         "session_txn key.session_id", CdcErrorCode::MarkerMalformed);
+    const auto key_txn =
+        uintValue(member(row.key, "txn_id", "session_txn key",
+                         CdcErrorCode::MarkerMalformed),
+                  "session_txn key.txn_id", kMaxJsonSafeInteger,
+                  CdcErrorCode::MarkerMalformed);
     const auto after_session =
         stringValue(member(row.after, "session_id", "marker after-image",
                            CdcErrorCode::MarkerMalformed),
@@ -1118,7 +1121,7 @@ private:
                   "marker after.txn_id", kMaxJsonSafeInteger,
                   CdcErrorCode::MarkerMalformed);
     if (!isSessionId(after_session) || key_session != after_session ||
-        after_txn == 0U) {
+        key_txn != after_txn || after_txn == 0U) {
       fail(CdcErrorCode::MarkerMalformed,
            "session_txn key/session/txn_id is malformed or inconsistent");
     }
@@ -1128,43 +1131,7 @@ private:
     if (seen_marker_identities_.contains(identity)) {
       fail(CdcErrorCode::MarkerDuplicate, "unified marker identity was reused");
     }
-    const auto previous = last_marker_by_session_.find(after_session);
-    if (previous == last_marker_by_session_.end()) {
-      if (row.operation != "c" || !row.before.is_null()) {
-        fail(CdcErrorCode::MarkerChainMismatch,
-             "first committed session marker is not an insert with null "
-             "before-image");
-      }
-    } else {
-      if (row.operation != "u") {
-        fail(CdcErrorCode::MarkerChainMismatch,
-             "later committed session marker is not an update");
-      }
-      if (!row.before.is_object()) {
-        fail(CdcErrorCode::MarkerBeforeImageMissing,
-             "marker update lacks its complete before-image");
-      }
-      requireExactKeys(row.before, {"session_id", "txn_id"},
-                       "session_txn before-image",
-                       CdcErrorCode::MarkerBeforeImageMissing);
-      const auto before_session = stringValue(
-          member(row.before, "session_id", "marker before-image",
-                 CdcErrorCode::MarkerBeforeImageMissing),
-          "marker before.session_id", CdcErrorCode::MarkerBeforeImageMissing);
-      const auto before_txn =
-          uintValue(member(row.before, "txn_id", "marker before-image",
-                           CdcErrorCode::MarkerBeforeImageMissing),
-                    "marker before.txn_id", kMaxJsonSafeInteger,
-                    CdcErrorCode::MarkerBeforeImageMissing);
-      if (before_session != after_session || before_txn != previous->second ||
-          after_txn <= previous->second) {
-        fail(after_txn == previous->second ? CdcErrorCode::MarkerDuplicate
-                                           : CdcErrorCode::MarkerChainMismatch,
-             "marker before-image chain or monotonic txn_id is inconsistent");
-      }
-    }
-
-    return MarkerUpdate{
+    return MarkerInsert{
         .correlation_id = RunScopedCorrelationId{.run_id = config_.run_id,
                                                  .session_id = after_session,
                                                  .txn_id = after_txn},
@@ -1340,7 +1307,6 @@ private:
   QualifiedTable fence_table_;
   std::unordered_map<std::string, ActiveTransaction> active_;
   std::unordered_set<std::string> completed_structural_ids_;
-  std::unordered_map<std::string, std::uint64_t> last_marker_by_session_;
   std::unordered_set<std::string> seen_marker_identities_;
   std::set<RunFencePhase> seen_fences_;
   LifecyclePhase lifecycle_phase_ = LifecyclePhase::AwaitRunStart;

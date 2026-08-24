@@ -89,14 +89,14 @@ class TpccTransactionFixtureTest(unittest.TestCase):
         ):
             TRANSACTIONS.verify_transaction_fixture(document, self.codec)
 
-    def test_marker_before_image_chain_is_independently_checked(self) -> None:
+    def test_non_insert_marker_is_independently_rejected(self) -> None:
         document = copy.deepcopy(self.document)
         marker_entry = document["transactions"][4]["raw_entries"][-2]
         envelope = json.loads(marker_entry[1][1])
-        envelope["before"]["txn_id"] = 99
+        envelope["op"] = "u"
         marker_entry[1][1] = json.dumps(envelope)
         with self.assertRaisesRegex(
-            TRANSACTIONS.TransactionFixtureError, "marker before-image chain mismatch"
+            TRANSACTIONS.TransactionFixtureError, "marker is not an insert"
         ):
             TRANSACTIONS.verify_transaction_fixture(document, self.codec)
 

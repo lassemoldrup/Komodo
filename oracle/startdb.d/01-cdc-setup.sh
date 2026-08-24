@@ -56,11 +56,8 @@ log "warming up SERIALIZABLE reads ..."
 for _ in 1 2 3; do
   sqlplus -s sitest/sitestpw@localhost:1521/freepdb1 >/dev/null 2>&1 <<'EOF' && break
 UPDATE sitest.registers SET val = val WHERE id = 1;
-MERGE INTO sitest.session_txn t
-  USING (SELECT '__warmup__' AS session_id, 0 AS txn_id FROM DUAL) s
-  ON (t.session_id = s.session_id)
-  WHEN MATCHED THEN UPDATE SET t.txn_id = s.txn_id
-  WHEN NOT MATCHED THEN INSERT (session_id, txn_id) VALUES (s.session_id, s.txn_id);
+INSERT INTO sitest.session_txn (session_id, txn_id)
+VALUES ('__warmup__', 0);
 DELETE FROM sitest.session_txn WHERE session_id = '__warmup__';
 COMMIT;
 exit

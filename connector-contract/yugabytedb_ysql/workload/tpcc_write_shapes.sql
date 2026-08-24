@@ -14,7 +14,6 @@ UPDATE item SET i_id = 501 WHERE i_id = 500;
 UPDATE customer SET c_balance = 25.10
  WHERE c_w_id = 1 AND c_d_id = 1 AND c_id = 1;
 INSERT INTO session_txn (session_id, txn_id)
-VALUES ('tpcc/capture/1', 2)
-ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+VALUES ('tpcc/capture/1', 2);
 COMMIT;
 \echo ACK tpcc_write_shapes 2

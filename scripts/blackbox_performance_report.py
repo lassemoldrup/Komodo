@@ -1584,6 +1584,7 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         ("network_metrics.json", "redis_network"),
         ("redis_usage.json", "redis_memory"),
         ("redis_configuration.json", "redis_configuration"),
+        ("marker_storage.json", "marker_storage"),
         ("loader_validation.json", "loader_validation"),
         ("bootstrap_manifest.json", "bootstrap"),
         ("analysis_window.json", "analysis_window"),
@@ -1609,6 +1610,46 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
     )
     row["bootstrap_row_count"] = row_count
     row["bootstrap_canonical_state_digest"] = digest
+
+    marker_storage = load_json(trial_dir / "marker_storage.json", required=True)
+    require(isinstance(marker_storage, dict), "marker storage evidence is not an object")
+    require(
+        marker_storage.get("contract") == "append_only_per_committed_attempt",
+        "marker storage contract differs",
+    )
+    require(
+        marker_storage.get("mode") == mode,
+        "marker storage mode differs",
+    )
+    marker_start_rows = integer(
+        marker_storage.get("workload_start_row_count"), "marker workload-start rows"
+    )
+    marker_end_rows = integer(
+        marker_storage.get("complete_run_end_row_count"), "marker complete-run rows"
+    )
+    marker_workload_end_rows = integer(
+        marker_storage.get("workload_end_row_count"), "marker workload-end rows"
+    )
+    marker_workload_allocated_bytes = integer(
+        marker_storage.get("workload_end_allocated_bytes"),
+        "marker workload-end allocated bytes",
+    )
+    marker_allocated_bytes = integer(
+        marker_storage.get("complete_run_end_allocated_bytes"),
+        "marker complete-run allocated bytes",
+    )
+    require(marker_start_rows == 0, "marker table was not empty at workload start")
+    require(
+        marker_workload_end_rows == marker_end_rows,
+        "marker rows changed after workload quiescence",
+    )
+    require(
+        marker_workload_allocated_bytes == marker_allocated_bytes,
+        "marker allocation changed after workload quiescence",
+    )
+    require(marker_allocated_bytes >= 0, "marker allocated bytes are negative")
+    if mode == "benchbase_uninstrumented":
+        require(marker_end_rows == 0, "uninstrumented mode contains marker rows")
 
     loader_validation = load_json(trial_dir / "loader_validation.json", required=True)
     require(isinstance(loader_validation, dict), "loader validation is not an object")
@@ -1796,6 +1837,11 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
                 status_document,
                 str(metadata.get("run_id", "")),
             )
+        )
+        require(
+            marker_end_rows
+            == integer(row.get("client_client_txn_count"), "client transaction count"),
+            "append-only marker row count does not equal ClientTxn count",
         )
     return row
 

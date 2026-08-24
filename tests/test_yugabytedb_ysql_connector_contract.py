@@ -105,7 +105,7 @@ def canonical_capture() -> list[list[object]]:
         row(
             "5-0",
             "session_txn",
-            {"session_id": "cross_tablet"},
+            {"session_id": "cross_tablet", "txn_id": 1},
             {"session_id": "cross_tablet", "txn_id": 1},
             4,
             1,

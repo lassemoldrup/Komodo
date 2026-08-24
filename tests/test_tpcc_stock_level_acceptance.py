@@ -67,12 +67,12 @@ class StockLevelAcceptanceTest(unittest.TestCase):
                             json.dumps(value, separators=(",", ":"))]]
 
     def marker_transaction(self, prefix, seq, previous):
-        txid = f"tx{seq}"; before = None if previous is None else {"session_id": SESSION, "txn_id": previous}
+        txid = f"tx{seq}"; before = None
         after = {"session_id": SESSION, "txn_id": seq}
         return [self.raw(f"{prefix}-0", {"id": txid}, {"status": "BEGIN", "id": txid,
                 "event_count": None, "data_collections": None}),
-            self.raw(f"{prefix}-1", {"session_id": SESSION},
-                {"before": before, "after": after, "op": "c" if previous is None else "u",
+            self.raw(f"{prefix}-1", {"session_id": SESSION, "txn_id": seq},
+                {"before": before, "after": after, "op": "c",
                  "source": {"version": "3.6.1.Final", "connector": "mariadb",
                             "name": "mariadb-main", "db": "benchbase", "table": "session_txn"},
                  "transaction": {"id": txid, "total_order": 1, "data_collection_order": 1}}),

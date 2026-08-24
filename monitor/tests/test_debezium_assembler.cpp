@@ -973,7 +973,7 @@ void checkMeasurementMetrics() {
   assembler.finish();
 
   const auto metrics = assembler.metrics();
-  BLACKBOX_CHECK(expected_raw_bytes == 30599U);
+  BLACKBOX_CHECK(expected_raw_bytes == 30448U);
   BLACKBOX_CHECK(metrics.accepted_raw_records == 55U);
   BLACKBOX_CHECK(metrics.accepted_raw_bytes == expected_raw_bytes);
   BLACKBOX_CHECK(metrics.startup_schema_records == 10U);
@@ -1141,6 +1141,19 @@ void checkStructuralFailuresAreClosed() {
 void checkMarkerAndFenceFailuresAreClosed() {
   const auto captured = loadFixture();
 
+  auto non_monotonic_marker_ids = captured;
+  auto non_monotonic_key = keyAt(non_monotonic_marker_ids, 12U);
+  non_monotonic_key["txn_id"] = 9;
+  setKey(non_monotonic_marker_ids, 12U, non_monotonic_key);
+  auto non_monotonic_envelope = envelopeAt(non_monotonic_marker_ids, 12U);
+  non_monotonic_envelope["after"]["txn_id"] = 9;
+  setEnvelope(non_monotonic_marker_ids, 12U, non_monotonic_envelope);
+  const auto non_monotonic = replay(std::move(non_monotonic_marker_ids));
+  BLACKBOX_REQUIRE(non_monotonic[3].correlation_id.has_value());
+  BLACKBOX_REQUIRE(non_monotonic[4].correlation_id.has_value());
+  BLACKBOX_CHECK(non_monotonic[3].correlation_id->txn_id == 9U);
+  BLACKBOX_CHECK(non_monotonic[4].correlation_id->txn_id == 2U);
+
   // Remove the first workload marker, then make END honestly describe the
   // remaining row. This is structurally complete but uncorrelatable evidence.
   auto unmarked = captured;
@@ -1185,20 +1198,22 @@ void checkMarkerAndFenceFailuresAreClosed() {
   setEnvelope(malformed, 12U, envelope);
   expectError(std::move(malformed), CdcErrorCode::MarkerMalformed);
 
-  auto missing_before = captured;
-  envelope = envelopeAt(missing_before, 15U);
-  envelope["before"] = nullptr;
-  setEnvelope(missing_before, 15U, envelope);
-  expectError(std::move(missing_before),
-              CdcErrorCode::MarkerBeforeImageMissing);
+  auto unexpected_before = captured;
+  envelope = envelopeAt(unexpected_before, 15U);
+  envelope["before"] = Json{{"session_id", "ycsb/worker/1"}, {"txn_id", 1}};
+  setEnvelope(unexpected_before, 15U, envelope);
+  expectError(std::move(unexpected_before), CdcErrorCode::MarkerMalformed);
 
-  auto broken_chain = captured;
-  envelope = envelopeAt(broken_chain, 15U);
-  envelope["before"]["txn_id"] = 99;
-  setEnvelope(broken_chain, 15U, envelope);
-  expectError(std::move(broken_chain), CdcErrorCode::MarkerChainMismatch);
+  auto mismatched_key = captured;
+  auto marker_key = keyAt(mismatched_key, 15U);
+  marker_key["txn_id"] = 99;
+  setKey(mismatched_key, 15U, marker_key);
+  expectError(std::move(mismatched_key), CdcErrorCode::MarkerMalformed);
 
   auto duplicate_marker = captured;
+  marker_key = keyAt(duplicate_marker, 15U);
+  marker_key["txn_id"] = 1;
+  setKey(duplicate_marker, 15U, marker_key);
   envelope = envelopeAt(duplicate_marker, 15U);
   envelope["after"]["txn_id"] = 1;
   setEnvelope(duplicate_marker, 15U, envelope);
@@ -1209,7 +1224,7 @@ void checkMarkerAndFenceFailuresAreClosed() {
   envelope["op"] = "u";
   envelope["before"] = Json{{"session_id", "ycsb/worker/1"}, {"txn_id", 0}};
   setEnvelope(update_as_first, 12U, envelope);
-  expectError(std::move(update_as_first), CdcErrorCode::MarkerChainMismatch);
+  expectError(std::move(update_as_first), CdcErrorCode::MarkerMalformed);
 
   auto marker_during_bootstrap =
       selectEntries(captured, {0U, 1U, 2U, 14U, 15U, 16U});
@@ -1373,6 +1388,9 @@ void checkAttemptGapsAndContiguousFrames() {
   auto envelope = envelopeAt(marker_gap, 15U);
   envelope["after"]["txn_id"] = 3;
   setEnvelope(marker_gap, 15U, envelope);
+  auto marker_key = keyAt(marker_gap, 15U);
+  marker_key["txn_id"] = 3;
+  setKey(marker_gap, 15U, marker_key);
   const auto gap_transactions = replay(marker_gap);
   BLACKBOX_REQUIRE(gap_transactions.size() == 5U);
   BLACKBOX_REQUIRE(gap_transactions[4].correlation_id.has_value());
@@ -1506,9 +1524,14 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_REQUIRE(stock_level->at("raw_entries").size() == 3U);
   const auto stock_level_marker =
       entryEnvelope(stock_level->at("raw_entries")[1]);
+  const auto stock_level_marker_key =
+      entryKey(stock_level->at("raw_entries")[1]);
   BLACKBOX_CHECK(stock_level_marker.at("source").at("table") == "session_txn");
-  BLACKBOX_CHECK(stock_level_marker.at("before").at("txn_id") == 7U);
+  BLACKBOX_CHECK(stock_level_marker.at("op") == "c");
+  BLACKBOX_CHECK(stock_level_marker.at("before").is_null());
   BLACKBOX_CHECK(stock_level_marker.at("after").at("txn_id") == 8U);
+  BLACKBOX_CHECK(stock_level_marker_key ==
+                 (Json{{"session_id", "tpcc/worker/1"}, {"txn_id", 8}}));
   const auto stock_level_end = entryEnvelope(stock_level->at("raw_entries")[2]);
   BLACKBOX_CHECK(stock_level_end.at("event_count") == 1U);
   BLACKBOX_REQUIRE(stock_level_end.at("data_collections").size() == 1U);
@@ -1611,7 +1634,7 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_CHECK(delivery_raw_row_count("oorder", "u") == 1U);
   BLACKBOX_CHECK(delivery_raw_row_count("order_line", "u") == 1U);
   BLACKBOX_CHECK(delivery_raw_row_count("customer", "u") == 1U);
-  BLACKBOX_CHECK(delivery_raw_row_count("session_txn", "u") == 1U);
+  BLACKBOX_CHECK(delivery_raw_row_count("session_txn", "c") == 1U);
   BLACKBOX_REQUIRE(actual[delivery_index].writes.size() == 4U);
   const auto deleted_new_order = blackbox::CanonicalTpccCodec::encodeKey(
       "benchbase", "new_order",
@@ -1722,7 +1745,7 @@ void checkCapturedTpccTransactionsAndFailures() {
   BLACKBOX_CHECK(raw_row_count("oorder", "c") == 1U);
   BLACKBOX_CHECK(raw_row_count("new_order", "c") == 1U);
   BLACKBOX_CHECK(raw_row_count("order_line", "c") == 2U);
-  BLACKBOX_CHECK(raw_row_count("session_txn", "u") == 1U);
+  BLACKBOX_CHECK(raw_row_count("session_txn", "c") == 1U);
 
   const auto expected_table_count = [&](const std::string_view table) {
     return static_cast<std::size_t>(std::count_if(
@@ -1879,9 +1902,10 @@ void checkCapturedTpccTransactionsAndFailures() {
     auto &entry =
         tpccRowEntry(invalid, "stock_level_marker_only", "session_txn");
     auto envelope = entryEnvelope(entry);
-    envelope["before"]["txn_id"] = 6;
+    envelope["before"] =
+        Json{{"session_id", "tpcc/worker/1"}, {"txn_id", 6}};
     setEntryEnvelope(entry, envelope);
-    expectError(tpccRawEntries(invalid), CdcErrorCode::MarkerChainMismatch,
+    expectError(tpccRawEntries(invalid), CdcErrorCode::MarkerMalformed,
                 tpccAssemblerConfig(invalid), false);
   }
   {

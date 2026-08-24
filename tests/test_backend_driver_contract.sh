@@ -26,6 +26,9 @@ blackbox_backend_database_query() { mock_driver_gate database_query && printf '0
 blackbox_backend_capture_schema_metadata() { printf 'mock\n'; }
 blackbox_backend_verify_schema() { mock_driver_gate verify_schema; }
 blackbox_backend_count_table() { mock_driver_gate count_table && printf '0\n'; }
+blackbox_backend_marker_storage() {
+  mock_driver_gate marker_storage && printf '0\t0\n'
+}
 blackbox_backend_commit_fence() {
   mock_driver_gate commit_fence || return 1
   printf 'fence:%s\n' "$2" >>"$MOCK_EVENT_LOG"
@@ -117,7 +120,7 @@ export ROOT
 MOCK_FAILURE_EXAMPLE="$ROOT/protocol/examples/schema-attestation-startup.json"
 export MOCK_FAILURE_EXAMPLE
 for operation in prepare_run database_query verify_schema count_table commit_fence \
-  active_external_connections connector_progress capture_attestation start_database_schema \
+  marker_storage active_external_connections connector_progress capture_attestation start_database_schema \
   start_connector teardown status; do
   if BLACKBOX_BACKEND=mariadb BLACKBOX_BACKEND_DRIVER_DIR="$TEST_ROOT/drivers" \
       MOCK_SOURCE_ID=mariadb-main \
@@ -130,6 +133,7 @@ case "$TEST_OPERATION" in
   database_query) blackbox_backend_database_query 'SELECT 1' ;;
   verify_schema) blackbox_backend_verify_schema ;;
   count_table) blackbox_backend_count_table benchbase.usertable ;;
+  marker_storage) blackbox_backend_marker_storage ;;
   commit_fence) blackbox_backend_commit_fence run RUN_START nonce ;;
   active_external_connections) blackbox_backend_active_external_connections ;;
   connector_progress) blackbox_backend_wait_for_connector_progress ;;

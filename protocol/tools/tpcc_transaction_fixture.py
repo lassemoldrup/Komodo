@@ -118,7 +118,7 @@ def normalize_transaction(
     run_id: str,
     cdc_seq: int,
     phase: str,
-    marker_progress: dict[str, int],
+    marker_identities: set[tuple[str, int]],
 ) -> tuple[dict[str, Any], str]:
     name = transaction.get("name")
     require(isinstance(name, str) and name, "transaction fixture lacks name")
@@ -141,7 +141,7 @@ def normalize_transaction(
     collection_orders: dict[str, int] = defaultdict(int)
     application_rows: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     fence_rows: list[dict[str, Any]] = []
-    marker_rows: list[dict[str, Any]] = []
+    marker_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
     final_writes: dict[bytes, dict[str, Any]] = {}
     for total_order, (_, key_object, envelope) in enumerate(row_entries, start=1):
         source = envelope.get("source")
@@ -174,7 +174,7 @@ def normalize_transaction(
         elif qualified_table == "benchbase.checker_run_fence":
             fence_rows.append(envelope)
         elif qualified_table == "benchbase.session_txn":
-            marker_rows.append(envelope)
+            marker_rows.append((key_object, envelope))
         else:
             raise TransactionFixtureError(f"{name}: unexpected table {qualified_table}")
 
@@ -215,9 +215,9 @@ def normalize_transaction(
             next_phase = "closed"
     elif marker_rows:
         require(phase == "workload" and len(marker_rows) == 1, f"{name}: workload marker count")
-        require(row_entries[-1][2] is marker_rows[0], f"{name}: marker is not final row")
-        marker_after = marker_rows[0].get("after")
-        marker_before = marker_rows[0].get("before")
+        marker_key, marker_envelope = marker_rows[0]
+        require(row_entries[-1][2] is marker_envelope, f"{name}: marker is not final row")
+        marker_after = marker_envelope.get("after")
         require(isinstance(marker_after, dict), f"{name}: marker after image missing")
         correlation = {
             "run_id": run_id,
@@ -230,22 +230,16 @@ def normalize_transaction(
             and correlation["txn_id"] > 0,
             f"{name}: marker correlation malformed",
         )
-        session_id = correlation["session_id"]
-        previous_txn_id = marker_progress.get(session_id)
-        if previous_txn_id is None:
-            require(marker_before is None, f"{name}: first marker has before image")
-        else:
-            require(
-                isinstance(marker_before, dict)
-                and marker_before.get("session_id") == session_id
-                and marker_before.get("txn_id") == previous_txn_id,
-                f"{name}: marker before-image chain mismatch",
-            )
-            require(
-                correlation["txn_id"] > previous_txn_id,
-                f"{name}: marker transaction ID is not increasing",
-            )
-        marker_progress[session_id] = correlation["txn_id"]
+        identity = (correlation["session_id"], correlation["txn_id"])
+        require(marker_envelope.get("op") == "c", f"{name}: marker is not an insert")
+        require(marker_envelope.get("before") is None, f"{name}: marker has before image")
+        require(
+            marker_key
+            == {"session_id": correlation["session_id"], "txn_id": correlation["txn_id"]},
+            f"{name}: marker key/after identity mismatch",
+        )
+        require(identity not in marker_identities, f"{name}: marker identity reused")
+        marker_identities.add(identity)
         kind = "WORKLOAD_MARKED"
         next_phase = phase
     else:
@@ -377,7 +371,7 @@ def verify_transaction_fixture(document: dict[str, Any], codec: TpccCodec) -> li
     ]
     require([item.get("name") for item in transactions] == expected_names, "fixture transaction names")
     phase = "before_start"
-    marker_progress: dict[str, int] = {}
+    marker_identities: set[tuple[str, int]] = set()
     normalized: list[dict[str, Any]] = []
     for cdc_seq, transaction in enumerate(transactions):
         require(
@@ -385,7 +379,7 @@ def verify_transaction_fixture(document: dict[str, Any], codec: TpccCodec) -> li
             f"transaction {cdc_seq} shape mismatch",
         )
         actual, phase = normalize_transaction(
-            transaction, codec, run_id, cdc_seq, phase, marker_progress
+            transaction, codec, run_id, cdc_seq, phase, marker_identities
         )
         normalized.append(actual)
     require(phase == "closed", "fixture did not reach END_FENCE")

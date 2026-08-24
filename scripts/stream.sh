@@ -79,9 +79,8 @@ for line in sys.stdin:
                 if k.lower() == name:
                     return v
             return None
-        print("  MARKER  session=%s txn_id=%s (prev=%s)" % (
-            fld(after, "session_id"), fld(after, "txn_id"),
-            fld(before, "txn_id")))
+        print("  MARKER  session=%s txn_id=%s op=%s" % (
+            fld(after, "session_id"), fld(after, "txn_id"), e.get("op")))
         continue
 
     print("  %-6s %-14s before=%s after=%s" % (

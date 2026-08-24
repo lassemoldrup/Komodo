@@ -603,7 +603,6 @@ def validate_cdc_tail(
             current.append(entry)
     require(current is None, "CDC tail ends inside transaction")
     correlations: set[tuple[str, int]] = set()
-    marker_progress: dict[str, int] = {}
     history_ids: set[int] = set()
     good_credit = 0
     bad_credit = 0
@@ -661,16 +660,16 @@ def validate_cdc_tail(
         require(len(marker_rows) == 1 and parsed_rows[-1] is marker_rows[0], f"{label} marker absent/not final")
         marker_key, marker = marker_rows[0]
         after, before = marker.get("after"), marker.get("before")
-        require(isinstance(after, dict) and marker_key == {"session_id": after.get("session_id")}, f"{label} marker shape")
+        require(
+            isinstance(after, dict)
+            and marker.get("op") == "c"
+            and before is None
+            and marker_key
+            == {"session_id": after.get("session_id"), "txn_id": after.get("txn_id")},
+            f"{label} marker shape",
+        )
         identity = (after["session_id"], after["txn_id"])
         require(identity in shapes and identity not in correlations, f"{label} marker/client identity")
-        previous = marker_progress.get(after["session_id"])
-        require(
-            (previous is None and before is None)
-            or before == {"session_id": after["session_id"], "txn_id": previous},
-            f"{label} marker before-image chain",
-        )
-        marker_progress[after["session_id"]] = after["txn_id"]
         correlations.add(identity)
         application_rows = [row for row in parsed_rows if row is not marker_rows[0]]
         history_id, credit = validate_payment_rows(

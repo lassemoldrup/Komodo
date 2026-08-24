@@ -28,8 +28,8 @@ ORASQL
   echo "=== Registers ==="
   db_query "select 'id=' || id || ' val=' || val from sitest.registers order by id;"
   echo
-  echo "=== Session markers ==="
-  db_query "select session_id || ' -> ' || txn_id from sitest.session_txn order by session_id;"
+  echo "=== Append-only session markers ==="
+  db_query "select session_id || ' -> ' || txn_id from sitest.session_txn order by session_id, txn_id;"
   DBZ=cdc-debezium-oracle
 elif [ "$DB" = "yugabytedb_ysql" ]; then
   echo "=== Replication slot (must be pgoutput / SEQUENCE / active) ==="
@@ -45,8 +45,8 @@ elif [ "$DB" = "yugabytedb_ysql" ]; then
   echo "=== Tablet count ==="
   db_query "SELECT COUNT(*) FROM yb_local_tablets;"
   echo
-  echo "=== Session markers (latest txn per session) ==="
-  db_query "SELECT session_id || ' -> ' || txn_id FROM session_txn WHERE txn_id <> 0 ORDER BY session_id LIMIT 10"
+  echo "=== Append-only session markers (sample) ==="
+  db_query "SELECT session_id || ' -> ' || txn_id FROM session_txn ORDER BY session_id, txn_id LIMIT 10"
   DBZ=cdc-debezium-yugabytedb-ysql
 else
   echo "=== Isolation ==="
@@ -54,7 +54,7 @@ else
   echo "=== Black-box state ==="
   db_query "SELECT CONCAT('usertable rows=', COUNT(*)) FROM usertable"
   db_query "SELECT CONCAT(run_id, ' -> ', phase) FROM checker_run_fence ORDER BY run_id, phase"
-  db_query "SELECT CONCAT(session_id, ' -> ', txn_id) FROM session_txn ORDER BY session_id"
+  db_query "SELECT CONCAT(session_id, ' -> ', txn_id) FROM session_txn ORDER BY session_id, txn_id"
   DBZ=cdc-debezium
 fi
 

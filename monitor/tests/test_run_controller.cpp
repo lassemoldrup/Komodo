@@ -425,7 +425,7 @@ donePayload(const std::uint64_t count,
   });
   attestation.tables.push_back(blackbox::ProtocolSchemaTable{
       .canonical_table_name = "benchbase.session_txn",
-      .primary_key_columns = {"session_id"},
+      .primary_key_columns = {"session_id", "txn_id"},
       .columns = {
           {.name = "session_id", .logical_sql_type = "VARCHAR(64)"},
           {.name = "txn_id", .logical_sql_type = "BIGINT"},

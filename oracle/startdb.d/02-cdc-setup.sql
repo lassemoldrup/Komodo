@@ -48,13 +48,13 @@ CREATE TABLE sitest.registers (
   val NUMBER(19) DEFAULT 0 NOT NULL
 );
 
--- Transaction marker. Identical role on every backend: one row per client
--- session, upserted as the LAST statement of each transaction, so the marker
--- travels inside that transaction's own change set and identifies it in the
--- CDC stream. Starts empty; sessions create their own row on first use.
+-- Transaction marker. One immutable row is inserted as the LAST statement of
+-- every committed attempt, so the marker travels inside that transaction's own
+-- change set and identifies it in the CDC stream.
 CREATE TABLE sitest.session_txn (
-  session_id VARCHAR2(64) PRIMARY KEY,
-  txn_id     NUMBER(19) DEFAULT 0 NOT NULL
+  session_id VARCHAR2(64) NOT NULL,
+  txn_id     NUMBER(19) DEFAULT 0 NOT NULL,
+  PRIMARY KEY (session_id, txn_id)
 );
 
 INSERT INTO sitest.registers (id, val) VALUES (1, 0);

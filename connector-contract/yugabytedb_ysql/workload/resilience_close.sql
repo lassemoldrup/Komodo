@@ -9,7 +9,6 @@ VALUES (
     '00000000-0000-0000-0000-000000000011'
 );
 INSERT INTO session_txn (session_id, txn_id)
-VALUES ('resilience_transition', 5)
-ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+VALUES ('resilience_transition', 5);
 COMMIT;
 \echo ACK resilience_transition 5

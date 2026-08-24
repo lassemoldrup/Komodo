@@ -362,7 +362,7 @@ def validate_cdc_tail(path: Path, run_id: str, load_id: str, shapes: dict, codec
         else:
             require(current is not None, "row outside transaction"); current.append(entry)
     require(current is None, "incomplete CDC transaction")
-    correlations, marker_progress = set(), {}
+    correlations = set()
     end_fences = normalized_writes = multi_line = marker_only = 0
     for index, transaction in enumerate(transactions):
         label = f"CDC transaction {index}"
@@ -394,12 +394,11 @@ def validate_cdc_tail(path: Path, run_id: str, load_id: str, shapes: dict, codec
         require(len(marker) == 1 and parsed[-1] is marker[0], f"{label} marker absent/not final")
         key, envelope = marker[0]; after, before = envelope.get("after"), envelope.get("before")
         identity = (after["session_id"], after["txn_id"])
-        require(key == {"session_id": after["session_id"]} and identity in shapes
+        require(envelope.get("op") == "c" and before is None
+                and key == {"session_id": after["session_id"], "txn_id": after["txn_id"]}
+                and identity in shapes
                 and identity not in correlations, f"{label} marker identity")
-        previous = marker_progress.get(after["session_id"])
-        require((previous is None and before is None)
-                or before == {"session_id": after["session_id"], "txn_id": previous}, f"{label} marker chain")
-        marker_progress[after["session_id"]] = after["txn_id"]; correlations.add(identity)
+        correlations.add(identity)
         app = [row for row in parsed if row is not marker[0]]
         writes, multiple = validate_delivery_rows(label, shapes[identity], app, codec)
         normalized_writes += writes; multi_line += multiple; marker_only += int(not app)

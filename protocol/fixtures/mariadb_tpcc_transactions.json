@@ -214,7 +214,7 @@
       "1787263095952-1",
       [
         "{\"databaseName\":\"benchbase\"}",
-        "{\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263095812,\"snapshot\":\"true\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263095812870,\"ts_ns\":1787263095812870276,\"table\":\"session_txn\",\"server_id\":0,\"gtid\":null,\"file\":\"mariadb-bin.000002\",\"pos\":345,\"row\":0,\"thread\":null,\"query\":null},\"ts_ms\":1787263095814,\"databaseName\":\"benchbase\",\"schemaName\":null,\"ddl\":\"CREATE TABLE `session_txn` (\\n  `session_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,\\n  `txn_id` bigint(20) NOT NULL,\\n  PRIMARY KEY (`session_id`)\\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin\",\"tableChanges\":[{\"type\":\"CREATE\",\"id\":\"\\\"benchbase\\\".\\\"session_txn\\\"\",\"table\":{\"defaultCharsetName\":\"utf8mb4\",\"primaryKeyColumnNames\":[\"session_id\"],\"columns\":[{\"name\":\"session_id\",\"jdbcType\":12,\"nativeType\":null,\"typeName\":\"VARCHAR\",\"typeExpression\":\"VARCHAR\",\"charsetName\":\"ascii\",\"length\":64,\"scale\":null,\"position\":1,\"optional\":false,\"autoIncremented\":false,\"generated\":false,\"comment\":null,\"defaultValueExpression\":null,\"enumValues\":null},{\"name\":\"txn_id\",\"jdbcType\":-5,\"nativeType\":null,\"typeName\":\"BIGINT\",\"typeExpression\":\"BIGINT\",\"charsetName\":null,\"length\":20,\"scale\":null,\"position\":2,\"optional\":false,\"autoIncremented\":false,\"generated\":false,\"comment\":null,\"defaultValueExpression\":null,\"enumValues\":null}],\"comment\":null}}]}"
+        "{\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263095812,\"snapshot\":\"true\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263095812870,\"ts_ns\":1787263095812870276,\"table\":\"session_txn\",\"server_id\":0,\"gtid\":null,\"file\":\"mariadb-bin.000002\",\"pos\":345,\"row\":0,\"thread\":null,\"query\":null},\"ts_ms\":1787263095814,\"databaseName\":\"benchbase\",\"schemaName\":null,\"ddl\":\"CREATE TABLE `session_txn` (\\n  `session_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,\\n  `txn_id` bigint(20) NOT NULL,\\n  PRIMARY KEY (`session_id`,`txn_id`)\\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin\",\"tableChanges\":[{\"type\":\"CREATE\",\"id\":\"\\\"benchbase\\\".\\\"session_txn\\\"\",\"table\":{\"defaultCharsetName\":\"utf8mb4\",\"primaryKeyColumnNames\":[\"session_id\",\"txn_id\"],\"columns\":[{\"name\":\"session_id\",\"jdbcType\":12,\"nativeType\":null,\"typeName\":\"VARCHAR\",\"typeExpression\":\"VARCHAR\",\"charsetName\":\"ascii\",\"length\":64,\"scale\":null,\"position\":1,\"optional\":false,\"autoIncremented\":false,\"generated\":false,\"comment\":null,\"defaultValueExpression\":null,\"enumValues\":null},{\"name\":\"txn_id\",\"jdbcType\":-5,\"nativeType\":null,\"typeName\":\"BIGINT\",\"typeExpression\":\"BIGINT\",\"charsetName\":null,\"length\":20,\"scale\":null,\"position\":2,\"optional\":false,\"autoIncremented\":false,\"generated\":false,\"comment\":null,\"defaultValueExpression\":null,\"enumValues\":null}],\"comment\":null}}]}"
       ]
     ],
     [
@@ -361,7 +361,7 @@
           "1787263096667-4",
           [
             "{\"i_id\":1}",
-            "{\"before\":null,\"after\":{\"i_id\":1,\"i_name\":\"ééé\",\"i_price\":\"999.99\",\"i_data\":\"商品\\uD83D\\uDE42\",\"i_im_id\":7},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263096000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263096000000,\"ts_ns\":1787263096000000000,\"table\":\"item\",\"server_id\":1,\"gtid\":\"0-1-20\",\"file\":\"mariadb-bin.000002\",\"pos\":637,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-20\",\"total_order\":2,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263096656,\"ts_us\":1787263096656557,\"ts_ns\":1787263096656557278}"
+            "{\"before\":null,\"after\":{\"i_id\":1,\"i_name\":\"ééé\",\"i_price\":\"999.99\",\"i_data\":\"商品🙂\",\"i_im_id\":7},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263096000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263096000000,\"ts_ns\":1787263096000000000,\"table\":\"item\",\"server_id\":1,\"gtid\":\"0-1-20\",\"file\":\"mariadb-bin.000002\",\"pos\":637,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-20\",\"total_order\":2,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263096656,\"ts_us\":1787263096656557,\"ts_ns\":1787263096656557278}"
           ]
         ],
         [
@@ -382,14 +382,14 @@
           "1787263096685-0",
           [
             "{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1}",
-            "{\"before\":null,\"after\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓\\uD83D\\uDE42\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-10.00\",\"c_ytd_payment\":0.1,\"c_payment_cnt\":1,\"c_delivery_cnt\":0,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b\\uD83D\\uDE42\"},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263096000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263096000000,\"ts_ns\":1787263096000000000,\"table\":\"customer\",\"server_id\":1,\"gtid\":\"0-1-20\",\"file\":\"mariadb-bin.000002\",\"pos\":637,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-20\",\"total_order\":5,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263096660,\"ts_us\":1787263096660057,\"ts_ns\":1787263096660057036}"
+            "{\"before\":null,\"after\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓🙂\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-10.00\",\"c_ytd_payment\":0.1,\"c_payment_cnt\":1,\"c_delivery_cnt\":0,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b🙂\"},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263096000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263096000000,\"ts_ns\":1787263096000000000,\"table\":\"customer\",\"server_id\":1,\"gtid\":\"0-1-20\",\"file\":\"mariadb-bin.000002\",\"pos\":637,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-20\",\"total_order\":5,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263096660,\"ts_us\":1787263096660057,\"ts_ns\":1787263096660057036}"
           ]
         ],
         [
           "1787263096685-1",
           [
             "{\"h_id\":1}",
-            "{\"before\":null,\"after\":{\"h_id\":1,\"h_c_id\":1,\"h_c_d_id\":1,\"h_c_w_id\":1,\"h_d_id\":1,\"h_w_id\":1,\"h_date\":\"2026-08-20T12:34:57Z\",\"h_amount\":\"10.00\",\"h_data\":\"history\\uD83D\\uDE42\"},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263096000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263096000000,\"ts_ns\":1787263096000000000,\"table\":\"history\",\"server_id\":1,\"gtid\":\"0-1-20\",\"file\":\"mariadb-bin.000002\",\"pos\":637,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-20\",\"total_order\":6,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263096662,\"ts_us\":1787263096662220,\"ts_ns\":1787263096662220012}"
+            "{\"before\":null,\"after\":{\"h_id\":1,\"h_c_id\":1,\"h_c_d_id\":1,\"h_c_w_id\":1,\"h_d_id\":1,\"h_w_id\":1,\"h_date\":\"2026-08-20T12:34:57Z\",\"h_amount\":\"10.00\",\"h_data\":\"history🙂\"},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263096000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263096000000,\"ts_ns\":1787263096000000000,\"table\":\"history\",\"server_id\":1,\"gtid\":\"0-1-20\",\"file\":\"mariadb-bin.000002\",\"pos\":637,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-20\",\"total_order\":6,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263096662,\"ts_us\":1787263096662220,\"ts_ns\":1787263096662220012}"
           ]
         ],
         [
@@ -533,7 +533,7 @@
           "1787263097325-3",
           [
             "{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1}",
-            "{\"before\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓\\uD83D\\uDE42\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-10.00\",\"c_ytd_payment\":0.1,\"c_payment_cnt\":1,\"c_delivery_cnt\":0,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b\\uD83D\\uDE42\"},\"after\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓\\uD83D\\uDE42\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-11.00\",\"c_ytd_payment\":1.1,\"c_payment_cnt\":2,\"c_delivery_cnt\":0,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b\\uD83D\\uDE42\"},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"customer\",\"server_id\":1,\"gtid\":\"0-1-22\",\"file\":\"mariadb-bin.000002\",\"pos\":3429,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-22\",\"total_order\":3,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097310,\"ts_us\":1787263097310665,\"ts_ns\":1787263097310665764}"
+            "{\"before\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓🙂\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-10.00\",\"c_ytd_payment\":0.1,\"c_payment_cnt\":1,\"c_delivery_cnt\":0,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b🙂\"},\"after\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓🙂\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-11.00\",\"c_ytd_payment\":1.1,\"c_payment_cnt\":2,\"c_delivery_cnt\":0,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b🙂\"},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"customer\",\"server_id\":1,\"gtid\":\"0-1-22\",\"file\":\"mariadb-bin.000002\",\"pos\":3429,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-22\",\"total_order\":3,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097310,\"ts_us\":1787263097310665,\"ts_ns\":1787263097310665764}"
           ]
         ],
         [
@@ -546,7 +546,7 @@
         [
           "1787263097325-5",
           [
-            "{\"session_id\":\"tpcc/worker/1\"}",
+            "{\"session_id\":\"tpcc/worker/1\",\"txn_id\":1}",
             "{\"before\":null,\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":1},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-22\",\"file\":\"mariadb-bin.000002\",\"pos\":3429,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-22\",\"total_order\":5,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263097312,\"ts_us\":1787263097312391,\"ts_ns\":1787263097312391547}"
           ]
         ],
@@ -669,8 +669,8 @@
         [
           "1787263097346-4",
           [
-            "{\"session_id\":\"tpcc/worker/1\"}",
-            "{\"before\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":1},\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":2},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-23\",\"file\":\"mariadb-bin.000002\",\"pos\":5015,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-23\",\"total_order\":8,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097320,\"ts_us\":1787263097320806,\"ts_ns\":1787263097320806193}"
+            "{\"session_id\":\"tpcc/worker/1\",\"txn_id\":2}",
+            "{\"before\":null,\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":2},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-23\",\"file\":\"mariadb-bin.000002\",\"pos\":5015,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-23\",\"total_order\":8,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263097320,\"ts_us\":1787263097320806,\"ts_ns\":1787263097320806193}"
           ]
         ],
         [
@@ -752,14 +752,14 @@
           "1787263097347-4",
           [
             "{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1}",
-            "{\"before\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓\\uD83D\\uDE42\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-11.00\",\"c_ytd_payment\":1.1,\"c_payment_cnt\":2,\"c_delivery_cnt\":0,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b\\uD83D\\uDE42\"},\"after\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓\\uD83D\\uDE42\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-10.00\",\"c_ytd_payment\":1.1,\"c_payment_cnt\":2,\"c_delivery_cnt\":1,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b\\uD83D\\uDE42\"},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"customer\",\"server_id\":1,\"gtid\":\"0-1-24\",\"file\":\"mariadb-bin.000002\",\"pos\":7098,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-24\",\"total_order\":4,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097327,\"ts_us\":1787263097327145,\"ts_ns\":1787263097327145669}"
+            "{\"before\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓🙂\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-11.00\",\"c_ytd_payment\":1.1,\"c_payment_cnt\":2,\"c_delivery_cnt\":0,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b🙂\"},\"after\":{\"c_w_id\":1,\"c_d_id\":1,\"c_id\":1,\"c_discount\":\"0.5000\",\"c_credit\":\"G\",\"c_last\":\"姓🙂\",\"c_first\":\"\",\"c_credit_lim\":\"50000.00\",\"c_balance\":\"-10.00\",\"c_ytd_payment\":1.1,\"c_payment_cnt\":2,\"c_delivery_cnt\":1,\"c_street_1\":\"one\",\"c_street_2\":\"two\",\"c_city\":\"Montréal\",\"c_state\":\"Q\",\"c_zip\":\"1234\",\"c_phone\":\"555\",\"c_since\":\"2026-08-20T12:34:56Z\",\"c_middle\":\"OE\",\"c_data\":\"a\\u0000b🙂\"},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"customer\",\"server_id\":1,\"gtid\":\"0-1-24\",\"file\":\"mariadb-bin.000002\",\"pos\":7098,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-24\",\"total_order\":4,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097327,\"ts_us\":1787263097327145,\"ts_ns\":1787263097327145669}"
           ]
         ],
         [
           "1787263097349-0",
           [
-            "{\"session_id\":\"tpcc/worker/1\"}",
-            "{\"before\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":2},\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":3},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-24\",\"file\":\"mariadb-bin.000002\",\"pos\":7098,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-24\",\"total_order\":5,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097327,\"ts_us\":1787263097327864,\"ts_ns\":1787263097327864370}"
+            "{\"session_id\":\"tpcc/worker/1\",\"txn_id\":3}",
+            "{\"before\":null,\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":3},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-24\",\"file\":\"mariadb-bin.000002\",\"pos\":7098,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-24\",\"total_order\":5,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263097327,\"ts_us\":1787263097327864,\"ts_ns\":1787263097327864370}"
           ]
         ],
         [
@@ -795,8 +795,8 @@
         [
           "1787263097349-3",
           [
-            "{\"session_id\":\"tpcc/worker/1\"}",
-            "{\"before\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":3},\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":4},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-25\",\"file\":\"mariadb-bin.000002\",\"pos\":8575,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-25\",\"total_order\":1,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097328,\"ts_us\":1787263097328797,\"ts_ns\":1787263097328797373}"
+            "{\"session_id\":\"tpcc/worker/1\",\"txn_id\":4}",
+            "{\"before\":null,\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":4},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-25\",\"file\":\"mariadb-bin.000002\",\"pos\":8575,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-25\",\"total_order\":1,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263097328,\"ts_us\":1787263097328797,\"ts_ns\":1787263097328797373}"
           ]
         ],
         [
@@ -858,8 +858,8 @@
         [
           "1787263097349-8",
           [
-            "{\"session_id\":\"tpcc/worker/1\"}",
-            "{\"before\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":4},\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":5},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-26\",\"file\":\"mariadb-bin.000002\",\"pos\":8819,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-26\",\"total_order\":3,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097330,\"ts_us\":1787263097330890,\"ts_ns\":1787263097330890147}"
+            "{\"session_id\":\"tpcc/worker/1\",\"txn_id\":5}",
+            "{\"before\":null,\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":5},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-26\",\"file\":\"mariadb-bin.000002\",\"pos\":8819,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-26\",\"total_order\":3,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263097330,\"ts_us\":1787263097330890,\"ts_ns\":1787263097330890147}"
           ]
         ],
         [
@@ -915,8 +915,8 @@
         [
           "1787263097349-13",
           [
-            "{\"session_id\":\"tpcc/worker/1\"}",
-            "{\"before\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":5},\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":6},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-27\",\"file\":\"mariadb-bin.000002\",\"pos\":9336,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-27\",\"total_order\":3,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097333,\"ts_us\":1787263097333162,\"ts_ns\":1787263097333162288}"
+            "{\"session_id\":\"tpcc/worker/1\",\"txn_id\":6}",
+            "{\"before\":null,\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":6},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-27\",\"file\":\"mariadb-bin.000002\",\"pos\":9336,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-27\",\"total_order\":3,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263097333,\"ts_us\":1787263097333162,\"ts_ns\":1787263097333162288}"
           ]
         ],
         [
@@ -960,21 +960,21 @@
           "1787263097349-16",
           [
             "{\"i_id\":1}",
-            "{\"before\":{\"i_id\":1,\"i_name\":\"ééé\",\"i_price\":\"999.99\",\"i_data\":\"商品\\uD83D\\uDE42\",\"i_im_id\":7},\"after\":{\"i_id\":1,\"i_name\":\"temporary\",\"i_price\":\"999.99\",\"i_data\":\"商品\\uD83D\\uDE42\",\"i_im_id\":7},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"item\",\"server_id\":1,\"gtid\":\"0-1-28\",\"file\":\"mariadb-bin.000002\",\"pos\":10036,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-28\",\"total_order\":1,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097334,\"ts_us\":1787263097334309,\"ts_ns\":1787263097334309354}"
+            "{\"before\":{\"i_id\":1,\"i_name\":\"ééé\",\"i_price\":\"999.99\",\"i_data\":\"商品🙂\",\"i_im_id\":7},\"after\":{\"i_id\":1,\"i_name\":\"temporary\",\"i_price\":\"999.99\",\"i_data\":\"商品🙂\",\"i_im_id\":7},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"item\",\"server_id\":1,\"gtid\":\"0-1-28\",\"file\":\"mariadb-bin.000002\",\"pos\":10036,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-28\",\"total_order\":1,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097334,\"ts_us\":1787263097334309,\"ts_ns\":1787263097334309354}"
           ]
         ],
         [
           "1787263097349-17",
           [
             "{\"i_id\":1}",
-            "{\"before\":{\"i_id\":1,\"i_name\":\"temporary\",\"i_price\":\"999.99\",\"i_data\":\"商品\\uD83D\\uDE42\",\"i_im_id\":7},\"after\":{\"i_id\":1,\"i_name\":\"ééé\",\"i_price\":\"999.99\",\"i_data\":\"商品\\uD83D\\uDE42\",\"i_im_id\":7},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"item\",\"server_id\":1,\"gtid\":\"0-1-28\",\"file\":\"mariadb-bin.000002\",\"pos\":10036,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-28\",\"total_order\":2,\"data_collection_order\":2},\"op\":\"u\",\"ts_ms\":1787263097335,\"ts_us\":1787263097335022,\"ts_ns\":1787263097335022835}"
+            "{\"before\":{\"i_id\":1,\"i_name\":\"temporary\",\"i_price\":\"999.99\",\"i_data\":\"商品🙂\",\"i_im_id\":7},\"after\":{\"i_id\":1,\"i_name\":\"ééé\",\"i_price\":\"999.99\",\"i_data\":\"商品🙂\",\"i_im_id\":7},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"item\",\"server_id\":1,\"gtid\":\"0-1-28\",\"file\":\"mariadb-bin.000002\",\"pos\":10036,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-28\",\"total_order\":2,\"data_collection_order\":2},\"op\":\"u\",\"ts_ms\":1787263097335,\"ts_us\":1787263097335022,\"ts_ns\":1787263097335022835}"
           ]
         ],
         [
           "1787263097363-0",
           [
-            "{\"session_id\":\"tpcc/worker/1\"}",
-            "{\"before\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":6},\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":7},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-28\",\"file\":\"mariadb-bin.000002\",\"pos\":10036,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-28\",\"total_order\":3,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097335,\"ts_us\":1787263097335592,\"ts_ns\":1787263097335592285}"
+            "{\"session_id\":\"tpcc/worker/1\",\"txn_id\":7}",
+            "{\"before\":null,\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":7},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-28\",\"file\":\"mariadb-bin.000002\",\"pos\":10036,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-28\",\"total_order\":3,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263097335,\"ts_us\":1787263097335592,\"ts_ns\":1787263097335592285}"
           ]
         ],
         [
@@ -1010,8 +1010,8 @@
         [
           "1787263097363-3",
           [
-            "{\"session_id\":\"tpcc/worker/1\"}",
-            "{\"before\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":7},\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":8},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-29\",\"file\":\"mariadb-bin.000002\",\"pos\":10690,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-29\",\"total_order\":1,\"data_collection_order\":1},\"op\":\"u\",\"ts_ms\":1787263097336,\"ts_us\":1787263097336588,\"ts_ns\":1787263097336588758}"
+            "{\"session_id\":\"tpcc/worker/1\",\"txn_id\":8}",
+            "{\"before\":null,\"after\":{\"session_id\":\"tpcc/worker/1\",\"txn_id\":8},\"source\":{\"version\":\"3.6.1.Final\",\"connector\":\"mariadb\",\"name\":\"mariadb-main\",\"ts_ms\":1787263097000,\"snapshot\":\"false\",\"db\":\"benchbase\",\"sequence\":null,\"ts_us\":1787263097000000,\"ts_ns\":1787263097000000000,\"table\":\"session_txn\",\"server_id\":1,\"gtid\":\"0-1-29\",\"file\":\"mariadb-bin.000002\",\"pos\":10690,\"row\":0,\"thread\":null,\"query\":null},\"transaction\":{\"id\":\"0-1-29\",\"total_order\":1,\"data_collection_order\":1},\"op\":\"c\",\"ts_ms\":1787263097336,\"ts_us\":1787263097336588,\"ts_ns\":1787263097336588758}"
           ]
         ],
         [

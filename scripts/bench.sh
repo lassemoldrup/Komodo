@@ -62,8 +62,8 @@ for key in range(1, 5):
         "INSERT INTO usertable (ycsb_key, field1) VALUES (%d,'a') "
         "ON DUPLICATE KEY UPDATE field1='a';" % key)
 initial.append(
-    "INSERT INTO session_txn (session_id, txn_id) VALUES ('%s', 1) "
-    "ON DUPLICATE KEY UPDATE txn_id=VALUES(txn_id); COMMIT;" % seed_session_id)
+    "INSERT INTO session_txn (session_id, txn_id) VALUES ('%s', 1); COMMIT;"
+    % seed_session_id)
 mariadb("\n".join(initial))
 
 stmts = []
@@ -71,8 +71,7 @@ for i in range(N):
     stmts.append(
         "START TRANSACTION; UPDATE usertable "
         "SET field1=IF(field1='a','b','a') WHERE ycsb_key=%d; "
-        "INSERT INTO session_txn (session_id, txn_id) VALUES ('%s', %d) "
-        "ON DUPLICATE KEY UPDATE txn_id=VALUES(txn_id); COMMIT;"
+        "INSERT INTO session_txn (session_id, txn_id) VALUES ('%s', %d); COMMIT;"
         % (i % 4 + 1, session_id, i + 1))
 stmts.append("SELECT ROUND(UNIX_TIMESTAMP(SYSDATE(3))*1000);")
 

@@ -6,8 +6,7 @@ INSERT INTO usertable (ycsb_key, field1)
 VALUES (:ycsb_key, :'field1');
 SELECT pg_sleep(:delay_seconds);
 INSERT INTO session_txn (session_id, txn_id)
-VALUES (:'session_id', :txn_id)
-ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+VALUES (:'session_id', :txn_id);
 COMMIT;
 \echo ACK :session_id :txn_id
 

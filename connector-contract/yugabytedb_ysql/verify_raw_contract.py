@@ -40,7 +40,7 @@ TABLES: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "session_txn": {
         "columns": ("session_id", "txn_id"),
-        "primary_key": ("session_id",),
+        "primary_key": ("session_id", "txn_id"),
     },
     "contract_account_a": {
         "columns": ("account_id", "payload"),
@@ -639,7 +639,7 @@ def validate_row(entry: dict[str, Any], row_number: int) -> dict[str, Any]:
 
 
 def validate_completed_frame(
-    frame: dict[str, Any], cdc_seq: int, marker_state: dict[str, int]
+    frame: dict[str, Any], cdc_seq: int, marker_identities: set[tuple[str, int]]
 ) -> dict[str, Any]:
     begin_entry = frame["begin"]
     end_entry = frame["end"]
@@ -690,25 +690,16 @@ def validate_completed_frame(
 
     marker = rows[-1]
     require(marker["table"] == "session_txn", "MARKER_NOT_LAST", f"frame {begin_entry['redis_id']} final row is not session_txn")
-    require(marker["row"]["op"] in {"c", "u"}, "MARKER_INVALID", "final marker is not an insert/update")
+    require(marker["row"]["op"] == "c", "MARKER_INVALID", "final marker is not an insert")
+    require(marker["before"] is None, "MARKER_INVALID", "marker insert has a before image")
     marker_after = marker["after"]
     assert marker_after is not None
     session_id = marker_after["session_id"]
     txn_id = marker_after["txn_id"]
     require(txn_id > 0, "MARKER_INVALID", "marker txn_id is not positive")
-    if marker["row"]["op"] == "c":
-        require(session_id not in marker_state, "MARKER_CHAIN_INVALID", f"duplicate marker insert for {session_id}")
-    else:
-        marker_before = marker["before"]
-        assert marker_before is not None
-        require(marker_before["session_id"] == session_id, "MARKER_CHAIN_INVALID", "marker session changed on update")
-        require(
-            marker_state.get(session_id) == marker_before["txn_id"],
-            "MARKER_CHAIN_INVALID",
-            f"marker before-image does not match prior value for {session_id}",
-        )
-        require(txn_id > marker_before["txn_id"], "MARKER_CHAIN_INVALID", "marker txn_id did not increase")
-    marker_state[session_id] = txn_id
+    identity = (session_id, txn_id)
+    require(identity not in marker_identities, "MARKER_DUPLICATE", "marker identity is reused")
+    marker_identities.add(identity)
 
     return {
         "frame_identity": begin_entry["redis_id"],
@@ -728,7 +719,7 @@ def verify_contract(capture_path: Path, plugin: str, redis_batch_size: int = 100
 
     completed: list[dict[str, Any]] = []
     active: dict[str, Any] | None = None
-    marker_state: dict[str, int] = {}
+    marker_identities: set[tuple[str, int]] = set()
     for entry in entries:
         value = entry["value"]
         status = value.get("status")
@@ -745,7 +736,7 @@ def verify_contract(capture_path: Path, plugin: str, redis_batch_size: int = 100
             else:
                 require(active is not None, "TRANSACTION_FRAMING_INVALID", f"END outside a frame at {entry['redis_id']}")
                 active["end"] = entry
-                completed.append(validate_completed_frame(active, len(completed), marker_state))
+                completed.append(validate_completed_frame(active, len(completed), marker_identities))
                 active = None
         else:
             require(active is not None, "TRANSACTION_FRAMING_INVALID", f"row outside a frame at {entry['redis_id']}")

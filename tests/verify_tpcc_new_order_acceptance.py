@@ -587,7 +587,6 @@ def validate_cdc_tail(
     require(current is None, "CDC tail ends inside a transaction")
 
     correlations: set[tuple[str, int]] = set()
-    marker_progress: dict[str, int] = {}
     end_fences = 0
     normalized_writes = 0
     repeated_transactions = 0
@@ -663,21 +662,17 @@ def validate_cdc_tail(
         marker_before = marker.get("before")
         require(
             isinstance(marker_after, dict)
-            and marker_key == {"session_id": marker_after.get("session_id")},
+            and marker.get("op") == "c"
+            and marker_before is None
+            and marker_key
+            == {
+                "session_id": marker_after.get("session_id"),
+                "txn_id": marker_after.get("txn_id"),
+            },
             f"{label} marker shape differs",
         )
         identity = (marker_after["session_id"], marker_after["txn_id"])
         require(identity in shapes and identity not in correlations, f"{label} marker/client identity differs")
-        previous = marker_progress.get(marker_after["session_id"])
-        if previous is None:
-            require(marker_before is None, f"{label} first marker has before image")
-        else:
-            require(
-                marker_before
-                == {"session_id": marker_after["session_id"], "txn_id": previous},
-                f"{label} marker before-image chain differs",
-            )
-        marker_progress[marker_after["session_id"]] = marker_after["txn_id"]
         correlations.add(identity)
         application_rows = [row for row in parsed_rows if row is not marker_rows[0]]
         write_count, repeated, remote = validate_workload_rows(

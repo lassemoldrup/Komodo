@@ -185,12 +185,10 @@ class TpccPaymentAcceptanceTest(unittest.TestCase):
             *rows,
             (
                 "session_txn",
-                {"session_id": SESSION_ID},
-                None
-                if previous_marker is None
-                else {"session_id": SESSION_ID, "txn_id": previous_marker},
                 {"session_id": SESSION_ID, "txn_id": sequence},
-                "c" if previous_marker is None else "u",
+                None,
+                {"session_id": SESSION_ID, "txn_id": sequence},
+                "c",
             ),
         ]
         entries = [

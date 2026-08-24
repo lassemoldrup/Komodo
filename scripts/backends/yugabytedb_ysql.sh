@@ -376,6 +376,11 @@ blackbox_backend_count_table() {
   blackbox_backend_database_query "SELECT COUNT(*) FROM benchbase.\"${BASH_REMATCH[1]}\""
 }
 
+blackbox_backend_marker_storage() {
+  blackbox_backend_database_query \
+    "SELECT COUNT(*), pg_total_relation_size('benchbase.session_txn') FROM benchbase.session_txn"
+}
+
 blackbox_backend_commit_fence() {
   local run_id=$1 phase=$2 nonce=$3
   blackbox_backend_database_query \

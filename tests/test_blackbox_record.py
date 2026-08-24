@@ -71,7 +71,7 @@ class BlackboxRecordTest(unittest.TestCase):
             },
             {
                 "name": "benchbase.session_txn",
-                "key_columns": ["session_id"],
+                "key_columns": ["session_id", "txn_id"],
                 "columns": [
                     {"name": "session_id", "sql_type": "VARCHAR(64)", "nullable": False, "character_set": "ascii", "collation": "ascii_bin"},
                     {"name": "txn_id", "sql_type": "BIGINT", "nullable": False},

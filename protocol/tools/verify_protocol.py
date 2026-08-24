@@ -77,10 +77,10 @@ TPCC_LIVE_FIXTURE_SHA256 = (
     "fa4f72247f42eb5062082a964b118acdbd54a99c991c7ae4aeda99bcc267bb82"
 )
 TPCC_TRANSACTION_FIXTURE_SHA256 = (
-    "1a527bbda98d921d24a7e4a1751be9602e27341f56f8f2fc995c0b97bd5322b7"
+    "517d3f63e8b3ca9e006bd518a68ca051b7b52c78272655dd29b490f4de249657"
 )
 TPCC_CLIENT_FIXTURE_SHA256 = (
-    "4089177ea3460074819ef1599147266dca115515df9c845c279832a17e5762d3"
+    "e515b82f6896a31fe1b7265c26b5bdcc0467962ded92f055e174883f1f1e6cad"
 )
 MARIADB_SQL_MODE = (
     "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,"
@@ -941,7 +941,7 @@ def normalized_attestation_tables(adapter: dict[str, Any]) -> list[dict[str, Any
             },
             {
                 "canonical_table_name": "benchbase.session_txn",
-                "primary_key_columns": ["session_id"],
+                "primary_key_columns": ["session_id", "txn_id"],
                 "columns": [
                     {"name": "session_id", "logical_sql_type": "VARCHAR(64)", "nullable": False},
                     {"name": "txn_id", "logical_sql_type": "BIGINT", "nullable": False},

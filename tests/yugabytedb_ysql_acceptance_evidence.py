@@ -96,7 +96,10 @@ def marker_identity(row: dict[str, Any]) -> tuple[str, int]:
         isinstance(source, dict)
         and source.get("schema") == "benchbase"
         and source.get("table") == "session_txn"
-        and isinstance(after, dict),
+        and row.get("op") == "c"
+        and row.get("before") is None
+        and isinstance(after, dict)
+        and set(after) == {"session_id", "txn_id"},
         "CDC marker row is malformed",
     )
     session_id = after.get("session_id")

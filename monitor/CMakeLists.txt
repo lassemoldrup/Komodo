@@ -197,7 +197,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mariadb_debezium_3_6_1_lifecycle.json
   )
   set_tests_properties(blackbox_cdc_transaction_fixture_checksum PROPERTIES
-    PASS_REGULAR_EXPRESSION "dc202702ce0c1d39aa945d38c4f772b5202335e36378ff59f8d8186505b81eeb"
+    PASS_REGULAR_EXPRESSION "aa27fb89de21508c404242f8234eb40fc432de1d3751035a59c3787b01896325"
   )
   add_test(
     NAME blackbox_cdc_full_lifecycle_fixture_checksum
@@ -206,7 +206,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   )
   set_tests_properties(blackbox_cdc_full_lifecycle_fixture_checksum PROPERTIES
     FIXTURES_SETUP captured_mariadb_full_lifecycle_fixture
-    PASS_REGULAR_EXPRESSION "6148236e8806c8fc6f3693a3390771a8e905ffbc603d403a3b1a858387b48185"
+    PASS_REGULAR_EXPRESSION "2b2a9f9dc25fc32467b72fee76c89ad80fff3cecc1449442527358b53b06d94a"
   )
   add_test(
     NAME blackbox_cdc_snapshot_schema_fixture_checksum
@@ -215,7 +215,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   )
   set_tests_properties(blackbox_cdc_snapshot_schema_fixture_checksum PROPERTIES
     FIXTURES_SETUP captured_mariadb_snapshot_schema_fixture
-    PASS_REGULAR_EXPRESSION "4be5e5dbb70beffd2acb558708e52482d348a0b0e19983dc34c4e775f38f1301"
+    PASS_REGULAR_EXPRESSION "24d1be95f4fb45811bf31d36dee325b4f3bc840471d732e37a9182aae0295306"
   )
   add_test(
     NAME blackbox_yugabytedb_raw_fixture_checksum
@@ -223,7 +223,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/yugabytedb_pgoutput_2_5_2_raw_cross_tablet.json
   )
   set_tests_properties(blackbox_yugabytedb_raw_fixture_checksum PROPERTIES
-    PASS_REGULAR_EXPRESSION "e60dcbf23cb7e97e7fc899a64fa1455c4ffdb8a5cd71551bf6db197448a43729"
+    PASS_REGULAR_EXPRESSION "7c3eecf40252fc12ef074445b3f5a1d7384b2a3db81e304589af23c5b5629579"
   )
   add_test(
     NAME blackbox_yugabytedb_lifecycle_fixture_checksum
@@ -231,7 +231,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/yugabytedb_pgoutput_2_5_2_lifecycle.json
   )
   set_tests_properties(blackbox_yugabytedb_lifecycle_fixture_checksum PROPERTIES
-    PASS_REGULAR_EXPRESSION "e6316f6e839bbb675f8f826f30739cc46f3122a77698666e616e8b9fffbcc7d0"
+    PASS_REGULAR_EXPRESSION "afd4da9f220ca46cd6a358bea7c4620773c272efccfaea5fe1bbcaae270b5735"
   )
   add_test(
     NAME blackbox_tpcc_typed_cdc_fixture_checksum
@@ -247,7 +247,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures/mariadb_tpcc_transactions.json
   )
   set_tests_properties(blackbox_tpcc_transaction_fixture_checksum PROPERTIES
-    PASS_REGULAR_EXPRESSION "1a527bbda98d921d24a7e4a1751be9602e27341f56f8f2fc995c0b97bd5322b7"
+    PASS_REGULAR_EXPRESSION "517d3f63e8b3ca9e006bd518a68ca051b7b52c78272655dd29b490f4de249657"
   )
   add_test(
     NAME blackbox_tpcc_client_fixture_checksum
@@ -255,7 +255,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures/mariadb_tpcc_client_txns.json
   )
   set_tests_properties(blackbox_tpcc_client_fixture_checksum PROPERTIES
-    PASS_REGULAR_EXPRESSION "4089177ea3460074819ef1599147266dca115515df9c845c279832a17e5762d3"
+    PASS_REGULAR_EXPRESSION "e515b82f6896a31fe1b7265c26b5bdcc0467962ded92f055e174883f1f1e6cad"
   )
   add_test(
     NAME blackbox_cdc_replay_snapshot_schema_fixture

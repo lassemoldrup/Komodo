@@ -50,9 +50,9 @@ BACKEND_PROFILES = {
         "source_id": "mariadb-main",
         "stable_connector_transaction_ids": True,
         # Exact recorded bootstrap-state bytes when the 256MiB limit trips on
-        # the deterministic one-warehouse loader; the boundary row differs per
-        # backend because CDC row batching differs, the canonical bytes do not.
-        "bootstrap_exhaustion_bytes": 268435104,
+        # the deterministic one-warehouse loader. The current reproducible
+        # loader replaced the earlier wall-clock timestamp corpus.
+        "bootstrap_exhaustion_bytes": 268435152,
     },
     "yugabytedb_ysql": {
         "source_id": "yugabytedb_ysql_main",

@@ -74,7 +74,7 @@
   "mariadb_image": "mariadb:12.3",
   "raw_transaction_fixture": {
     "path": "protocol/fixtures/mariadb_tpcc_transactions.json",
-    "sha256": "1a527bbda98d921d24a7e4a1751be9602e27341f56f8f2fc995c0b97bd5322b7"
+    "sha256": "517d3f63e8b3ca9e006bd518a68ca051b7b52c78272655dd29b490f4de249657"
   },
   "row_catalog": [
     {

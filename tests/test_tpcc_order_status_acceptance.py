@@ -269,8 +269,8 @@ class TpccOrderStatusAcceptanceTest(unittest.TestCase):
         marker_one = {"session_id": SESSION_ID, "txn_id": 1}
         marker_two = {"session_id": SESSION_ID, "txn_id": 2}
         cdc = [
-            *self.cdc_transaction(101, "0-1-1", "session_txn", {"session_id": SESSION_ID}, None, marker_one),
-            *self.cdc_transaction(102, "0-1-2", "session_txn", {"session_id": SESSION_ID}, marker_one, marker_two),
+            *self.cdc_transaction(101, "0-1-1", "session_txn", marker_one, None, marker_one),
+            *self.cdc_transaction(102, "0-1-2", "session_txn", marker_two, None, marker_two),
             *self.cdc_transaction(
                 103,
                 "0-1-3",

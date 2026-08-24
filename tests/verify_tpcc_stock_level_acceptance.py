@@ -150,7 +150,7 @@ def validate_marker_cdc(path: Path, run_id: str, load_id: str, correlations: set
         elif status == "END": require(current is not None, "END without BEGIN"); current.append(entry); transactions.append(current); current = None
         else: require(current is not None, "row outside transaction"); current.append(entry)
     require(current is None, "incomplete transaction")
-    markers, progress, fences = set(), {}, 0
+    markers, fences = set(), 0
     for index, transaction in enumerate(transactions):
         label = f"CDC transaction {index}"; begin, end = transaction[0][2], transaction[-1][2]
         rows, txid = transaction[1:-1], begin.get("id")
@@ -171,11 +171,11 @@ def validate_marker_cdc(path: Path, run_id: str, load_id: str, correlations: set
         require(table == "session_txn", f"{label} contains application/aggregate-derived CDC evidence")
         after, before = envelope.get("after"), envelope.get("before")
         identity = (after["session_id"], after["txn_id"])
-        require(key == {"session_id": after["session_id"]} and identity in correlations and identity not in markers, f"{label} marker identity")
-        previous = progress.get(after["session_id"])
-        require((previous is None and before is None)
-                or before == {"session_id": after["session_id"], "txn_id": previous}, f"{label} marker chain")
-        progress[after["session_id"]] = after["txn_id"]; markers.add(identity)
+        require(envelope.get("op") == "c" and before is None
+                and key == {"session_id": after["session_id"], "txn_id": after["txn_id"]}
+                and identity in correlations and identity not in markers,
+                f"{label} marker identity")
+        markers.add(identity)
     require(fences == 1 and markers == correlations, "CDC marker reconciliation differs")
     return {"transactions": len(transactions), "markers": len(markers), "end_fences": 1}
 

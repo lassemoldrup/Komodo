@@ -256,7 +256,7 @@ def common_table_contracts() -> list[dict[str, Any]]:
         },
         {
             "name": "benchbase.session_txn",
-            "key_columns": ["session_id"],
+            "key_columns": ["session_id", "txn_id"],
             "columns": [
                 {
                     "name": "session_id",

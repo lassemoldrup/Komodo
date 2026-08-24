@@ -7,8 +7,7 @@ SELECT pg_sleep(:start_delay_seconds);
 SELECT format(
     'BEGIN ISOLATION LEVEL REPEATABLE READ; '
     'INSERT INTO contract_account_%s (account_id, payload) VALUES (%s, %L); '
-    'INSERT INTO session_txn (session_id, txn_id) VALUES (%L, %s) '
-    'ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id; '
+    'INSERT INTO session_txn (session_id, txn_id) VALUES (%L, %s); '
     'COMMIT; SELECT %L;',
     chr(97 + ((value - 1) % 4)),
     50000 + value,

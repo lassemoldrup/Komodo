@@ -137,6 +137,15 @@ blackbox_backend_count_table() {
   blackbox_backend_database_query "SELECT COUNT(*) FROM \`${BASH_REMATCH[1]}\`"
 }
 
+blackbox_backend_marker_storage() {
+  blackbox_backend_database_query "
+    SELECT (SELECT COUNT(*) FROM session_txn),
+           COALESCE((SELECT DATA_LENGTH + INDEX_LENGTH
+                       FROM information_schema.TABLES
+                      WHERE TABLE_SCHEMA = 'benchbase'
+                        AND TABLE_NAME = 'session_txn'), 0)"
+}
+
 blackbox_backend_commit_fence() {
   local run_id=$1 phase=$2 nonce=$3
   blackbox_backend_database_query \

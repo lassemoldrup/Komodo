@@ -16,7 +16,7 @@
     },
     {
       "canonical_table_name": "benchbase.session_txn",
-      "primary_key_columns": ["session_id"],
+      "primary_key_columns": ["session_id", "txn_id"],
       "columns": [
         {"name": "session_id", "logical_sql_type": "VARCHAR(64)", "nullable": false},
         {"name": "txn_id", "logical_sql_type": "BIGINT", "nullable": false}
@@ -64,5 +64,5 @@
     {"name": "table_definition_sha256", "canonical_value": "3333333333333333333333333333333333333333333333333333333333333333"},
     {"name": "dedicated_privileges_sha256", "canonical_value": "4444444444444444444444444444444444444444444444444444444444444444"}
   ],
-  "canonical_attestation_digest": "dd3580ca7f1c748503b494af84069f0181cd83de55075e525f65a0e3b0f26661"
+  "canonical_attestation_digest": "e642243388b755b642b0118a3cf7a0e00d2997567565eb265cd768d9de058467"
 }

@@ -58,8 +58,7 @@ case "${1:-}" in
              SET injected_ddl_value = 1
            WHERE ycsb_key = 1;
           INSERT INTO benchbase.session_txn (session_id, txn_id)
-          VALUES ('ycsb/worker/1', 2)
-          ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+          VALUES ('ycsb/worker/1', 2);
           COMMIT;
         " >/dev/null
         ;;

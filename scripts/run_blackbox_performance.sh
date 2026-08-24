@@ -1516,7 +1516,7 @@ assert_no_transaction_markers() {
   record_command "$trial_dir/commands.txt" blackbox_backend_count_table \
     benchbase.session_txn
   local marker_rows
-  marker_rows=$(blackbox_database_query 'SELECT COUNT(*) FROM session_txn')
+  marker_rows=$(blackbox_backend_count_table benchbase.session_txn)
   marker_rows=${marker_rows//[[:space:]]/}
   [[ $marker_rows == 0 ]] ||
     die "uninstrumented mode wrote $marker_rows forbidden transaction marker row(s)"
@@ -1734,6 +1734,32 @@ document = {
     "available": available,
     "keys": keys,
     "total_bytes": sum(value for value in keys.values() if value is not None) if available else None,
+}
+
+
+capture_marker_storage() {
+  local trial_dir=$1 mode=$2 values row_count allocated_bytes
+  values=$(blackbox_backend_marker_storage) ||
+    die "could not capture append-only marker storage"
+  IFS=$'\t' read -r row_count allocated_bytes <<<"$values"
+  [[ $row_count =~ ^[0-9]+$ && $allocated_bytes =~ ^[0-9]+$ ]] ||
+    die "append-only marker storage has an invalid shape"
+  jq -n \
+    --arg contract append_only_per_committed_attempt \
+    --arg mode "$mode" \
+    --argjson workload_start_row_count 0 \
+    --argjson workload_end_row_count "$row_count" \
+    --argjson workload_end_allocated_bytes "$allocated_bytes" \
+    --argjson complete_run_end_row_count "$row_count" \
+    --argjson complete_run_end_allocated_bytes "$allocated_bytes" \
+    '{contract: $contract,
+      mode: $mode,
+      workload_start_row_count: $workload_start_row_count,
+      workload_end_row_count: $workload_end_row_count,
+      workload_end_allocated_bytes: $workload_end_allocated_bytes,
+      complete_run_end_row_count: $complete_run_end_row_count,
+      complete_run_end_allocated_bytes: $complete_run_end_allocated_bytes}' \
+    >"$trial_dir/marker_storage.json"
 }
 Path(sys.argv[1]).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -1977,6 +2003,7 @@ run_trial() {
 
   refresh_network_after "$trial_dir"
   capture_redis_streams "$stage" "$trial_dir" "$run_id"
+  capture_marker_storage "$trial_dir" "$stage"
   assert_output_size_within_limit
   analyze_trial "$stage" "$trial_dir" "$run_id"
   capture_stack_artifacts "$trial_dir"

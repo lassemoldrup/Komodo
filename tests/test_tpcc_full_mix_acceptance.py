@@ -44,12 +44,12 @@ class FullMixAcceptanceTest(unittest.TestCase):
                             json.dumps(value, separators=(",", ":"))]]
 
     def marker_transaction(self, prefix, session, txn_id, previous):
-        tx = f"{session}-{txn_id}"; before = None if previous is None else {"session_id": session, "txn_id": previous}
+        tx = f"{session}-{txn_id}"; before = None
         after = {"session_id": session, "txn_id": txn_id}
         return [self.raw(f"{prefix}-0", {"id": tx}, {"status": "BEGIN", "id": tx,
                 "event_count": None, "data_collections": None}),
-            self.raw(f"{prefix}-1", {"session_id": session},
-                {"before": before, "after": after, "op": "c" if previous is None else "u",
+            self.raw(f"{prefix}-1", {"session_id": session, "txn_id": txn_id},
+                {"before": before, "after": after, "op": "c",
                  "source": {"name": "mariadb-main", "db": "benchbase", "table": "session_txn"},
                  "transaction": {"id": tx, "total_order": 1, "data_collection_order": 1}}),
             self.raw(f"{prefix}-2", {"id": tx}, {"status": "END", "id": tx,
@@ -175,7 +175,7 @@ Unknown Status Transactions:
         resource = {"kind": "performance_measurement", "completed": False,
             "completion_status": "failed", "evidence_reconciled": False, "outcome": "INVALID",
             "diagnostics": [{"code": "RESOURCE_EXHAUSTED"}],
-            "joiner": {"bootstrap_state_bytes": 268435104, "bootstrap_state_validated": False}}
+            "joiner": {"bootstrap_state_bytes": 268435152, "bootstrap_state_validated": False}}
         paths["resource"] = root/"resource.json"; paths["resource"].write_text(json.dumps(resource))
         docs["config"]["resource_exhaustion_metrics"] = {
             "path": str(paths["resource"]),

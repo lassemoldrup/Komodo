@@ -40,8 +40,7 @@ case "$DB" in
     cat > "$TMP" <<SQL
 BEGIN;
 ${BODY}
-INSERT INTO session_txn (session_id, txn_id) VALUES ('${SESSION}', ${TXN_ID})
-  ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+INSERT INTO session_txn (session_id, txn_id) VALUES ('${SESSION}', ${TXN_ID});
 COMMIT;
 SQL
     OUT=$(db_run_file "$TMP" 2>&1)
@@ -55,8 +54,7 @@ SQL
     cat > "$TMP" <<SQL
 START TRANSACTION;
 ${BODY}
-INSERT INTO session_txn (session_id, txn_id) VALUES ('${SESSION}', ${TXN_ID})
-  ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+INSERT INTO session_txn (session_id, txn_id) VALUES ('${SESSION}', ${TXN_ID});
 COMMIT;
 SQL
     OUT=$(db_run_file "$TMP" 2>&1)
@@ -67,7 +65,6 @@ SQL
     ;;
 
   oracle)
-    # Oracle has no ON CONFLICT / ON DUPLICATE KEY; MERGE is the upsert.
     cat > "$TMP" <<SQL
 set heading off feedback off pagesize 0
 -- Without this, sqlplus carries on after an error and the trailing COMMIT
@@ -76,11 +73,8 @@ set heading off feedback off pagesize 0
 WHENEVER SQLERROR EXIT ROLLBACK
 WHENEVER OSERROR EXIT ROLLBACK
 ${BODY}
-MERGE INTO sitest.session_txn t
-  USING (SELECT '${SESSION}' AS session_id, ${TXN_ID} AS txn_id FROM DUAL) s
-  ON (t.session_id = s.session_id)
-  WHEN MATCHED THEN UPDATE SET t.txn_id = s.txn_id
-  WHEN NOT MATCHED THEN INSERT (session_id, txn_id) VALUES (s.session_id, s.txn_id);
+INSERT INTO sitest.session_txn (session_id, txn_id)
+VALUES ('${SESSION}', ${TXN_ID});
 COMMIT;
 exit
 SQL

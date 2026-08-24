@@ -831,8 +831,7 @@ main() {
            field6, field7, field8, field9, field10
       FROM usertable WHERE ycsb_key = 42;
     UPDATE usertable SET field1 = 'changed' WHERE ycsb_key = 42;
-    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 1)
-      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 1);
     COMMIT;
   " >/dev/null
   publish_client_txn ycsb/worker/1 1 1 mixed42
@@ -843,8 +842,7 @@ main() {
   blackbox_database_query "
     START TRANSACTION;
     UPDATE usertable SET field1 = 'not-written' WHERE ycsb_key = 2147483647;
-    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 2)
-      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 2);
     COMMIT;
   " >/dev/null
   publish_client_txn ycsb/worker/1 2 2
@@ -858,8 +856,7 @@ main() {
     UPDATE usertable SET field1 = 'second' WHERE ycsb_key = 100;
     UPDATE usertable SET field1 = 'first' WHERE ycsb_key = 100;
     DELETE FROM usertable WHERE ycsb_key = 100;
-    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 3)
-      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 3);
     COMMIT;
   " >/dev/null
   publish_client_txn ycsb/worker/1 3 3
@@ -869,8 +866,7 @@ main() {
     INSERT INTO usertable
       (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10)
     VALUES (7, 'original', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'tail');
-    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 4)
-      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 4);
     COMMIT;
   " >/dev/null
   publish_client_txn ycsb/worker/1 4 4
@@ -880,8 +876,7 @@ main() {
     START TRANSACTION;
     UPDATE usertable SET field1 = 'temporary' WHERE ycsb_key = 7;
     UPDATE usertable SET field1 = 'original' WHERE ycsb_key = 7;
-    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 5)
-      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 5);
     COMMIT;
   " >/dev/null
   publish_client_txn ycsb/worker/1 5 5
@@ -889,8 +884,7 @@ main() {
   blackbox_database_query "
     START TRANSACTION;
     DELETE FROM usertable WHERE ycsb_key = 7;
-    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 6)
-      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 6);
     COMMIT;
   " >/dev/null
   publish_client_txn ycsb/worker/1 6 6
@@ -899,8 +893,7 @@ main() {
   blackbox_database_query "
     START TRANSACTION;
     UPDATE usertable SET ycsb_key = -2 WHERE ycsb_key = -1;
-    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 7)
-      ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
+    INSERT INTO session_txn (session_id, txn_id) VALUES ('ycsb/worker/1', 7);
     COMMIT;
   " >/dev/null
   publish_client_txn ycsb/worker/1 7 7
@@ -947,7 +940,7 @@ main() {
   wait_prefix_exit 0
   jq -e '
     .completed_transactions == 11 and
-    .client_records_seen == 10 and
+    .client_records_seen == 11 and
     .xread_calls > .nonempty_xread_calls and
     .nonempty_xread_calls >= 3 and
     [.transactions[].cdc_seq] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] and
@@ -957,7 +950,11 @@ main() {
     [.transactions[3:10][].write_count] == [1, 0, 1, 1, 1, 1, 2] and
     .transactions[4].correlation_id.txn_id == 2 and
     .transactions[4].write_count == 0
-  ' "$INGEST_PATH" >/dev/null
+  ' "$INGEST_PATH" >/dev/null || {
+    printf 'CDC ingest diagnostics:\n' >&2
+    jq . "$INGEST_PATH" >&2
+    return 1
+  }
 
   jq -e '
     .completed_cdc_transactions == 11 and

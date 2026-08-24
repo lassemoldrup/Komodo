@@ -29,10 +29,6 @@ std::string_view toString(const CdcErrorCode code) noexcept {
     return "MARKER_MALFORMED";
   case CdcErrorCode::MarkerNotLast:
     return "MARKER_NOT_LAST";
-  case CdcErrorCode::MarkerBeforeImageMissing:
-    return "MARKER_BEFORE_IMAGE_MISSING";
-  case CdcErrorCode::MarkerChainMismatch:
-    return "MARKER_CHAIN_MISMATCH";
   case CdcErrorCode::MarkerDuplicate:
     return "MARKER_DUPLICATE";
   case CdcErrorCode::UnmarkedApplicationTransaction:

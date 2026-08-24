@@ -24,7 +24,7 @@ their golden tests in the same branch.
   `SELECT ... FOR UPDATE` are omitted completely. A true read-own-write result
   may be retained with `source=local`.
 - The result describes the execution with marker instrumentation enabled. The
-  marker adds one per-session physical write to every workload transaction.
+  marker appends one immutable physical row for every committed workload attempt.
 
 ## D1: All backends use the session marker
 
@@ -34,30 +34,29 @@ Use one backend-independent join identity:
 (run_id, session_id, txn_id)
 ```
 
-Each session owns one row in `session_txn`. Each physical attempt increments a
-session-local dense attempt counter starting at one; that counter is `txn_id`.
-The attempt writes it as the last statement before `commit()` and retains the
-same logical `session_seq` across retries. Consequently, the highest allocated
-`txn_id` equals `physical_attempts_started`, while committed marker IDs may have
-gaps caused by aborted attempts.
+Each committed physical attempt owns one immutable `(session_id, txn_id)` row in
+`session_txn`. Each physical attempt increments a session-local dense attempt
+counter starting at one; that counter is `txn_id`. The attempt inserts the row
+as the last statement before `commit()` and retains the same logical
+`session_seq` across retries. Consequently, the highest allocated `txn_id`
+equals `physical_attempts_started`, while committed marker IDs may have gaps
+caused by aborted attempts.
 
 The marker requirements are:
 
 - exactly one marker in every successful workload transaction;
 - no marker in a definitively aborted transaction;
 - marker is the final row event in the transaction;
-- first committed marker for a session has a null before-image;
-- every later marker's `before.txn_id` equals the previous committed marker's
-  `after.txn_id` for that session;
-- `txn_id` changes on every physical attempt, so a committed retry cannot become
-  a no-op marker update;
+- every marker is an `INSERT` with a null before-image, a complete after-image,
+  and identical `(session_id, txn_id)` key/after identity;
+- `txn_id` changes on every physical attempt, and the composite primary key
+  rejects a reused committed correlation identity;
 - every published record has `txn_id >= session_seq`, and the per-session
   retry surplus `txn_id - session_seq` never decreases;
 - marker/fence writes never enter the application write set.
 
-MariaDB uses `INSERT ... ON DUPLICATE KEY UPDATE`; YugabyteDB uses
-`INSERT ... ON CONFLICT DO UPDATE`; Oracle uses `MERGE`. Connector/server
-transaction identifiers are ignored for correlation.
+Every registered backend renders one ordinary `INSERT` through its marker-writer
+adapter. Connector/server transaction identifiers are ignored for correlation.
 
 Connector `id`, row `transaction.id`, server transaction fields, GTID, LSN,
 HybridTime, binlog coordinates, and similar positions are bounded per-record
@@ -70,9 +69,11 @@ the Redis stream ID of `BEGIN`, and it assigns `cdc_seq` only at completed
 `END`. The pinned source/version, live/non-snapshot flag, exact envelope shape,
 and configured table roster remain mandatory.
 
-Rationale: the same client/monitor contract works on every backend, every
-successful transaction is observable in CDC order, and the marker before-image
-provides an independent per-session loss check.
+Rationale: the same client/monitor contract works on every backend and every
+successful transaction is observable in CDC order. Completeness is established
+by unique correlation identities, exact client/CDC matching, session manifests
+and digests, lifecycle fences, and final reconciliation; `txn_id` never defines
+commit order.
 
 ## D2: Every successful transaction is published
 
@@ -267,6 +268,11 @@ mode membership enforces `PAD_CHAR_TO_FULL_LENGTH`; stored-column padding is
 proved later by a real MariaDB/JDBC codec fixture rather than an expression
 probe. Transaction/snapshot failures use `ISOLATION_MISMATCH`; all other
 connection/session failures use `SESSION_CONTRACT_MISMATCH`.
+
+After the generic attempt lifecycle has successfully rolled back and proved a
+definitive abort, the MariaDB adapter retries exact `ER_CHECKREAD` 1020 plus the
+pre-existing `1213/40001` deadlock and `1205/40001` lock-timeout forms. No other
+vendor code or SQLSTATE is admitted by that backend classifier.
 
 MariaDB initialization mounts the common marker/fence schema and exactly one
 adapter schema selected by the validated benchmark name. Before CDC starts, the

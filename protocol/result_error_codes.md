@@ -70,7 +70,7 @@ FINAL
 | `SESSION_DONE_MISMATCH` | Session counters/digest do not reconcile. |
 | `CLIENT_RECORD_AFTER_DONE` | A session publishes transaction evidence after `SessionDone`. |
 | `COMMIT_OUTCOME_AMBIGUOUS` | A commit call returned an unknown outcome. |
-| `MARKER_WRITE_FAILED` | The last-statement marker upsert failed; the attempt must roll back. |
+| `MARKER_WRITE_FAILED` | The last-statement marker insert failed; the attempt must roll back. |
 | `REDIS_PUBLICATION_FAILED` | A required client/status record was not acknowledged by Redis. |
 
 ### CDC evidence
@@ -86,10 +86,8 @@ FINAL
 | `CDC_DUPLICATE_CONFLICT` | A stable CDC identity is replayed with different content. |
 | `MARKER_MISSING` | A post-load workload transaction has no marker row event. |
 | `MARKER_MULTIPLE` | A workload transaction contains more than one marker event. |
-| `MARKER_MALFORMED` | Marker session/transaction fields are absent or out of range. |
+| `MARKER_MALFORMED` | The marker is not an INSERT with a null before-image, or its key/after session and transaction fields are absent, inconsistent, or out of range. |
 | `MARKER_NOT_LAST` | The marker is not the final row event in its CDC transaction. |
-| `MARKER_BEFORE_IMAGE_MISSING` | A marker update lacks the complete previous marker value. |
-| `MARKER_CHAIN_MISMATCH` | A marker before-image disagrees with the previous committed marker for that session. |
 | `MARKER_DUPLICATE` | A run/session/transaction marker identity is reused. |
 | `UNMARKED_APPLICATION_TRANSACTION` | A post-load application transaction commits without exactly one marker. |
 | `CDC_APPLICATION_AFTER_END` | An application commit appears after `END_FENCE`. |

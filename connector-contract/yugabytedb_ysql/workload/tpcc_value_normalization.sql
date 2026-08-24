@@ -60,7 +60,6 @@ INSERT INTO order_line (
     (1, 1, 3000, 2, 1, TIMESTAMPTZ '2026-01-02 03:04:05+00', 9999.99, 1, 10,
      'exactly-twenty-four-chr.');
 INSERT INTO session_txn (session_id, txn_id)
-VALUES ('tpcc/capture/1', 1)
-ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
+VALUES ('tpcc/capture/1', 1);
 COMMIT;
 \echo ACK tpcc_value_normalization 1

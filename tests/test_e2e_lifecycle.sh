@@ -108,6 +108,7 @@ METADATA
     printf 'PRIMARY\tbenchbase.checker_run_fence\trun_id\t1\n'
     printf 'PRIMARY\tbenchbase.checker_run_fence\tphase\t2\n'
     printf 'PRIMARY\tbenchbase.session_txn\tsession_id\t1\n'
+    printf 'PRIMARY\tbenchbase.session_txn\ttxn_id\t2\n'
     printf 'PRIMARY\tbenchbase.usertable\tycsb_key\t1\n'
     ;;
   *"COUNT(*) FROM "*"session_txn"*)
@@ -587,6 +588,7 @@ blackbox_backend_count_table() {
     *) printf '0\n' ;;
   esac
 }
+blackbox_backend_marker_storage() { printf '0\t0\n'; }
 blackbox_backend_commit_fence() {
   mock_driver_gate commit_fence || return 1
   printf 'fence:%s\n' "$2" >>"$EVENT_LOG"

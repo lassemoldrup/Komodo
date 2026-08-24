@@ -90,10 +90,10 @@ relies on it.
 ## Client protocol
 
 One protocol everywhere. The client mints its own `(session_id, txn_id)` and
-upserts it into its session's row in `session_txn` as the **last statement** of
-the transaction, so the marker travels inside that transaction's own change set
-and arrives after the workload writes. `session_txn` starts empty; sessions
-create their own row on first use.
+inserts one immutable row into `session_txn` as the **last statement** of the
+transaction, so the marker travels inside that transaction's own change set and
+arrives after the workload writes. `session_txn` starts empty; every committed
+physical attempt appends one row.
 
 For the black-box framework, `txn_id` is the dense session-local physical-attempt
 counter starting at one. A logical retry keeps its logical/session sequence but
@@ -102,54 +102,38 @@ gaps between committed marker IDs. The run-scoped join identity is
 `(run_id, session_id, txn_id)`; `run_id` comes from the one-active-run fenced
 lifecycle and is not stored in the marker row.
 
-No isolation statement is issued: all three backends default to Snapshot
-Isolation server-side. Only the upsert dialect differs.
+The selected registered backend adapter applies and verifies the admitted
+isolation/session contract. Its marker writer renders one ordinary `INSERT`.
 
 ```sql
 -- YugabyteDB
 BEGIN;
   -- reads and writes; client logs each read
 INSERT INTO session_txn (session_id, txn_id) VALUES ('<sid>', <counter>)
-  ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id;
 COMMIT;
 
 -- MariaDB
 START TRANSACTION;
   -- reads and writes; client logs each read
 INSERT INTO session_txn (session_id, txn_id) VALUES ('<sid>', <counter>)
-  ON DUPLICATE KEY UPDATE txn_id = VALUES(txn_id);
-COMMIT;
-
--- Oracle (no ON CONFLICT; MERGE is the upsert)
-  -- reads and writes; client logs each read
-MERGE INTO session_txn t
-  USING (SELECT '<sid>' AS session_id, <counter> AS txn_id FROM DUAL) s
-  ON (t.session_id = s.session_id)
-  WHEN MATCHED THEN UPDATE SET t.txn_id = s.txn_id
-  WHEN NOT MATCHED THEN INSERT (session_id, txn_id) VALUES (s.session_id, s.txn_id);
 COMMIT;
 ```
 
 The marker write and the workload writes must be **atomic**: a transaction that
-commits its workload without a marker is uncorrelatable. On Oracle this needs
-`WHENEVER SQLERROR EXIT ROLLBACK` — sqlplus otherwise continues past a failed
-marker and still runs `COMMIT`. `scripts/txn.sh` demonstrates the upsert dialect
-for all three; its timestamp default is not a valid
-framework allocator. BenchBase must use the dense per-session attempt counter
-defined above (manual concurrent tests should set `TXN_ID` explicitly).
-
-Because the before-image carries the previous `txn_id`, a per-session chain
-check comes for free: if `prev` is not the last `txn_id` you saw for that
-session, a transaction went missing.
+commits its workload without a marker is uncorrelatable. `scripts/txn.sh`
+demonstrates the append-only statement for registered backends; its timestamp
+default is not a valid framework allocator. BenchBase must use the dense
+per-session attempt counter defined above (manual concurrent tests should set
+`TXN_ID` explicitly).
 
 The monitor waits for the enclosing Debezium `END`, requires exactly one marker
-as the final row event of every post-load workload transaction, validates this
-before-image chain, and removes the marker row from the normalized application
-write set. A marker-only physical transaction is still joined and checked with
-zero application writes, so successful read-only/no-application-write workload
-transactions remain in scope.
+INSERT as the final row event of every post-load workload transaction, validates
+its null before-image and matching composite key/after identity, and removes the
+marker row from the normalized application write set. A marker-only physical
+transaction is still joined and checked with zero application writes, so
+successful read-only/no-application-write workload transactions remain in scope.
 
-Conflicts abort — `ER_CHECKREAD` (MariaDB), `could not serialize access`
+Conflicts abort — `ER_CHECKREAD`, deadlock, or lock timeout (MariaDB), `could not serialize access`
 (YugabyteDB), `ORA-08177` (Oracle) — so the client needs a retry path. Aborted
 transactions produce no stream events at all.
 

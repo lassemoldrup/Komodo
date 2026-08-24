@@ -2,7 +2,7 @@
 *.log
 # Connector-contract captures are generated local evidence bundles. Small
 # canonical fixtures already tracked by Git remain tracked.
-connector-contract/yugabytedb_ysql/fixtures/*/
+connector-contract/yugabytedb_ysql/fixtures/
 .DS_Store
 __pycache__/
 *.py[cod]

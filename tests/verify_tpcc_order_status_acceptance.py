@@ -406,7 +406,6 @@ def validate_cdc_tail(
 
     marker_correlations: set[tuple[str, int]] = set()
     end_fence_count = 0
-    marker_progress: dict[str, int] = {}
     for index, transaction in enumerate(transactions):
         begin = transaction[0][2]
         end = transaction[-1][2]
@@ -444,20 +443,14 @@ def validate_cdc_tail(
             require(
                 isinstance(after, dict)
                 and set(after) == {"session_id", "txn_id"}
-                and key == {"session_id": after["session_id"]},
+                and envelope.get("op") == "c"
+                and before is None
+                and key
+                == {"session_id": after["session_id"], "txn_id": after["txn_id"]},
                 f"CDC txn {index} marker shape differs",
             )
             correlation = (after["session_id"], after["txn_id"])
             require(correlation not in marker_correlations, f"CDC txn {index} duplicate marker")
-            previous = marker_progress.get(after["session_id"])
-            if previous is None:
-                require(before is None, f"CDC txn {index} first marker has before image")
-            else:
-                require(
-                    before == {"session_id": after["session_id"], "txn_id": previous},
-                    f"CDC txn {index} marker before-image chain differs",
-                )
-            marker_progress[after["session_id"]] = after["txn_id"]
             marker_correlations.add(correlation)
         elif table == "checker_run_fence":
             require(

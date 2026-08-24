@@ -4,9 +4,9 @@
 Shapes measured per connection (all against the production evidence schema):
   autocommit_update      single-statement UPDATE (single-shard fast path)
   explicit_update        BEGIN; UPDATE usertable; COMMIT
-  audited_update         BEGIN; UPDATE usertable; marker upsert; COMMIT
-  audited_read           BEGIN; SELECT usertable; marker upsert; COMMIT
-  marker_only            BEGIN; marker upsert; COMMIT
+  audited_update         BEGIN; UPDATE usertable; marker insert; COMMIT
+  audited_read           BEGIN; SELECT usertable; marker insert; COMMIT
+  marker_only            BEGIN; marker insert; COMMIT
 
 Each shape runs for a fixed duration on N concurrent connections and reports
 throughput plus latency percentiles, isolating the explicit-transaction cost,
@@ -24,7 +24,9 @@ import time
 import psycopg2
 
 
-def run_shape(dsn: str, shape: str, seconds: float, worker: int) -> list[float]:
+def run_shape(
+    dsn: str, shape: str, seconds: float, cohort: str, worker: int
+) -> list[float]:
     connection = psycopg2.connect(dsn)
     connection.autocommit = shape == "autocommit_update"
     cursor = connection.cursor()
@@ -32,7 +34,7 @@ def run_shape(dsn: str, shape: str, seconds: float, worker: int) -> list[float]:
     if not connection.autocommit:
         connection.commit()
     key = 1000 + worker
-    session = f"probe/worker/{worker}"
+    session = f"probe/{cohort}/worker/{worker}"
     latencies: list[float] = []
     deadline = time.monotonic() + seconds
     sequence = 0
@@ -57,8 +59,7 @@ def run_shape(dsn: str, shape: str, seconds: float, worker: int) -> list[float]:
                 cursor.fetchall()
             if shape in ("audited_update", "audited_read", "marker_only"):
                 cursor.execute(
-                    "INSERT INTO session_txn (session_id, txn_id) VALUES (%s, %s) "
-                    "ON CONFLICT (session_id) DO UPDATE SET txn_id = EXCLUDED.txn_id",
+                    "INSERT INTO session_txn (session_id, txn_id) VALUES (%s, %s)",
                     (session, sequence),
                 )
             connection.commit()
@@ -88,7 +89,14 @@ def main() -> int:
         for count in connection_counts:
             with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
                 futures = [
-                    pool.submit(run_shape, args.dsn, shape, args.seconds, worker)
+                    pool.submit(
+                        run_shape,
+                        args.dsn,
+                        shape,
+                        args.seconds,
+                        f"{shape}/{count}",
+                        worker,
+                    )
                     for worker in range(count)
                 ]
                 latencies = [

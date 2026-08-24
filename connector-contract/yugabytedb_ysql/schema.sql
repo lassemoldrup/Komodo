@@ -24,8 +24,9 @@ CREATE TABLE checker_run_fence (
 ) SPLIT INTO 1 TABLETS;
 
 CREATE TABLE session_txn (
-    session_id VARCHAR(64) PRIMARY KEY,
-    txn_id BIGINT NOT NULL
+    session_id VARCHAR(64) NOT NULL,
+    txn_id BIGINT NOT NULL,
+    PRIMARY KEY (session_id, txn_id)
 ) SPLIT INTO 1 TABLETS;
 
 -- Contract-only tables used to prove cross-table and four-tablet ordering.

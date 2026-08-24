@@ -279,9 +279,13 @@ def validate_cdc_tail(path: Path, run_id: str, load_id: str, correlations: dict,
                     and fence_rows[0][2]["after"].get("phase") == "END_FENCE", "END_FENCE differs")
             fences += 1; continue
         require(len(marker_rows) == 1 and rows[-1] is marker_rows[0], f"{label} marker absent/not final")
-        after = marker_rows[0][2].get("after")
+        marker_key, marker = marker_rows[0][1], marker_rows[0][2]
+        after, before = marker.get("after"), marker.get("before")
         identity = (after["session_id"], after["txn_id"])
-        require(identity in correlations and identity not in markers, f"{label} marker/client identity")
+        require(marker.get("op") == "c" and before is None
+                and marker_key == {"session_id": after["session_id"], "txn_id": after["txn_id"]}
+                and identity in correlations and identity not in markers,
+                f"{label} marker/client identity")
         markers.add(identity); by_type[correlations[identity]] += 1
     require(fences == 1 and markers == set(correlations), "CDC marker reconciliation differs")
     return {"transactions": len(transactions), "markers": len(markers),

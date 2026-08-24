@@ -115,9 +115,9 @@ class TpccDeliveryAcceptanceTest(unittest.TestCase):
         return rows
 
     def transaction(self, prefix, txid, session, marker_id, previous, app_rows):
-        all_rows = [*app_rows, ("session_txn", {"session_id": session},
-                    None if previous is None else {"session_id": session, "txn_id": previous},
-                    {"session_id": session, "txn_id": marker_id}, "c" if previous is None else "u")]
+        all_rows = [*app_rows, ("session_txn",
+                    {"session_id": session, "txn_id": marker_id}, None,
+                    {"session_id": session, "txn_id": marker_id}, "c")]
         result = [self.raw(f"{prefix}-0", {"id": txid},
                            {"status": "BEGIN", "id": txid, "event_count": None,
                             "data_collections": None})]

@@ -287,12 +287,10 @@ class TpccNewOrderAcceptanceTest(unittest.TestCase):
             *application_rows,
             (
                 "session_txn",
-                {"session_id": SESSION_ID},
-                None
-                if previous_txn_id is None
-                else {"session_id": SESSION_ID, "txn_id": previous_txn_id},
                 {"session_id": SESSION_ID, "txn_id": txn_id},
-                "c" if previous_txn_id is None else "u",
+                None,
+                {"session_id": SESSION_ID, "txn_id": txn_id},
+                "c",
             ),
         ]
         entries = [
@@ -714,6 +712,9 @@ Unknown Status Transactions:
         )
         marker = json.loads(marker_entry[1][1])
         marker["after"]["txn_id"] = 3
+        marker_key = json.loads(marker_entry[1][0])
+        marker_key["txn_id"] = 3
+        marker_entry[1][0] = json.dumps(marker_key, separators=(",", ":"))
         marker_entry[1][1] = json.dumps(marker, separators=(",", ":"))
         with self.assertRaisesRegex(ACCEPTANCE.AcceptanceError, "new-attempt marker identity"):
             self.validate(documents)

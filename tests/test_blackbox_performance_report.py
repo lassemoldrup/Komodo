@@ -301,6 +301,20 @@ class ReportTest(unittest.TestCase):
         (trial / "loader_validation.json").write_text(
             json.dumps(loader_validation), encoding="utf-8"
         )
+        (trial / "marker_storage.json").write_text(
+            json.dumps(
+                {
+                    "contract": "append_only_per_committed_attempt",
+                    "mode": mode,
+                    "workload_start_row_count": 0,
+                    "workload_end_row_count": 120 if full else 0,
+                    "workload_end_allocated_bytes": 32768 if full else 16384,
+                    "complete_run_end_row_count": 120 if full else 0,
+                    "complete_run_end_allocated_bytes": 32768 if full else 16384,
+                }
+            ),
+            encoding="utf-8",
+        )
 
         analysis_window: dict[str, object] = {
             "client_measurement_window": {
@@ -776,6 +790,32 @@ class ReportTest(unittest.TestCase):
             document["cdc_control_row_count"] = 0
             path.write_text(json.dumps(document), encoding="utf-8")
             with self.assertRaisesRegex(report.ReportError, "does not reconcile"):
+                report.trial_row(trial)
+
+    def test_append_only_marker_storage_is_required_and_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            trial = self.write_trial(
+                Path(directory_name), "full_e2e", 1, roster=("full_e2e",)
+            )
+            self.mutate_json(
+                trial / "marker_storage.json",
+                lambda value: value.__setitem__("complete_run_end_row_count", 119),
+            )
+            with self.assertRaisesRegex(report.ReportError, "marker row count"):
+                report.trial_row(trial)
+
+        with tempfile.TemporaryDirectory() as directory_name:
+            trial = self.write_trial(
+                Path(directory_name),
+                "benchbase_uninstrumented",
+                1,
+                roster=("benchbase_uninstrumented",),
+            )
+            self.mutate_json(
+                trial / "marker_storage.json",
+                lambda value: value.__setitem__("complete_run_end_row_count", 1),
+            )
+            with self.assertRaisesRegex(report.ReportError, "uninstrumented mode"):
                 report.trial_row(trial)
 
     def test_exact_component_and_final_boundaries_are_extracted_and_checked(self) -> None:

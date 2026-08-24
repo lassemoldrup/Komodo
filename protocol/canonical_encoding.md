@@ -171,8 +171,9 @@ trimmed `CHAR`, nullable present/NULL, timestamps, decimals, UTF-8, and the empt
 `new_order` value. Its encoded bytes must match the executable goldens' codec.
 
 `protocol/fixtures/mariadb_tpcc_transactions.json` pins the raw startup-schema
-prefix and 12 BEGIN/row/END transactions covering bootstrap, fences, two
-marker-only workload transactions, Payment/NewOrder/Delivery write shapes,
+prefix and 12 BEGIN/row/END transactions covering bootstrap, fences,
+append-only markers including two marker-only workload transactions,
+Payment/NewOrder/Delivery write shapes,
 primary-key changes,
 insert-then-delete, and net-no-change writes. The protocol verifier independently
 parses and normalizes those raw envelopes before comparing their expected
