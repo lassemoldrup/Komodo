@@ -347,7 +347,7 @@ def validate_delivery_rows(label: str, shape: dict, rows: list, codec: TpccCodec
 
 
 def validate_cdc_tail(path: Path, run_id: str, load_id: str, shapes: dict, codec: TpccCodec,
-                      source_id: str):
+                      profile: dict):
     entries = common.raw_cdc_records(path)
     require(entries and common.parse_stream_id(entries[0][0], "CDC first")
             > common.parse_stream_id(load_id, "LOAD cursor"), "CDC tail boundary differs")
@@ -369,13 +369,15 @@ def validate_cdc_tail(path: Path, run_id: str, load_id: str, shapes: dict, codec
         begin, end, rows = transaction[0][2], transaction[-1][2], transaction[1:-1]
         txid = begin.get("id")
         require(begin.get("status") == "BEGIN" and end.get("status") == "END"
-                and end.get("id") == txid and end.get("event_count") == len(rows), f"{label} framing")
+                and end.get("event_count") == len(rows), f"{label} framing")
+        common.require_connector_transaction_id(end.get("id"), txid, profile, f"{label} END")
         counts, orders, parsed = Counter(), Counter(), []
         for total, (_, key, envelope) in enumerate(rows, 1):
             source, meta = envelope.get("source"), envelope.get("transaction")
-            require(isinstance(source, dict) and source.get("name") == source_id
+            require(isinstance(source, dict) and source.get("name") == profile["source_id"]
                     and source.get("db") == "benchbase" and isinstance(meta, dict)
-                    and meta.get("id") == txid and meta.get("total_order") == total, f"{label} metadata")
+                    and meta.get("total_order") == total, f"{label} metadata")
+            common.require_connector_transaction_id(meta.get("id"), txid, profile, f"{label} row")
             collection = f"benchbase.{source['table']}"; counts[collection] += 1; orders[collection] += 1
             require(meta.get("data_collection_order") == orders[collection], f"{label} collection order")
             parsed.append((key, envelope))
@@ -428,7 +430,7 @@ def validate_acceptance(config_path: Path, run_id_path: Path, client_path: Path,
     status_records = [record for _, record in common.payload_records(status_path, "status stream")]
     load_status = common.one_status(status_records, "LOAD_FINISHED_SEEN")
     cdc = validate_cdc_tail(cdc_path, run_id, load_status["last_cdc_stream_id"], shapes, codec,
-                            common.expected_source_id(config))
+                            common.backend_profile(config))
     require(cdc["markers"] == len(clients), "marker/client count differs")
     require(cdc["multi_line_districts"] >= config["minimum_multi_line_districts"], "multi-line lacks proof")
     metrics = common.load_json(monitor_path, "monitor metrics")

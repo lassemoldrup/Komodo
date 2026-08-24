@@ -250,7 +250,8 @@ def benchbase_mix_outcomes(path: Path, per_type: dict[str, int], attempts: dict[
     }
 
 
-def validate_cdc_tail(path: Path, run_id: str, load_id: str, correlations: dict):
+def validate_cdc_tail(path: Path, run_id: str, load_id: str, correlations: dict,
+                      profile: dict):
     entries = common.raw_cdc_records(path)
     require(entries and common.parse_stream_id(entries[0][0], "CDC first")
             > common.parse_stream_id(load_id, "LOAD cursor"), "CDC tail boundary differs")
@@ -265,7 +266,8 @@ def validate_cdc_tail(path: Path, run_id: str, load_id: str, correlations: dict)
     for index, transaction in enumerate(transactions):
         label = f"CDC transaction {index}"; begin, end = transaction[0][2], transaction[-1][2]
         rows, txid = transaction[1:-1], begin.get("id")
-        require(end.get("id") == txid and end.get("event_count") == len(rows), f"{label} framing")
+        common.require_connector_transaction_id(end.get("id"), txid, profile, f"{label} END")
+        require(end.get("event_count") == len(rows), f"{label} framing")
         marker_rows = [entry for entry in rows if entry[2].get("source", {}).get("table") == "session_txn"]
         fence_rows = [entry for entry in rows if entry[2].get("source", {}).get("table") == "checker_run_fence"]
         if fence_rows:
@@ -360,7 +362,8 @@ def validate_acceptance(config_path: Path, run_path: Path, client_path: Path,
             "loader/bootstrap all-nine counts differ")
     statuses = [row for _, row in common.payload_records(status_path, "status stream")]
     load = common.one_status(statuses, "LOAD_FINISHED_SEEN")
-    cdc = validate_cdc_tail(cdc_tail_path, run_id, load["last_cdc_stream_id"], correlations)
+    cdc = validate_cdc_tail(cdc_tail_path, run_id, load["last_cdc_stream_id"], correlations,
+                            common.backend_profile(config))
     require(cdc["markers_by_type"] == per_type, "per-type marker/join counts differ")
     reads = sum(row["read_count"] for row in clients)
     final = validate_terminal(config, run_id, statuses, common.load_json(monitor_path, "monitor metrics"), len(clients), reads)

@@ -378,7 +378,7 @@ def validate_cdc_tail(
     run_id: str,
     load_finished_stream_id: str,
     client_correlations: set[tuple[str, int]],
-    source_id: str,
+    profile: dict[str, Any],
 ) -> dict[str, int]:
     entries = common.raw_cdc_records(path)
     require(entries, "CDC tail is empty")
@@ -413,21 +413,24 @@ def validate_cdc_tail(
         rows = transaction[1:-1]
         transaction_id = begin.get("id")
         require(begin.get("status") == "BEGIN" and isinstance(transaction_id, str), f"CDC txn {index} BEGIN")
-        require(end.get("status") == "END" and end.get("id") == transaction_id, f"CDC txn {index} END")
+        require(end.get("status") == "END", f"CDC txn {index} END")
+        common.require_connector_transaction_id(
+            end.get("id"), transaction_id, profile, f"CDC txn {index} END")
         require(end.get("event_count") == len(rows) == 1, f"CDC txn {index} is not one-row marker/control")
         _, key, envelope = rows[0]
         source = envelope.get("source")
         metadata = envelope.get("transaction")
         require(
             isinstance(source, dict)
-            and source.get("name") == source_id
+            and source.get("name") == profile["source_id"]
             and source.get("db") == "benchbase"
             and isinstance(metadata, dict)
-            and metadata.get("id") == transaction_id
             and metadata.get("total_order") == 1
             and metadata.get("data_collection_order") == 1,
             f"CDC txn {index} row metadata differs",
         )
+        common.require_connector_transaction_id(
+            metadata.get("id"), transaction_id, profile, f"CDC txn {index} row")
         table = source.get("table")
         expected_collection = f"benchbase.{table}"
         require(
@@ -542,7 +545,7 @@ def validate_acceptance(
         for client in clients
     }
     cdc = validate_cdc_tail(cdc_path, run_id, load_finished_cdc_id, correlations,
-                            common.expected_source_id(config))
+                            common.backend_profile(config))
     require(cdc["markers"] == len(clients), "marker count differs from successful clients")
     return {
         "kind": "tpcc_order_status_acceptance",

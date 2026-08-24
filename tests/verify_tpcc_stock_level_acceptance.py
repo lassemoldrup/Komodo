@@ -138,7 +138,8 @@ def decode_clients(config: dict, run_id: str, records: list, decoder: common.Can
     return clients, correlations
 
 
-def validate_marker_cdc(path: Path, run_id: str, load_id: str, correlations: set, source_id: str):
+def validate_marker_cdc(path: Path, run_id: str, load_id: str, correlations: set,
+                        profile: dict):
     entries = common.raw_cdc_records(path)
     require(entries and common.parse_stream_id(entries[0][0], "CDC first")
             > common.parse_stream_id(load_id, "LOAD cursor"), "CDC tail boundary")
@@ -153,12 +154,14 @@ def validate_marker_cdc(path: Path, run_id: str, load_id: str, correlations: set
     for index, transaction in enumerate(transactions):
         label = f"CDC transaction {index}"; begin, end = transaction[0][2], transaction[-1][2]
         rows, txid = transaction[1:-1], begin.get("id")
-        require(end.get("id") == txid and end.get("event_count") == len(rows) == 1, f"{label} framing/count")
+        common.require_connector_transaction_id(end.get("id"), txid, profile, f"{label} END")
+        require(end.get("event_count") == len(rows) == 1, f"{label} framing/count")
         _, key, envelope = rows[0]; source, meta = envelope.get("source"), envelope.get("transaction")
-        require(isinstance(source, dict) and source.get("name") == source_id
+        require(isinstance(source, dict) and source.get("name") == profile["source_id"]
                 and source.get("db") == "benchbase" and isinstance(meta, dict)
-                and meta.get("id") == txid and meta.get("total_order") == 1
+                and meta.get("total_order") == 1
                 and meta.get("data_collection_order") == 1, f"{label} metadata")
+        common.require_connector_transaction_id(meta.get("id"), txid, profile, f"{label} row")
         table = source.get("table")
         require(end.get("data_collections") == [{"data_collection": f"benchbase.{table}", "event_count": 1}], f"{label} collection")
         if table == "checker_run_fence":
@@ -190,7 +193,7 @@ def validate_acceptance(config_path: Path, run_path: Path, client_path: Path,
     statuses = [row for _, row in common.payload_records(status_path, "status stream")]
     load = common.one_status(statuses, "LOAD_FINISHED_SEEN")
     cdc = validate_marker_cdc(cdc_path, run_id, load["last_cdc_stream_id"], correlations,
-                              common.expected_source_id(config))
+                              common.backend_profile(config))
     final, _ = common.validate_audited_status_and_metrics(
         config, run_id, statuses, common.load_json(monitor_path, "monitor metrics"),
         len(clients), len(clients), marker_only_count=len(clients), write_count=0)

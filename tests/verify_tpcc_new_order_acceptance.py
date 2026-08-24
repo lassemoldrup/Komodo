@@ -511,7 +511,7 @@ def validate_cdc_tail(
     run_id: str,
     load_finished_stream_id: str,
     shapes: dict[tuple[str, int], dict[str, Any]],
-    source_id: str,
+    profile: dict[str, Any],
 ) -> dict[str, int]:
     entries = common.raw_cdc_records(path)
     require(entries, "CDC tail is empty")
@@ -549,7 +549,9 @@ def validate_cdc_tail(
         rows = transaction[1:-1]
         transaction_id = begin.get("id")
         require(begin.get("status") == "BEGIN" and isinstance(transaction_id, str), f"{label} BEGIN")
-        require(end.get("status") == "END" and end.get("id") == transaction_id, f"{label} END")
+        require(end.get("status") == "END", f"{label} END")
+        common.require_connector_transaction_id(
+            end.get("id"), transaction_id, profile, f"{label} END")
         require(end.get("event_count") == len(rows), f"{label} END event_count differs")
         collection_counts: Counter[str] = Counter()
         collection_orders: Counter[str] = Counter()
@@ -559,14 +561,15 @@ def validate_cdc_tail(
             metadata = envelope.get("transaction")
             require(
                 isinstance(source, dict)
-                and source.get("name") == source_id
+                and source.get("name") == profile["source_id"]
                 and source.get("db") == "benchbase"
                 and isinstance(source.get("table"), str)
                 and isinstance(metadata, dict)
-                and metadata.get("id") == transaction_id
                 and metadata.get("total_order") == total_order,
                 f"{label} row metadata differs",
             )
+            common.require_connector_transaction_id(
+                metadata.get("id"), transaction_id, profile, f"{label} row")
             collection = f"benchbase.{source['table']}"
             collection_counts[collection] += 1
             collection_orders[collection] += 1
@@ -701,7 +704,7 @@ def validate_acceptance(
     load_status = common.one_status(status_records, "LOAD_FINISHED_SEEN")
     cdc = validate_cdc_tail(
         cdc_path, run_id, load_status["last_cdc_stream_id"], shapes,
-        common.expected_source_id(config),
+        common.backend_profile(config),
     )
     require(cdc["markers"] == len(clients), "marker count differs from successful clients")
     require(

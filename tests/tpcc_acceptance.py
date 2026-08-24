@@ -40,12 +40,23 @@ EXPECTED_TABLES = [
     "benchbase.new_order",
     "benchbase.order_line",
 ]
-# Registered acceptance backends mapped to their pinned connector source IDs.
+# Registered acceptance backends mapped to their pinned connector contracts.
 # Selection is data-driven from the run configuration; validators never branch
-# on a backend name.
+# on a backend name. MariaDB's connector repeats one transaction ID on BEGIN,
+# rows, and END; the pinned YugabyteDB connector intentionally emits a
+# different composite ID on every record, so IDs are only bounded diagnostics.
+BACKEND_PROFILES = {
+    "mariadb": {
+        "source_id": "mariadb-main",
+        "stable_connector_transaction_ids": True,
+    },
+    "yugabytedb_ysql": {
+        "source_id": "yugabytedb_ysql_main",
+        "stable_connector_transaction_ids": False,
+    },
+}
 BACKEND_SOURCE_IDS = {
-    "mariadb": "mariadb-main",
-    "yugabytedb_ysql": "yugabytedb_ysql_main",
+    name: profile["source_id"] for name, profile in BACKEND_PROFILES.items()
 }
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 BENCHBASE_SECTIONS = (
@@ -71,13 +82,29 @@ def require(condition: bool, message: str) -> None:
         raise AcceptanceError(message)
 
 
-def expected_source_id(config: dict[str, Any]) -> str:
+def backend_profile(config: dict[str, Any]) -> dict[str, Any]:
     backend = config.get("backend")
     require(
-        isinstance(backend, str) and backend in BACKEND_SOURCE_IDS,
+        isinstance(backend, str) and backend in BACKEND_PROFILES,
         "config backend is not a registered acceptance backend",
     )
-    return BACKEND_SOURCE_IDS[backend]
+    return BACKEND_PROFILES[backend]
+
+
+def expected_source_id(config: dict[str, Any]) -> str:
+    return backend_profile(config)["source_id"]
+
+
+def require_connector_transaction_id(
+    actual: Any, expected: Any, profile: dict[str, Any], label: str
+) -> None:
+    if profile["stable_connector_transaction_ids"]:
+        require(actual == expected, f"{label} connector transaction ID differs")
+    else:
+        require(
+            isinstance(actual, str) and 0 < len(actual) <= 512,
+            f"{label} connector transaction ID is not a bounded diagnostic",
+        )
 
 
 def strict_json(text: str, label: str) -> Any:
