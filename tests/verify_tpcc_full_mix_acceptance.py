@@ -76,7 +76,9 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def validate_resource_exhaustion(reference: dict[str, Any]) -> dict[str, Any]:
+def validate_resource_exhaustion(
+    reference: dict[str, Any], profile: dict[str, Any]
+) -> dict[str, Any]:
     path = Path(reference["path"])
     require(path.is_file(), "resource-exhaustion metrics path is missing")
     require(sha256_file(path) == reference["sha256"], "resource-exhaustion checksum differs")
@@ -90,14 +92,15 @@ def validate_resource_exhaustion(reference: dict[str, Any]) -> dict[str, Any]:
         and any(item.get("code") == "RESOURCE_EXHAUSTED" for item in metrics.get("diagnostics", [])),
         "recorded resource-exhaustion outcome differs",
     )
+    exhaustion_bytes = profile["bootstrap_exhaustion_bytes"]
     require(
-        metrics.get("joiner", {}).get("bootstrap_state_bytes") == 268435104
+        metrics.get("joiner", {}).get("bootstrap_state_bytes") == exhaustion_bytes
         and metrics.get("joiner", {}).get("bootstrap_state_validated") is False,
         "recorded 256MiB bootstrap exhaustion boundary differs",
     )
     return {"path": str(path), "sha256": reference["sha256"],
             "outcome": "INVALID", "diagnostic": "RESOURCE_EXHAUSTED",
-            "bootstrap_state_bytes": 268435104, "limit_bytes": 268435456}
+            "bootstrap_state_bytes": exhaustion_bytes, "limit_bytes": 268435456}
 
 
 def validate_replay_manifest(path: Path, config: dict[str, Any], run_id: str) -> dict[str, Any]:
@@ -350,7 +353,8 @@ def validate_acceptance(config_path: Path, run_path: Path, client_path: Path,
                         benchbase_log: Path, loader_path: Path, replay_path: Path):
     config = load_config(config_path); run_id = run_path.read_text(encoding="ascii").strip()
     require(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", run_id) is not None, "run ID")
-    resource = validate_resource_exhaustion(config["resource_exhaustion_metrics"])
+    resource = validate_resource_exhaustion(
+        config["resource_exhaustion_metrics"], common.backend_profile(config))
     replay = validate_replay_manifest(replay_path, config, run_id)
     records = [row for _, row in common.payload_records(client_path, "client stream")]
     clients, correlations, per_type, attempts = decode_client_evidence(config, run_id, records)
