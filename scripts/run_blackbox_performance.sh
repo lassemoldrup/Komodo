@@ -1576,7 +1576,7 @@ run_full_e2e() {
     "BLACKBOX_WORKLOAD_COMMAND=$workload_command" \
     "BLACKBOX_EXPECTED_SESSION_IDS=$session_roster" \
     "BLACKBOX_BENCHMARK=$BENCHMARK" \
-    "BLACKBOX_LOADER_SCALE_VALUE=$SCALE_FACTOR" \
+    "BLACKBOX_LOADER_SCALE_VALUE=$BLACKBOX_LOADER_SCALE_VALUE" \
     BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
     BLACKBOX_MEASUREMENT_MODE=audited \
     "BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES=$REDIS_MAXMEMORY_BYTES" \
@@ -1618,7 +1618,7 @@ run_full_e2e() {
   BLACKBOX_WORKLOAD_COMMAND="$workload_command" \
   BLACKBOX_EXPECTED_SESSION_IDS="$session_roster" \
   BLACKBOX_BENCHMARK="$BENCHMARK" \
-  BLACKBOX_LOADER_SCALE_VALUE="$SCALE_FACTOR" \
+  BLACKBOX_LOADER_SCALE_VALUE="$BLACKBOX_LOADER_SCALE_VALUE" \
   BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
   BLACKBOX_MEASUREMENT_MODE=audited \
   BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES" \
@@ -2059,7 +2059,16 @@ main() {
   export BLACKBOX_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY_BYTES"
   export BLACKBOX_LOADER_BATCH_SIZE="$LOADER_BATCH_SIZE"
   export BLACKBOX_BENCHMARK="$BENCHMARK"
-  export BLACKBOX_LOADER_SCALE_VALUE="$SCALE_FACTOR"
+  # Only adapters that declare a loader scale parameter accept one; YCSB
+  # drives its cardinality from record_count configuration instead.
+  local loader_scale_name
+  loader_scale_name=$(jq -r '.loader.scale_parameter.name // empty' \
+    "$ROOT/protocol/adapters/${BENCHMARK}.json")
+  if [[ -n $loader_scale_name ]]; then
+    export BLACKBOX_LOADER_SCALE_VALUE="$SCALE_FACTOR"
+  else
+    export BLACKBOX_LOADER_SCALE_VALUE=""
+  fi
   verify_canonical_container
   verify_inputs
   if (( VERIFY_INPUTS_ONLY == 1 )); then
