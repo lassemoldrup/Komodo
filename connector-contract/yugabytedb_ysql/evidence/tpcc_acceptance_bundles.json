@@ -1,0 +1,17 @@
+{
+  "kind": "yugabytedb_ysql_tpcc_acceptance_bundle_index",
+  "platform": "linux/amd64",
+  "bundles": [
+    {
+      "purpose": "tpcc_value_normalization",
+      "bundle_path": "fixtures/pgoutput_tpcc_value_normalization_gate",
+      "archive_path": "evidence/archives/tpcc_value_normalization.tar.gz",
+      "archive_sha256": "eb0a9ec9fb5f0a4138b51bf92a7f41d8149eb60f57782512ab89b070a5b9101e",
+      "manifest": "SHA256SUMS",
+      "manifest_sha256": "49463c336859dfcd6733a4a2308471d98d6542d2d77f7c5993c56996d5f911a3",
+      "report": "normalization-report.json",
+      "report_sha256": "8257bea46779ea25804a1ba945c26233b90774a2093ed22c38325514cd4c339e",
+      "regular_file_count": 25
+    }
+  ]
+}
