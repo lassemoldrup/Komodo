@@ -306,6 +306,55 @@ PY
 }
 
 
+tpcc_acceptance_write_runtime_provenance() {
+  local output_dir=$1
+  python3 - "$output_dir/runtime-provenance.json" \
+    "$TPCC_BENCHBASE_DIST/benchbase.jar" "$TPCC_MONITOR_BIN" \
+    "$TPCC_ACCEPTANCE_ROOT" <<'PROVENANCE'
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+output, jar, monitor, root = sys.argv[1:]
+
+
+def artifact(path):
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as source:
+        while chunk := source.read(1 << 20):
+            digest.update(chunk)
+            size += len(chunk)
+    return {"path": str(path), "sha256": digest.hexdigest(), "size_bytes": size}
+
+
+def head(path):
+    return subprocess.run(
+        ["git", "-C", path, "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+
+
+workspace = Path(root).resolve().parent
+document = {
+    "kind": "tpcc_acceptance_runtime_provenance",
+    "runtime_artifacts": {
+        "benchbase_jar": artifact(jar),
+        "monitor_binary": artifact(monitor),
+    },
+    "repository_revisions": {
+        "si_monitoring_head": head(root),
+        "benchbase_head": head(str(workspace / "benchbase")),
+        "co_checker_head": head(str(workspace / "co-checker")),
+    },
+}
+Path(output).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+PROVENANCE
+}
+
+
 tpcc_acceptance_quote_command() {
   local result
   printf -v result '%q ' "$@"
@@ -431,6 +480,7 @@ tpcc_acceptance_run() {
     tpcc_acceptance_quote_command "${workload[@]}")"
   printf '%s\n' "$loader_command" >"$TPCC_OUTPUT_DIR/loader-command.txt"
   printf '%s\n' "$workload_command" >"$TPCC_OUTPUT_DIR/workload-command.txt"
+  tpcc_acceptance_write_runtime_provenance "$TPCC_OUTPUT_DIR"
 
   local status
   set +e

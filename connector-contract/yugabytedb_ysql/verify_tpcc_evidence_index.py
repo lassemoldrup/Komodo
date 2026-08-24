@@ -47,7 +47,105 @@ def run_command(command: list[str], label: str) -> None:
     require(result.returncode == 0, f"{label} failed: {result.stderr.strip()}")
 
 
-def replay_bundle(directory: Path, purpose: str, saved_report: Path) -> None:
+EXPECTED_PURPOSES = {
+    "tpcc_value_normalization",
+    "tpcc_stock_level_workload",
+    "tpcc_order_status_workload",
+    "tpcc_new_order_workload",
+    "tpcc_payment_workload",
+    "tpcc_delivery_workload",
+    "tpcc_full_mix_workload",
+}
+
+
+def verify_runtime_provenance(directory: Path, purpose: str) -> None:
+    provenance = json.loads(
+        (directory / "runtime-provenance.json").read_text(encoding="utf-8")
+    )
+    artifacts = provenance.get("runtime_artifacts", {})
+    require(
+        all(
+            isinstance(artifacts.get(name, {}).get("sha256"), str)
+            and len(artifacts[name]["sha256"]) == 64
+            and artifacts[name].get("size_bytes", 0) > 0
+            for name in ("benchbase_jar", "monitor_binary")
+        ),
+        f"{purpose} evidence lacks runtime artifact provenance",
+    )
+    revisions = provenance.get("repository_revisions", {})
+    require(
+        all(
+            isinstance(revisions.get(name), str) and len(revisions[name]) == 40
+            for name in ("si_monitoring_head", "benchbase_head", "co_checker_head")
+        ),
+        f"{purpose} evidence lacks repository revision provenance",
+    )
+
+
+def verify_required_local_artifacts(directory: Path, purpose: str) -> None:
+    """The replay corpus referenced by the replay manifest must exist with the
+    recorded checksums; sealed full-mix evidence is only verifiable where its
+    local artifact volume is present, and that is enforced, never skipped."""
+    manifest = json.loads(
+        (directory / "replay-manifest.json").read_text(encoding="utf-8")
+    )
+    for label, stream in manifest.get("streams", {}).items():
+        stream_path = Path(str(stream.get("path")))
+        require(stream_path.is_file(),
+                f"{purpose} local replay stream is missing: {stream_path}")
+        require(
+            digest(stream_path) == stream.get("sha256")
+            and stream_path.stat().st_size == stream.get("bytes"),
+            f"{purpose} local replay stream differs: {label}",
+        )
+
+
+def production_replay_full_mix(
+    directory: Path, purpose: str, replay_bin: Path
+) -> None:
+    """Reconstruct the run through the production decoder, assembler, joiner,
+    and checker over the complete captured client and CDC streams, using the
+    run's recorded resource limits, and require the reconstructed FINAL status
+    to equal the captured one exactly."""
+    config = json.loads((directory / "run-config.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (directory / "replay-manifest.json").read_text(encoding="utf-8")
+    )
+    client_stream = Path(str(manifest["streams"]["client"]["path"]))
+    cdc_stream = Path(str(manifest["streams"]["cdc"]["path"]))
+    statuses = json.loads((directory / "status-stream.json").read_text(encoding="utf-8"))
+    finals = [
+        json.loads(entry[1][1])
+        for entry in statuses
+        if json.loads(entry[1][1]).get("lifecycle_state") == "FINAL"
+    ]
+    require(len(finals) == 1, f"{purpose} FINAL status roster differs")
+    result = subprocess.run(
+        [
+            str(replay_bin),
+            "--client-input", str(client_stream),
+            "--cdc-input", str(cdc_stream),
+            "--max-bootstrap-state-rows",
+            str(config["monitor_max_bootstrap_state_rows"]),
+            "--max-bootstrap-state-bytes",
+            str(config["monitor_max_bootstrap_state_bytes"]),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    require(result.returncode == 0,
+            f"{purpose} production replay failed: {result.stderr.strip()}")
+    replay = json.loads(result.stdout)
+    require(
+        replay.get("kind") == "production_evidence_replay"
+        and replay.get("final_status") == finals[0],
+        f"{purpose} captured FINAL differs from production decoder/checker replay",
+    )
+
+
+def replay_bundle(
+    directory: Path, purpose: str, saved_report: Path, replay_bin: Path
+) -> None:
     with tempfile.TemporaryDirectory(prefix="yugabytedb-tpcc-replay-") as temporary:
         output = Path(temporary) / "report.json"
         if purpose == "tpcc_value_normalization":
@@ -102,6 +200,9 @@ def replay_bundle(directory: Path, purpose: str, saved_report: Path) -> None:
             for flag in extra_flags:
                 command += [f"--{flag}", str(directory / extra_files[flag])]
             run_command(command, f"{purpose} raw replay")
+            if slug == "full_mix":
+                verify_required_local_artifacts(directory, purpose)
+                production_replay_full_mix(directory, purpose, replay_bin)
         else:
             raise SystemExit(f"unsupported TPC-C evidence purpose: {purpose}")
         require(
@@ -111,7 +212,9 @@ def replay_bundle(directory: Path, purpose: str, saved_report: Path) -> None:
         )
 
 
-def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
+def verify_bundle(
+    directory: Path, bundle: dict[str, object], replay_bin: Path
+) -> None:
     purpose = str(bundle["purpose"])
     manifest = directory / str(bundle["manifest"])
     report = directory / str(bundle["report"])
@@ -120,7 +223,19 @@ def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
     verify_manifest(directory, manifest)
     require(digest(report) == bundle["report_sha256"],
             f"report digest differs: {purpose}")
-    replay_bundle(directory, purpose, report)
+    if purpose != "tpcc_value_normalization":
+        verify_runtime_provenance(directory, purpose)
+        provenance = json.loads(
+            (directory / "runtime-provenance.json").read_text(encoding="utf-8")
+        )
+        require(
+            provenance["runtime_artifacts"]["benchbase_jar"]["sha256"]
+            == bundle.get("benchbase_jar_sha256"),
+            f"indexed BenchBase jar digest differs: {purpose}",
+        )
+    if bundle.get("requires_local_artifacts"):
+        verify_required_local_artifacts(directory, purpose)
+    replay_bundle(directory, purpose, report, replay_bin)
     regular_files = [item for item in directory.rglob("*") if item.is_file()]
     require(
         len(regular_files) == bundle["regular_file_count"] + 1,
@@ -131,7 +246,10 @@ def verify_bundle(directory: Path, bundle: dict[str, object]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-local", action="store_true")
+    parser.add_argument("--evidence-replay-bin", type=Path, required=True)
     args = parser.parse_args()
+    require(args.evidence_replay_bin.is_file(),
+            "production evidence replay binary is missing")
     index = json.loads(
         (ROOT / "evidence" / "tpcc_acceptance_bundles.json").read_text(encoding="utf-8")
     )
@@ -148,11 +266,11 @@ def main() -> int:
         require(not args.require_local or path.is_dir(),
                 f"local evidence bundle is missing: {path}")
         with archived_bundle(ROOT, bundle) as archived:
-            verify_bundle(archived, bundle)
+            verify_bundle(archived, bundle, args.evidence_replay_bin)
         if path.is_dir():
-            verify_bundle(path, bundle)
-    require("tpcc_value_normalization" in purposes,
-            "TPC-C evidence lacks the value-normalization gate")
+            verify_bundle(path, bundle, args.evidence_replay_bin)
+    require(purposes == EXPECTED_PURPOSES,
+            "TPC-C evidence purpose roster differs")
     print("YugabyteDB YSQL TPC-C evidence index verified")
     return 0
 
