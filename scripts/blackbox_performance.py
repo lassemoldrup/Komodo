@@ -557,6 +557,9 @@ def analyze_redis_xrange(
     table_counts: Counter[str] = Counter()
     begin_ids: Counter[str] = Counter()
     end_ids: Counter[str] = Counter()
+    active_frame = False
+    saw_begin = False
+    completed_count = 0
 
     for stream_id, fields in entries:
         for field_number, (_, value) in enumerate(fields):
@@ -600,13 +603,30 @@ def analyze_redis_xrange(
                 )
                 if status == "BEGIN":
                     begin_ids[transaction_id] += 1
+                    _require(
+                        not active_frame,
+                        f"Redis entry {stream_id} BEGIN interleaves an open frame",
+                    )
+                    active_frame = True
+                    saw_begin = True
                 else:
                     end_ids[transaction_id] += 1
+                    if active_frame:
+                        # Frames are contiguous and never interleave, so
+                        # sequential BEGIN/END alternation defines completion;
+                        # connector transaction IDs stay per-record diagnostics
+                        # because the pinned YugabyteDB connector never repeats
+                        # one across records.
+                        active_frame = False
+                        completed_count += 1
+                    else:
+                        # A selection window may begin inside a frame, leaving
+                        # one leading END fragment that completes nothing.
+                        _require(
+                            not saw_begin,
+                            f"Redis entry {stream_id} END closes no open frame",
+                        )
 
-    completed_count = sum(
-        min(count, end_ids.get(transaction_id, 0))
-        for transaction_id, count in begin_ids.items()
-    )
     return {
         "selection_window": {
             "bounded": window_after_stream_id is not None,
