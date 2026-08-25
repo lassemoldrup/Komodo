@@ -2053,13 +2053,25 @@ def write_raw_trials(root: Path, output: Path) -> list[dict[str, Any]]:
             )
     smoke = bool(rows[0].get("smoke"))
     if not smoke:
+        attested_dirty = all(bool(row.get("attested_dirty_build")) for row in rows)
+        if attested_dirty:
+            provenance = root / "provenance"
+            for label in ("si_monitoring", "current_benchbase", "baseline", "co_checker"):
+                for suffix in ("status.txt", "diff.patch", "untracked-sha256.txt"):
+                    require(
+                        (provenance / f"{label}-{suffix}").is_file(),
+                        f"attested dirty build lacks provenance: {label}-{suffix}",
+                    )
         for field in (
             "si_monitoring_dirty",
             "benchbase_current_dirty",
             "benchbase_baseline_dirty",
             "co_checker_dirty",
         ):
-            require(not any(bool(row.get(field)) for row in rows), f"measured run is dirty: {field}")
+            require(
+                attested_dirty or not any(bool(row.get(field)) for row in rows),
+                f"measured run is dirty: {field}",
+            )
 
     for row in rows:
         require(

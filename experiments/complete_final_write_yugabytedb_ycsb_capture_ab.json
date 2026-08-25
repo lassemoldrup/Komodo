@@ -1,0 +1,66 @@
+{
+  "kind": "complete_final_write_capture_profile_experiment",
+  "manifest_id": "complete-final-write-yugabytedb-ycsb-capture-ab-20260825",
+  "selected_cells": [
+    {
+      "backend": "yugabytedb_ysql",
+      "benchmark": "ycsb",
+      "declared_isolation": "REPEATABLE_READ"
+    }
+  ],
+  "physical_profiles": [
+    {
+      "id": "yb_legacy_complete_before_v1",
+      "role": "legacy"
+    },
+    {
+      "id": "yb_final_write_v1",
+      "role": "final_write_candidate",
+      "capability_spike": "/media/newhd/yifan/db-monitoring-builds/complete-final-write/diagnostics/20260825T160000Z/yugabytedb-final-write-capability-spike"
+    }
+  ],
+  "build_identity": {
+    "benchbase_head": "a428d579d313193ac52b2ebe7b53a078553a171b",
+    "si_monitoring_head": "ffd3106fde7f411f82945b2e48455d99786fe6b5",
+    "co_checker_head": "2f0cd4fdc24d481d724afe2e9f457d94b1c3ea3e",
+    "build_policy": "one BenchBase distribution and one monitor binary are built once; all source diffs and untracked-file checksums are retained"
+  },
+  "artifact_identity": {
+    "database_image": "docker.io/yugabytedb/yugabyte@sha256:3dfa310a7a595bbf1ec5e6e6e58e31821aa86a8444b65d800fcc2ef6b3953cbb",
+    "connector_sha256": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98",
+    "debezium_server_image": "quay.io/debezium/server@sha256:e4a41c33d252d6a358ea18e3e58c680e03d76970ee2edf3b7bd021ce75555296",
+    "redis_image": "docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
+    "jdbc_version": "42.7.4"
+  },
+  "workload": {
+    "terminals": 4,
+    "scale_factor": 10,
+    "field_size": 32,
+    "loader_threads": 1,
+    "loader_batch_size": 128,
+    "loader_timestamp_utc": "2000-01-01T00:00:00Z",
+    "mix": "50,0,0,50,0,0",
+    "rate": "unlimited",
+    "seed": 20260818,
+    "warmup_seconds": 5,
+    "duration_seconds": 20
+  },
+  "resources": {
+    "redis_maxmemory_bytes": 8589934592,
+    "drain_timeout_seconds": 30,
+    "status_timeout_seconds": 240,
+    "high_water_threshold_percent": 70,
+    "java_flags": "-Xms1g -Xmx1g -XX:+AlwaysPreTouch -XX:+UseG1GC"
+  },
+  "topology": {
+    "database_nodes": 1,
+    "connector_tasks": 1,
+    "logical_slots": 1,
+    "redis_streams": 1,
+    "usertable_tablets": 2,
+    "marker_tablets": 1,
+    "fence_tablets": 1
+  },
+  "repetitions_per_profile": 3,
+  "output_root": "/media/newhd/yifan/db-monitoring-builds/complete-final-write/performance/20260825T170000Z/yugabytedb-ycsb-capture-ab"
+}

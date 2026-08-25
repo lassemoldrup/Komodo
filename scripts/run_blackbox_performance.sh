@@ -19,6 +19,7 @@ CANONICAL_STAGES=(
 )
 STAGES=()
 REQUESTED_STAGES=()
+CAPTURE_PROFILES=()
 STAGE_ROSTER=
 NEED_CURRENT_BENCHBASE=0
 NEED_MONITOR=0
@@ -76,6 +77,8 @@ JAVA_FLAGS=()
 SMOKE=0
 PRINT_MODE_ORDER=0
 VERIFY_INPUTS_ONLY=0
+ALLOW_DIRTY=0
+ACTIVE_CAPTURE_PROFILE=
 
 BASELINE_HEAD=
 CURRENT_BENCHBASE_HEAD=
@@ -110,6 +113,9 @@ Options:
   --mode NAME                Run this mode; repeat to select multiple modes (default: both).
                              Selection uses canonical order; duplicate names are rejected.
                              Names: benchbase_uninstrumented, full_e2e.
+  --capture-profile VALUE    Forward one opaque physical capture profile to the
+                             selected backend; repeat for a balanced round-robin A/B.
+  --allow-dirty              Permit an attested dirty build (diffs/checksums are retained).
   --repetitions N            Measured repetitions (default: 3).
   --terminals N              BenchBase terminals (default: 4).
   --scale-factor N           YCSB scale factor (default: 10).
@@ -331,6 +337,14 @@ parse_arguments() {
         REQUESTED_STAGES+=("${2:?missing --mode value}")
         shift 2
         ;;
+      --capture-profile)
+        CAPTURE_PROFILES+=("${2:?missing --capture-profile value}")
+        shift 2
+        ;;
+      --allow-dirty)
+        ALLOW_DIRTY=1
+        shift
+        ;;
       --repetitions)
         REPETITIONS=${2:?missing --repetitions value}
         shift 2
@@ -515,12 +529,33 @@ parse_arguments() {
     COOLDOWN_SECONDS=0
   fi
   configure_stages
+  if (( ${#CAPTURE_PROFILES[@]} > 0 )); then
+    if (( ${#STAGES[@]} != 1 )) || [[ ${STAGES[0]} != full_e2e ]]; then
+      die "capture-profile comparison requires only --mode full_e2e"
+    fi
+    local profile existing seen
+    local -a unique_profiles=()
+    for profile in "${CAPTURE_PROFILES[@]}"; do
+      [[ $profile =~ ^[a-z][a-z0-9_]{0,63}$ ]] ||
+        die "capture profile must be an opaque canonical identifier: $profile"
+      seen=0
+      for existing in "${unique_profiles[@]}"; do
+        [[ $profile != "$existing" ]] || seen=1
+      done
+      (( seen == 0 )) || die "duplicate capture profile: $profile"
+      unique_profiles+=("$profile")
+    done
+  fi
   [[ $BENCHMARK == ycsb || $BENCHMARK == tpcc ]] ||
     die "benchmark must be ycsb or tpcc"
   if [[ $BENCHMARK == tpcc ]]; then
     NEED_CURRENT_BENCHBASE=1
   fi
   require_positive_integer repetitions "$REPETITIONS"
+  if (( ${#CAPTURE_PROFILES[@]} > 0 )); then
+    (( REPETITIONS % ${#CAPTURE_PROFILES[@]} == 0 )) ||
+      die "repetitions must be divisible by the capture-profile count"
+  fi
   require_positive_integer terminals "$TERMINALS"
   require_positive_integer scale-factor "$SCALE_FACTOR"
   require_positive_integer field-size "$FIELD_SIZE"
@@ -661,7 +696,7 @@ verify_inputs() {
   BASELINE_DIRTY=$CURRENT_BENCHBASE_DIRTY
   repo_dirty "$ROOT" && SI_MONITORING_DIRTY=1
   repo_dirty "$CO_CHECKER_ROOT" && CO_CHECKER_DIRTY=1
-  if (( SMOKE == 0 )); then
+  if (( SMOKE == 0 && ALLOW_DIRTY == 0 )); then
     (( CURRENT_BENCHBASE_DIRTY == 0 )) || die "current BenchBase worktree is dirty"
     (( SI_MONITORING_DIRTY == 0 )) || die "si-monitoring worktree is dirty"
     (( CO_CHECKER_DIRTY == 0 )) || die "co-checker worktree is dirty"
@@ -689,7 +724,7 @@ verify_repositories_unchanged() {
     die "si-monitoring head changed during measurement"
   [[ $(git -C "$CO_CHECKER_ROOT" rev-parse HEAD) == "$CO_CHECKER_HEAD" ]] ||
     die "co-checker head changed during measurement"
-  if (( SMOKE == 0 )); then
+  if (( SMOKE == 0 && ALLOW_DIRTY == 0 )); then
     ! repo_dirty "$CURRENT_BENCHBASE_ROOT" || die "current BenchBase became dirty during measurement"
     ! repo_dirty "$ROOT" || die "si-monitoring became dirty during measurement"
     ! repo_dirty "$CO_CHECKER_ROOT" || die "co-checker became dirty during measurement"
@@ -1221,7 +1256,8 @@ write_trial_metadata() {
     "$MONITOR_MAX_CHECKER_STATE_BYTES" \
     "$BLACKBOX_BOOTSTRAP_MAX_ROWS" "$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
     "$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES" "$LOADER_TIMESTAMP_UTC" \
-    "$BACKEND" "$BLACKBOX_DB_PORT" "$backend_telemetry_expected" <<'PY'
+    "$BACKEND" "$BLACKBOX_DB_PORT" "$backend_telemetry_expected" \
+    "$ACTIVE_CAPTURE_PROFILE" "$ALLOW_DIRTY" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1282,6 +1318,8 @@ document = {
     "benchmark": values[31],
     "backend": values[57],
     "backend_telemetry_expected": values[59] == "1",
+    "physical_capture_profile": values[60] or None,
+    "attested_dirty_build": values[61] == "1",
     "transaction_mix": [float(value) for value in values[32].split(",")],
     "warehouses": int(values[6]) if values[31] == "tpcc" else None,
     "drain_timeout_seconds": int(values[34]),
@@ -1587,6 +1625,7 @@ run_full_e2e() {
   local session_roster
   session_roster=$(expected_sessions)
   record_command "$trial_dir/commands.txt" env \
+    "BLACKBOX_CAPTURE_PROFILE=$ACTIVE_CAPTURE_PROFILE" \
     "BLACKBOX_PROCESSING_MODE=$processing_mode" \
     "BLACKBOX_MONITOR_METRICS_PATH=$trial_dir/monitor_metrics.json" \
     "BLACKBOX_RUN_ID_PATH=$trial_dir/run_id.txt" \
@@ -1629,6 +1668,7 @@ run_full_e2e() {
 
   local status=0
   set +e
+  BLACKBOX_CAPTURE_PROFILE="$ACTIVE_CAPTURE_PROFILE" \
   BLACKBOX_PROCESSING_MODE=$processing_mode \
   BLACKBOX_MONITOR_METRICS_PATH="$trial_dir/monitor_metrics.json" \
   BLACKBOX_RUN_ID_PATH="$trial_dir/run_id.txt" \
@@ -2152,6 +2192,16 @@ main() {
   write_system_provenance "$OUTPUT_ROOT/provenance"
   generate_configs
   print_mode_order >"$OUTPUT_ROOT/mode_order.csv"
+  local schedule_repetition
+  if (( ${#CAPTURE_PROFILES[@]} > 0 )); then
+    {
+      printf 'repetition,physical_capture_profile\n'
+      for (( schedule_repetition = 1; schedule_repetition <= REPETITIONS; schedule_repetition++ )); do
+        printf '%s,%s\n' "$schedule_repetition" \
+          "${CAPTURE_PROFILES[$(( (schedule_repetition - 1) % ${#CAPTURE_PROFILES[@]} ))]}"
+      done
+    } >"$OUTPUT_ROOT/capture_profile_order.csv"
+  fi
   build_artifacts
   assert_output_size_within_limit
   # shellcheck source=scripts/blackbox_lifecycle.sh
@@ -2168,6 +2218,13 @@ main() {
 
   local repetition position offset index stage
   for (( repetition = 1; repetition <= REPETITIONS; repetition++ )); do
+    if (( ${#CAPTURE_PROFILES[@]} > 0 )); then
+      ACTIVE_CAPTURE_PROFILE=${CAPTURE_PROFILES[$(( (repetition - 1) % ${#CAPTURE_PROFILES[@]} ))]}
+      export BLACKBOX_CAPTURE_PROFILE=$ACTIVE_CAPTURE_PROFILE
+    else
+      ACTIVE_CAPTURE_PROFILE=
+      unset BLACKBOX_CAPTURE_PROFILE || true
+    fi
     offset=$(( ((RANDOM_SEED % ${#STAGES[@]}) + ${#STAGES[@]} + repetition - 1) % ${#STAGES[@]} ))
     for (( position = 1; position <= ${#STAGES[@]}; position++ )); do
       index=$(( (offset + position - 1) % ${#STAGES[@]} ))
