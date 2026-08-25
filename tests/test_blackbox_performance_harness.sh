@@ -455,6 +455,33 @@ jq -e \
   "$TEST_ROOT/network.json" >/dev/null ||
   fail "absent Redis was represented as a zero-byte measurement"
 
+cat >"$TEST_ROOT/backend-sampler" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+output=
+while (( $# > 0 )); do
+  case "$1" in
+    --output) output=$2; shift 2 ;;
+    --stop-file|--interval-seconds|--duration-seconds) shift 2 ;;
+    *) exit 2 ;;
+  esac
+done
+printf '{"kind":"backend_performance_telemetry","sample_count":1}\n' >"$output"
+SCRIPT
+chmod +x "$TEST_ROOT/backend-sampler"
+BLACKBOX_REDIS_PORT=6399 "$ROOT/scripts/run_measured_command.sh" \
+  --resource-output "$TEST_ROOT/backend-resources.csv" \
+  --network-output "$TEST_ROOT/backend-network.json" \
+  --sample-duration-seconds 1 \
+  --sample-interval-seconds 0.1 \
+  --backend-sampler "$TEST_ROOT/backend-sampler" \
+  --backend-output "$TEST_ROOT/backend-telemetry.json" \
+  -- bash -c 'sleep 0.2'
+jq -e \
+  '.kind == "backend_performance_telemetry" and .sample_count == 1' \
+  "$TEST_ROOT/backend-telemetry.json" >/dev/null ||
+  fail "generic measured-command boundary did not retain backend telemetry"
+
 printf '%s\n' \
   'mode,logical_transactions_per_second,successful_transactions_per_second,latency_mean_microseconds,latency_p95_microseconds' \
   'benchbase_uninstrumented,1000,990,100,150' \

@@ -1593,6 +1593,44 @@ def trial_row(trial_dir: Path) -> dict[str, Any]:
         if document is not None:
             flatten(prefix, document, row)
 
+    backend_telemetry = load_json(trial_dir / "backend_telemetry.json")
+    if metadata.get("backend_telemetry_expected"):
+        require(
+            backend_telemetry is not None,
+            "required backend performance telemetry is missing",
+        )
+    if backend_telemetry is not None:
+        require(
+            isinstance(backend_telemetry, Mapping)
+            and backend_telemetry.get("kind") == "backend_performance_telemetry",
+            "backend performance telemetry has an invalid shape",
+        )
+        telemetry_backend = backend_telemetry.get("backend")
+        require(
+            isinstance(telemetry_backend, str) and telemetry_backend,
+            "backend performance telemetry identity is missing",
+        )
+        metadata_backend = metadata.get("backend")
+        if metadata_backend is not None:
+            require(
+                telemetry_backend == metadata_backend,
+                "backend performance telemetry identity differs",
+            )
+        compact_telemetry = {
+            key: value
+            for key, value in backend_telemetry.items()
+            if key not in {"samples", "summary"}
+        }
+        flatten("backend_telemetry", compact_telemetry, row)
+        telemetry_summary = backend_telemetry.get("summary")
+        require(isinstance(telemetry_summary, Mapping), "backend telemetry summary is missing")
+        telemetry_metrics = telemetry_summary.get("metrics")
+        telemetry_series = telemetry_summary.get("series")
+        require(isinstance(telemetry_metrics, Mapping), "backend metric summary is missing")
+        require(isinstance(telemetry_series, list), "backend series summary is missing")
+        flatten("backend_telemetry_summary", telemetry_metrics, row)
+        row["backend_telemetry_summary_series_count"] = len(telemetry_series)
+
     bootstrap = load_json(trial_dir / "bootstrap_manifest.json", required=True)
     require(isinstance(bootstrap, dict), "bootstrap manifest is not an object")
     counts = bootstrap.get("table_row_counts")

@@ -14,8 +14,11 @@ PROCESS_LABEL=benchbase
 REDIS_HOST=${BLACKBOX_REDIS_HOST:-host.docker.internal}
 REDIS_PORT=${BLACKBOX_REDIS_PORT:-6379}
 CONTAINERS=()
+BACKEND_SAMPLER=
+BACKEND_OUTPUT=
 COMMAND_PID=
 SAMPLER_PID=
+BACKEND_SAMPLER_PID=
 STOP_FILE=
 
 
@@ -23,6 +26,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: run_measured_command.sh --resource-output PATH --network-output PATH
        --sample-duration-seconds N [--sample-interval-seconds N]
+       [--backend-sampler PATH --backend-output PATH]
        [--process-label LABEL] [--container [LABEL=]NAME]... -- COMMAND [ARG]...
 EOF
 }
@@ -36,6 +40,9 @@ cleanup() {
   fi
   if [[ -n $SAMPLER_PID ]]; then
     wait "$SAMPLER_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n $BACKEND_SAMPLER_PID ]]; then
+    wait "$BACKEND_SAMPLER_PID" >/dev/null 2>&1 || true
   fi
   if [[ -n $COMMAND_PID ]] && kill -0 "$COMMAND_PID" >/dev/null 2>&1; then
     kill "$COMMAND_PID" >/dev/null 2>&1 || true
@@ -122,6 +129,14 @@ while (( $# > 0 )); do
       CONTAINERS+=("${2:?missing --container value}")
       shift 2
       ;;
+    --backend-sampler)
+      BACKEND_SAMPLER=${2:?missing --backend-sampler value}
+      shift 2
+      ;;
+    --backend-output)
+      BACKEND_OUTPUT=${2:?missing --backend-output value}
+      shift 2
+      ;;
     --)
       shift
       break
@@ -141,9 +156,18 @@ done
   usage
   exit 2
 }
+[[ -z $BACKEND_SAMPLER && -z $BACKEND_OUTPUT ||
+   -n $BACKEND_SAMPLER && -n $BACKEND_OUTPUT ]] || {
+  usage
+  exit 2
+}
+[[ -z $BACKEND_SAMPLER || -x $BACKEND_SAMPLER ]]
 [[ $SAMPLE_DURATION_SECONDS =~ ^[0-9]+([.][0-9]+)?$ ]]
 [[ $SAMPLE_INTERVAL_SECONDS =~ ^[0-9]+([.][0-9]+)?$ ]]
 mkdir -p -- "$(dirname "$RESOURCE_OUTPUT")" "$(dirname "$NETWORK_OUTPUT")"
+if [[ -n $BACKEND_OUTPUT ]]; then
+  mkdir -p -- "$(dirname "$BACKEND_OUTPUT")"
+fi
 STOP_FILE="$RESOURCE_OUTPUT.stop"
 rm -f -- "$STOP_FILE"
 
@@ -174,6 +198,14 @@ for container in "${CONTAINERS[@]}"; do
 done
 python3 "$ANALYZER" "${sampler_args[@]}" &
 SAMPLER_PID=$!
+if [[ -n $BACKEND_SAMPLER ]]; then
+  "$BACKEND_SAMPLER" \
+    --output "$BACKEND_OUTPUT" \
+    --interval-seconds "$SAMPLE_INTERVAL_SECONDS" \
+    --duration-seconds "$SAMPLE_DURATION_SECONDS" \
+    --stop-file "$STOP_FILE" &
+  BACKEND_SAMPLER_PID=$!
+fi
 
 command_status=0
 wait "$COMMAND_PID" || command_status=$?
@@ -185,6 +217,14 @@ wait "$SAMPLER_PID" || {
   exit "$sampler_status"
 }
 SAMPLER_PID=
+if [[ -n $BACKEND_SAMPLER_PID ]]; then
+  wait "$BACKEND_SAMPLER_PID" || {
+    backend_sampler_status=$?
+    BACKEND_SAMPLER_PID=
+    exit "$backend_sampler_status"
+  }
+  BACKEND_SAMPLER_PID=
+fi
 
 available_after=false
 input_after=

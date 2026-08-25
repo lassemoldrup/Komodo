@@ -1191,6 +1191,10 @@ write_trial_metadata() {
   local position=$4
   local run_id=$5
   local trial_id=$6
+  local backend_telemetry_expected=0
+  if declare -F blackbox_backend_performance_telemetry_sampler >/dev/null; then
+    backend_telemetry_expected=1
+  fi
   python3 - "$trial_dir/metadata.json" \
     "$stage" "$repetition" "$position" "$trial_id" "$run_id" \
     "$TERMINALS" "$SCALE_FACTOR" "$FIELD_SIZE" "$LOADER_THREADS" "$LOADER_BATCH_SIZE" \
@@ -1216,7 +1220,8 @@ write_trial_metadata() {
     "$MONITOR_MAX_EVENTS_PER_TRANSACTION" \
     "$MONITOR_MAX_CHECKER_STATE_BYTES" \
     "$BLACKBOX_BOOTSTRAP_MAX_ROWS" "$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
-    "$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES" "$LOADER_TIMESTAMP_UTC" <<'PY'
+    "$BLACKBOX_BOOTSTRAP_MAX_CANONICAL_BYTES" "$LOADER_TIMESTAMP_UTC" \
+    "$BACKEND" "$BLACKBOX_DB_PORT" "$backend_telemetry_expected" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1242,7 +1247,7 @@ document = {
     "redis_host": "host.docker.internal",
     "redis_port": 6379,
     "database_host": "host.docker.internal",
-    "database_port": 3306,
+    "database_port": int(values[58]),
     "resource_sample_window": "workload_process_window",
     "monitor_resource_window": "full_monitor_lifecycle",
     "client_measurement_window": "benchbase_measured_request_window",
@@ -1275,6 +1280,8 @@ document = {
     "output_max_bytes": int(values[29]),
     "configured_modes": values[30].split(","),
     "benchmark": values[31],
+    "backend": values[57],
+    "backend_telemetry_expected": values[59] == "1",
     "transaction_mix": [float(value) for value in values[32].split(",")],
     "warehouses": int(values[6]) if values[31] == "tpcc" else None,
     "drain_timeout_seconds": int(values[34]),
@@ -1470,12 +1477,24 @@ validate_bootstrap() {
 workload_container_arguments() {
   local include_redis=$1
   local include_cdc=$2
+  local trial_dir=$3
   WORKLOAD_CONTAINERS=(--container "$BACKEND=$BLACKBOX_DATABASE_CONTAINER")
+  WORKLOAD_BACKEND_TELEMETRY=()
   if (( include_redis == 1 )); then
     WORKLOAD_CONTAINERS+=(--container redis=cdc-redis)
   fi
   if (( include_cdc == 1 )); then
     WORKLOAD_CONTAINERS+=(--container "debezium=$BLACKBOX_CONNECTOR_CONTAINER")
+  fi
+  if declare -F blackbox_backend_performance_telemetry_sampler >/dev/null; then
+    local backend_sampler
+    backend_sampler=$(blackbox_backend_performance_telemetry_sampler)
+    [[ -x $backend_sampler ]] ||
+      die "backend performance telemetry sampler is not executable: $backend_sampler"
+    WORKLOAD_BACKEND_TELEMETRY=(
+      --backend-sampler "$backend_sampler"
+      --backend-output "$trial_dir/backend_telemetry.json"
+    )
   fi
 }
 
@@ -1487,7 +1506,7 @@ run_direct_workload() {
   [[ $stage == benchbase_uninstrumented ]] || die "not a direct mode: $stage"
   distribution=$BASELINE_DIST
   config=$BASELINE_CONFIG
-  workload_container_arguments 0 0
+  workload_container_arguments 0 0 "$trial_dir"
   local sample_duration=$TRIAL_TIMEOUT_SECONDS
   local command=(
     "$MEASURED_COMMAND"
@@ -1496,6 +1515,7 @@ run_direct_workload() {
     --sample-duration-seconds "$sample_duration"
     --sample-interval-seconds "$RESOURCE_INTERVAL_SECONDS"
     "${WORKLOAD_CONTAINERS[@]}"
+    "${WORKLOAD_BACKEND_TELEMETRY[@]}"
     -- java "${JAVA_FLAGS[@]}" -jar "$distribution/benchbase.jar"
     -b "$BENCHMARK" -c "$config"
     --create=false --load=false --execute=true
@@ -1537,7 +1557,7 @@ run_full_e2e() {
   local trial_dir=$2
   local processing_mode=audited
   [[ $stage == full_e2e ]] || die "not a full E2E mode: $stage"
-  workload_container_arguments 1 1
+  workload_container_arguments 1 1 "$trial_dir"
   local sample_duration=$TRIAL_TIMEOUT_SECONDS
   local loader_args=(
     java "${JAVA_FLAGS[@]}" -jar "$CURRENT_DIST/benchbase.jar"
@@ -1552,6 +1572,7 @@ run_full_e2e() {
     --sample-duration-seconds "$sample_duration"
     --sample-interval-seconds "$RESOURCE_INTERVAL_SECONDS"
     "${WORKLOAD_CONTAINERS[@]}"
+    "${WORKLOAD_BACKEND_TELEMETRY[@]}"
     -- java "${JAVA_FLAGS[@]}" -jar "$CURRENT_DIST/benchbase.jar"
     -b "$BENCHMARK" -c "$CURRENT_CONFIG"
     --create=false --load=false --execute=true

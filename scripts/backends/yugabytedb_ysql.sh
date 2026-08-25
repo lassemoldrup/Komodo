@@ -381,6 +381,11 @@ blackbox_backend_marker_storage() {
     "SELECT COUNT(*), pg_total_relation_size('benchbase.session_txn') FROM benchbase.session_txn"
 }
 
+blackbox_backend_performance_telemetry_sampler() {
+  printf '%s\n' \
+    "$BLACKBOX_ROOT/scripts/backends/yugabytedb_ysql_telemetry.py"
+}
+
 blackbox_backend_commit_fence() {
   local run_id=$1 phase=$2 nonce=$3
   blackbox_backend_database_query \
