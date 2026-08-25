@@ -115,6 +115,7 @@ FLAG_NAMES = frozenset(
         "cdcsdk_max_consistent_records",
         "cdcsdk_retention_barrier_no_revision_interval_secs",
         "cdcsdk_vwal_getchanges_resp_max_size_bytes",
+        "db_write_buffer_size",
         "export_intentdb_metrics",
         "history_cutoff_propagation_interval_ms",
         "update_min_cdc_indices_interval_secs",

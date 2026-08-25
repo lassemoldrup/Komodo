@@ -440,7 +440,7 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
 
         self.mutated_capture(mutate, "MARKER_NOT_LAST")
 
-    def test_incomplete_full_image_fails(self) -> None:
+    def test_incomplete_final_row_fails(self) -> None:
         def mutate(capture: list[list[object]]) -> None:
             value = self.value(capture, 1)
             after = value["after"]
@@ -448,7 +448,32 @@ class YugabyteYsqlConnectorContractTest(unittest.TestCase):
             del after["field10"]
             self.replace_value(capture, 1, value)
 
-        self.mutated_capture(mutate, "FULL_IMAGE_INVALID")
+        self.mutated_capture(mutate, "FINAL_WRITE_INVALID")
+
+    def test_full_null_and_omitted_before_variants_are_equivalent(self) -> None:
+        variants: list[list[list[object]]] = []
+        full = canonical_capture()
+        for index in range(1, 5):
+            value = self.value(full, index)
+            value["before"] = {"diagnostic": "ignored"}
+            self.replace_value(full, index, value)
+        variants.append(full)
+        variants.append(canonical_capture())
+        omitted = canonical_capture()
+        for index in range(1, 5):
+            value = self.value(omitted, index)
+            del value["before"]
+            self.replace_value(omitted, index, value)
+        variants.append(omitted)
+
+        summaries = []
+        with tempfile.TemporaryDirectory(prefix="before-variants-") as temporary:
+            for index, variant in enumerate(variants):
+                path = Path(temporary) / f"variant-{index}.json"
+                path.write_text(json.dumps(variant), encoding="utf-8")
+                summaries.append(json.loads(self.run_verifier(path).stdout))
+        self.assertEqual(summaries[0], summaries[1])
+        self.assertEqual(summaries[1], summaries[2])
 
     def test_source_version_drift_fails(self) -> None:
         def mutate(capture: list[list[object]]) -> None:

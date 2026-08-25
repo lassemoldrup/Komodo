@@ -26,7 +26,7 @@ services:
     container_name: connector-contract-yugabytedb-ysql
     command: >-
       bin/yugabyted start --background=false --callhome=false
-      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true,cdc_enable_intra_transactional_before_image=true,cdc_send_null_before_image_if_not_exists=false
+      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true,cdc_enable_intra_transactional_before_image=${CONNECTOR_CONTRACT_INTRA_TRANSACTIONAL_BEFORE_IMAGE:-true},cdc_send_null_before_image_if_not_exists=${CONNECTOR_CONTRACT_SEND_NULL_BEFORE_IMAGE:-false}
     healthcheck:
       test: ["CMD", "bin/ysqlsh", "-h", "yugabytedb_ysql", "-U", "yugabyte", "-d", "yugabyte", "-c", "SELECT 1"]
       interval: 3s
@@ -47,6 +47,7 @@ services:
     environment:
       CONNECTOR_CONTRACT_PLUGIN: ${CONNECTOR_CONTRACT_PLUGIN:-pgoutput}
       CONNECTOR_CONTRACT_SLOT: ${CONNECTOR_CONTRACT_SLOT:-connector_contract_slot}
+      CONNECTOR_CONTRACT_REPLICA_IDENTITY: ${CONNECTOR_CONTRACT_REPLICA_IDENTITY:-FULL}
     volumes:
       - ./initialize.sh:/connector-contract/initialize.sh:ro
       - ./schema.sql:/connector-contract/schema.sql:ro

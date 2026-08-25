@@ -1,6 +1,45 @@
 #!/usr/bin/env bash
 # YugabyteDB YSQL coordinator backend driver. Sourced by blackbox_lifecycle.sh.
 
+blackbox_backend_select_capture_profile() {
+  BLACKBOX_CAPTURE_PROFILE=${BLACKBOX_CAPTURE_PROFILE:-yb_final_write_v1}
+  case "$BLACKBOX_CAPTURE_PROFILE" in
+    yb_final_write_v1)
+      BLACKBOX_YSQL_REPLICA_IDENTITY=DEFAULT
+      BLACKBOX_YSQL_REPLICA_IDENTITY_CODE=d
+      BLACKBOX_YSQL_INTRA_TRANSACTIONAL_BEFORE_IMAGE=false
+      BLACKBOX_YSQL_SEND_NULL_BEFORE_IMAGE=true
+      BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE=134217728
+      ;;
+    yb_final_write_small_intent_files_v1)
+      BLACKBOX_YSQL_REPLICA_IDENTITY=DEFAULT
+      BLACKBOX_YSQL_REPLICA_IDENTITY_CODE=d
+      BLACKBOX_YSQL_INTRA_TRANSACTIONAL_BEFORE_IMAGE=false
+      BLACKBOX_YSQL_SEND_NULL_BEFORE_IMAGE=true
+      # CDC cleanup deletes whole IntentsDB SST files. A bounded write buffer
+      # prevents hot-key conflict scans from traversing a large retained
+      # memtable while preserving the normal CDC retention interval.
+      BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE=1048576
+      ;;
+    yb_legacy_complete_before_v1)
+      BLACKBOX_YSQL_REPLICA_IDENTITY=FULL
+      BLACKBOX_YSQL_REPLICA_IDENTITY_CODE=f
+      BLACKBOX_YSQL_INTRA_TRANSACTIONAL_BEFORE_IMAGE=true
+      BLACKBOX_YSQL_SEND_NULL_BEFORE_IMAGE=false
+      BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE=134217728
+      ;;
+    *)
+      blackbox_die "unsupported YugabyteDB physical capture profile: $BLACKBOX_CAPTURE_PROFILE"
+      return 1
+      ;;
+  esac
+  export BLACKBOX_CAPTURE_PROFILE BLACKBOX_YSQL_REPLICA_IDENTITY
+  export BLACKBOX_YSQL_REPLICA_IDENTITY_CODE
+  export BLACKBOX_YSQL_INTRA_TRANSACTIONAL_BEFORE_IMAGE
+  export BLACKBOX_YSQL_SEND_NULL_BEFORE_IMAGE
+  export BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE
+}
+
 blackbox_backend_initialize() {
   BLACKBOX_COMPOSE_PROFILE=yugabytedb_ysql
   BLACKBOX_DATABASE_SERVICE=yugabytedb_ysql
@@ -23,6 +62,7 @@ blackbox_backend_initialize() {
 }
 
 blackbox_backend_prepare_run() {
+  blackbox_backend_select_capture_profile || return 1
   local compact_run_id=${BLACKBOX_ACTIVE_RUN_ID//-/}
   BLACKBOX_YSQL_SLOT_NAME="blackbox_${compact_run_id}_slot"
   BLACKBOX_YSQL_PUBLICATION_NAME="blackbox_${compact_run_id}_publication"
@@ -43,15 +83,20 @@ blackbox_backend_prepare_run() {
     printf '%s\n' "${sorted_capture_tables[@]}" | sha256sum | cut -d' ' -f1
   )
   expected_replica_digest=$(
-    printf '%s\tf\n' "${sorted_capture_tables[@]}" | sha256sum | cut -d' ' -f1
+    printf '%s\n' "${sorted_capture_tables[@]}" |
+      sed "s/\$/\\t$BLACKBOX_YSQL_REPLICA_IDENTITY_CODE/" |
+      sha256sum | cut -d' ' -f1
   )
   # Consumed by the generic coordinator after this sourced driver returns.
   # shellcheck disable=SC2034
   BLACKBOX_BACKEND_MONITOR_ARGUMENTS=(
     --expected-backend-fact "publication_name=$BLACKBOX_YSQL_PUBLICATION_NAME"
     --expected-backend-fact "slot_name=$BLACKBOX_YSQL_SLOT_NAME"
+    --expected-backend-fact "physical_capture_profile=$BLACKBOX_CAPTURE_PROFILE"
+    --expected-backend-fact "cdc_enable_intra_transactional_before_image=$BLACKBOX_YSQL_INTRA_TRANSACTIONAL_BEFORE_IMAGE"
+    --expected-backend-fact "cdc_send_null_before_image_if_not_exists=$BLACKBOX_YSQL_SEND_NULL_BEFORE_IMAGE"
     --expected-backend-fact "publication_membership_sha256=$expected_membership_digest"
-    --expected-backend-fact "replica_identity_full_tables_sha256=$expected_replica_digest"
+    --expected-backend-fact "replica_identity_tables_sha256=$expected_replica_digest"
   )
 }
 
@@ -214,7 +259,8 @@ blackbox_backend_capture_security_catalog() {
 blackbox_backend_verify_schema() {
   blackbox_backend_capture_schema_metadata |
     python3 "$BLACKBOX_ROOT/scripts/backends/yugabytedb_ysql_catalog.py" \
-      --benchmark "$BLACKBOX_BENCHMARK" || return 1
+      --benchmark "$BLACKBOX_BENCHMARK" \
+      --replica-identity-code "$BLACKBOX_YSQL_REPLICA_IDENTITY_CODE" || return 1
   local expected_tables actual_tables replica_tables publication_tables slot
   expected_tables=$(tr ',' '\n' <<<"$BLACKBOX_YSQL_CAPTURE_TABLES" | LC_ALL=C sort)
   actual_tables=$(blackbox_backend_admin_query \
@@ -224,9 +270,13 @@ blackbox_backend_verify_schema() {
     return 1
   }
   replica_tables=$(blackbox_backend_admin_query \
-    "SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='benchbase' AND c.relkind='r' AND c.relreplident='f' ORDER BY 1") || return 1
-  [[ $replica_tables == "$expected_tables" ]] || {
-    blackbox_die "YugabyteDB REPLICA IDENTITY FULL roster differs"
+    "SELECT n.nspname || '.' || c.relname || E'\\t' || c.relreplident::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='benchbase' AND c.relkind='r' ORDER BY 1") || return 1
+  local expected_replica_tables
+  expected_replica_tables=$(awk \
+    -v identity="$BLACKBOX_YSQL_REPLICA_IDENTITY_CODE" \
+    '{print $0 "\t" identity}' <<<"$expected_tables")
+  [[ $replica_tables == "$expected_replica_tables" ]] || {
+    blackbox_die "YugabyteDB replica-identity roster differs from the selected capture profile"
     return 1
   }
   publication_tables=$(blackbox_backend_admin_query \
@@ -258,9 +308,10 @@ blackbox_backend_verify_schema() {
   local container_command
   container_command=$("$BLACKBOX_DOCKER" inspect --format '{{json .Config.Cmd}}' \
     "$BLACKBOX_DATABASE_CONTAINER") || return 1
-  [[ $container_command == *"cdc_enable_intra_transactional_before_image=true"* &&
-     $container_command == *"cdc_send_null_before_image_if_not_exists=false"* ]] || {
-    blackbox_die "YugabyteDB before-image flags differ"
+  [[ $container_command == *"cdc_enable_intra_transactional_before_image=$BLACKBOX_YSQL_INTRA_TRANSACTIONAL_BEFORE_IMAGE"* &&
+     $container_command == *"cdc_send_null_before_image_if_not_exists=$BLACKBOX_YSQL_SEND_NULL_BEFORE_IMAGE"* &&
+     $container_command == *"db_write_buffer_size=$BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE"* ]] || {
+    blackbox_die "YugabyteDB physical capture flags differ from the selected profile"
     return 1
   }
   local role_contract_mismatches ownership_mismatches privilege_mismatches
@@ -464,7 +515,9 @@ blackbox_backend_capture_attestation_inputs() {
   metadata_file=$(mktemp /tmp/blackbox-yugabyte-schema.XXXXXX) || return 1
   blackbox_backend_capture_schema_metadata >"$metadata_file" || return 1
   python3 "$BLACKBOX_ROOT/scripts/backends/yugabytedb_ysql_catalog.py" \
-    --benchmark "$BLACKBOX_BENCHMARK" --emit-tables \
+    --benchmark "$BLACKBOX_BENCHMARK" \
+    --replica-identity-code "$BLACKBOX_YSQL_REPLICA_IDENTITY_CODE" \
+    --emit-tables \
     <"$metadata_file" >"$tables_file" || {
       rm -f -- "$metadata_file"
       return 1
@@ -526,6 +579,7 @@ blackbox_backend_capture_attestation_inputs() {
     --arg follower_reads "$follower_reads" --arg observed_slot "$observed_slot" \
     --arg observed_plugin "$observed_plugin" --arg observed_database "$observed_database" \
     --arg observed_lsn "$observed_lsn" \
+    --arg physical_profile "$BLACKBOX_CAPTURE_PROFILE" \
     --arg intra_before "$intra_before" --arg null_before "$null_before" '
     [
       {name:"database_name",canonical_value:"benchbase"},
@@ -550,11 +604,12 @@ blackbox_backend_capture_attestation_inputs() {
       {name:"connector_sha256",canonical_value:"4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"},
       {name:"connector_tasks",canonical_value:"1"},
       {name:"redis_stream",canonical_value:"cdc"},
+      {name:"physical_capture_profile",canonical_value:$physical_profile},
       {name:"cdc_enable_intra_transactional_before_image",canonical_value:$intra_before},
       {name:"cdc_send_null_before_image_if_not_exists",canonical_value:$null_before},
       {name:"database_image_digest",canonical_value:$image},
       {name:"publication_membership_sha256",canonical_value:$membership},
-      {name:"replica_identity_full_tables_sha256",canonical_value:$replica},
+      {name:"replica_identity_tables_sha256",canonical_value:$replica},
       {name:"table_oid_type_typmod_sha256",canonical_value:$types},
       {name:"dedicated_privileges_sha256",canonical_value:$privileges}
     ]' >"$facts_file"

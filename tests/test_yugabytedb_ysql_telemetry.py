@@ -103,6 +103,7 @@ unrelated_metric 999 1000
         flags = telemetry.parse_varz(
             "--cdc_enable_intra_transactional_before_image=true\n"
             "--cdc_send_null_before_image_if_not_exists=false\n"
+            "--db_write_buffer_size=1048576\n"
             "--ysql_hba_conf_csv=secret\n"
         )
         self.assertEqual(
@@ -110,6 +111,7 @@ unrelated_metric 999 1000
             {
                 "cdc_enable_intra_transactional_before_image": "true",
                 "cdc_send_null_before_image_if_not_exists": "false",
+                "db_write_buffer_size": "1048576",
             },
         )
 

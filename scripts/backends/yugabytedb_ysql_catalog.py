@@ -106,7 +106,10 @@ def physical_type(logical: str) -> tuple[str, str | None]:
     raise CatalogError(f"unsupported logical SQL type: {logical}")
 
 
-def validate(benchmark: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+def validate(
+    benchmark: str, metadata: dict[str, Any], replica_identity_code: str = "f"
+) -> list[dict[str, Any]]:
+    require(replica_identity_code in {"d", "f"}, "replica identity code is invalid")
     adapter = json.loads((ROOT / "protocol" / "adapters" / f"{benchmark}.json").read_text())
     database_name, encoding, _collation = metadata["database"]
     require(database_name == "benchbase" and encoding == "UTF8", "database identity/encoding differs")
@@ -117,7 +120,8 @@ def validate(benchmark: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
     for contract in contracts:
         actual = metadata["tables"][contract["name"]]
         require(
-            actual["relkind"] == "r" and actual["replica_identity"] == "f",
+            actual["relkind"] == "r"
+            and actual["replica_identity"] == replica_identity_code,
             f"{contract['name']}: relation/replica identity differs",
         )
         columns = sorted(actual["columns"], key=lambda item: item["ordinal"])
@@ -173,10 +177,13 @@ def validate(benchmark: str, metadata: dict[str, Any]) -> list[dict[str, Any]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--benchmark", required=True)
+    parser.add_argument("--replica-identity-code", choices=("d", "f"), default="f")
     parser.add_argument("--emit-tables", action="store_true")
     args = parser.parse_args()
     try:
-        tables = validate(args.benchmark, parse(sys.stdin.read()))
+        tables = validate(
+            args.benchmark, parse(sys.stdin.read()), args.replica_identity_code
+        )
     except (CatalogError, OSError, ValueError, json.JSONDecodeError) as error:
         print(f"YugabyteDB catalog error: {error}", file=sys.stderr)
         return 2

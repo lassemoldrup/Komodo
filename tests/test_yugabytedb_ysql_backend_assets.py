@@ -79,8 +79,18 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
             "docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
             compose,
         )
-        self.assertIn("cdc_enable_intra_transactional_before_image=true", compose)
-        self.assertIn("cdc_send_null_before_image_if_not_exists=false", compose)
+        self.assertIn(
+            "cdc_enable_intra_transactional_before_image=${BLACKBOX_YSQL_INTRA_TRANSACTIONAL_BEFORE_IMAGE:-false}",
+            compose,
+        )
+        self.assertIn(
+            "cdc_send_null_before_image_if_not_exists=${BLACKBOX_YSQL_SEND_NULL_BEFORE_IMAGE:-true}",
+            compose,
+        )
+        self.assertIn(
+            "db_write_buffer_size=${BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE:-134217728}",
+            compose,
+        )
         self.assertEqual(compose.count("container_name: cdc-debezium-yugabytedb-ysql"), 1)
 
     def test_connector_and_image_match_the_contract_gate(self) -> None:
@@ -119,7 +129,7 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         self.assertIn("debezium-connector-postgres-*.jar", dockerfile)
         self.assertIn("postgresql-*.jar", dockerfile)
 
-    def test_schema_is_empty_full_image_and_least_privilege(self) -> None:
+    def test_schema_is_empty_profile_owned_replica_identity_and_least_privilege(self) -> None:
         schema_text = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (
@@ -128,7 +138,7 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
             )
         )
         self.assertNotRegex(schema_text, r"(?im)^\s*INSERT\s+INTO")
-        self.assertEqual(schema_text.upper().count("REPLICA IDENTITY FULL"), 3)
+        self.assertNotIn("REPLICA IDENTITY", schema_text.upper())
         self.assertIn("SPLIT INTO 2 TABLETS", schema_text)
 
         init = (YSQL / "init.sh").read_text(encoding="utf-8")
@@ -138,6 +148,7 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         self.assertNotIn("SUPERUSER", init)
         self.assertIn("CREATE PUBLICATION $publication_name FOR TABLE $capture_tables", init)
         self.assertIn("'pgoutput', false, false, 'SEQUENCE'", init)
+        self.assertIn("REPLICA IDENTITY $replica_identity", init)
 
         connector = (
             DEBEZIUM / "application-yugabytedb-ysql.properties"
@@ -163,7 +174,7 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         self.assertNotIn("`", schema_text)
         self.assertNotIn("AUTO_INCREMENT", schema_text.upper())
         self.assertNotIn("ENGINE", schema_text.upper())
-        self.assertEqual(schema_text.upper().count("REPLICA IDENTITY FULL"), 9)
+        self.assertNotIn("REPLICA IDENTITY", schema_text.upper())
 
         adapter = json.loads(
             (ROOT / "protocol" / "adapters" / "tpcc.json").read_text(encoding="utf-8")
@@ -173,8 +184,6 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         ]
         created = re.findall(r"(?m)^CREATE TABLE ([a-z_]+) \(", schema_text)
         self.assertEqual(sorted(created), sorted(expected_leaves))
-        for leaf in expected_leaves:
-            self.assertIn(f"ALTER TABLE {leaf} REPLICA IDENTITY FULL;", schema_text)
         self.assertEqual(len(re.findall(r"SPLIT INTO [0-9]+ TABLETS", schema_text)), 9)
 
         # The evidence-only history key is generated and never client-supplied.
@@ -235,9 +244,17 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         }
         self.assertNotIn("slot_active_consumers", stable_facts)
         self.assertIn("dedicated_privileges_sha256", stable_facts)
+        self.assertIn("physical_capture_profile", stable_facts)
+        self.assertIn("replica_identity_tables_sha256", stable_facts)
         self.assertEqual(
             backend["session_contract"]["declared_isolations"],
             ["READ_COMMITTED", "REPEATABLE_READ"],
+        )
+
+        self.assertIn("yb_final_write_small_intent_files_v1", driver)
+        self.assertIn("BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE=1048576", driver)
+        self.assertIn(
+            "db_write_buffer_size=$BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE", driver
         )
 
     def test_attestation_casts_internal_char_catalog_values_to_text(self) -> None:

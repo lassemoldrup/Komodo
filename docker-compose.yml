@@ -96,7 +96,7 @@ services:
     container_name: cdc-yugabytedb-ysql
     command: >
       bin/yugabyted start --background=false --callhome=false
-      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true,cdc_enable_intra_transactional_before_image=true,cdc_send_null_before_image_if_not_exists=false
+      --tserver_flags=ysql_yb_enable_replication_commands=true,ysql_yb_enable_replica_identity=true,cdc_enable_intra_transactional_before_image=${BLACKBOX_YSQL_INTRA_TRANSACTIONAL_BEFORE_IMAGE:-false},cdc_send_null_before_image_if_not_exists=${BLACKBOX_YSQL_SEND_NULL_BEFORE_IMAGE:-true},db_write_buffer_size=${BLACKBOX_YSQL_DB_WRITE_BUFFER_SIZE:-134217728}
     ports:
       - "5433:5433"
       - "15433:15433"
@@ -121,6 +121,7 @@ services:
       BLACKBOX_YSQL_PUBLICATION_NAME: ${BLACKBOX_YSQL_PUBLICATION_NAME:-blackbox_publication}
       BLACKBOX_YSQL_CAPTURE_TABLES: ${BLACKBOX_YSQL_CAPTURE_TABLES:-benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn}
       BLACKBOX_YSQL_CREATE_CAPTURE_OBJECTS: ${BLACKBOX_YSQL_CREATE_CAPTURE_OBJECTS:-true}
+      BLACKBOX_YSQL_REPLICA_IDENTITY: ${BLACKBOX_YSQL_REPLICA_IDENTITY:-DEFAULT}
     volumes:
       - ./yugabytedb_ysql/init.sh:/blackbox/init.sh:ro
       - ./yugabytedb_ysql/initdb/02-common-schema.sql:/blackbox/common-schema.sql:ro

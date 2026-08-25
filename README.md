@@ -128,7 +128,7 @@ per-session attempt counter defined above (manual concurrent tests should set
 
 The monitor waits for the enclosing Debezium `END`, requires exactly one marker
 INSERT as the final row event of every post-load workload transaction, validates
-its null before-image and matching composite key/after identity, and removes the
+its exact composite key and matching complete final-row identity, and removes the
 marker row from the normalized application write set. A marker-only physical
 transaction is still joined and checked with zero application writes, so
 successful read-only/no-application-write workload transactions remain in scope.
@@ -601,11 +601,20 @@ durability claims remain outside the audited result.
 listeners here are plaintext.
 
 **YugabyteDB** — the accepted assets create the complete empty `benchbase`
-schema, set every captured table to `REPLICA IDENTITY FULL`, create one explicit
+schema, apply the backend-selected replica-identity profile, create one explicit
 publication, and only then create one run-owned `pgoutput` logical slot with
 `yb_lsn_type=SEQUENCE`. Dedicated setup, application, and replication roles
-prevent workload/connector DDL. Both before-image flags are pinned so unavailable
-predecessor evidence fails rather than becoming a fake SQL null.
+prevent workload/connector DDL. The default `yb_final_write_v1` profile uses
+`REPLICA IDENTITY DEFAULT` and disables intra-transactional before images after
+the complete-final-write fresh-object spike proved complete final rows and exact delete keys. The
+bounded `yb_legacy_complete_before_v1` profile remains only for the causal
+A/B; both profiles emit the same final-write-only common row contract. The
+experimental `yb_final_write_small_intent_files_v1` profile keeps the default
+eight-hour CDC retention contract but sets YugabyteDB's global RocksDB write
+buffer to 1 MiB. This forces prompt IntentDB flush/cleanup and bounds hot-key
+conflict scans. The pinned release has no IntentDB-only write-buffer flag, so
+this profile is a measured workaround rather than the preferred permanent
+engine fix.
 
 **Oracle** — needs ARCHIVELOG, force logging, and `SUPPLEMENTAL LOG DATA (ALL)
 COLUMNS` per table (the equivalent of `REPLICA IDENTITY FULL`);
@@ -652,22 +661,32 @@ is pinned rather than changed. Raising
 values (`back_log`, `thread_cache_size`, `max_relay_log_size`,
 `innodb_adaptive_hash_index_cells`).
 
-**YugabyteDB** (tserver flags in `docker-compose.yml`) — all three default to
-`false`.
+**YugabyteDB** (tserver flags in `docker-compose.yml`) — the selected backend
+profile supplies the last three opaque physical settings.
 
 | Flag | Default | Here | Why |
 |---|---|---|---|
 | `ysql_yb_enable_replication_commands` | false | true | logical replication slots |
 | `ysql_yb_enable_replica_identity` | false | true | per-table replica identity |
-| `cdc_enable_intra_transactional_before_image` | false | true | before-images for rows written more than once in a transaction |
-| `cdc_send_null_before_image_if_not_exists` | true | false | unavailable predecessor data must fail closed |
+| `cdc_enable_intra_transactional_before_image` | false | false (`yb_final_write_v1`), true (legacy A/B) | old rows do not cross the common boundary |
+| `cdc_send_null_before_image_if_not_exists` | true | true (`yb_final_write_v1`), false (legacy A/B) | raw before shape is backend metadata only |
+| `db_write_buffer_size` | -1 (128 MiB through `memstore_size_mb`) | 128 MiB normally, 1 MiB in `yb_final_write_small_intent_files_v1` | permit CDC-aware IntentDB compaction/file cleanup before retained committed intents dominate foreground conflict scans |
 
 Plus `default_transaction_isolation` raised from `read committed` to
 `repeatable read` (= SI) with `ALTER DATABASE`.
 
-Per-table: `REPLICA IDENTITY FULL`; one explicit publication; one run-owned
+Per-table: `REPLICA IDENTITY DEFAULT` in the admitted final-write profile and
+`FULL` only in the bounded legacy A/B profile; one explicit publication; one run-owned
 `pgoutput` slot with `yb_lsn_type=SEQUENCE`; one connector task and one `cdc`
 Redis stream.
+
+The bounded complete-final-write comparison is declared by
+`experiments/complete_final_write_yugabytedb_ycsb_capture_ab.json` and run with
+`python3 scripts/run_complete_final_write_capture_profile_experiment.py <manifest>`.
+It builds
+BenchBase and the monitor once, alternates the two opaque profiles, requires at
+least three repetitions per profile, and writes the paired report beside the
+ordinary raw/component CSV and checksum manifest.
 
 **Oracle** (`oracle/startdb.d/`)
 

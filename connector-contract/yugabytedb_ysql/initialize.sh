@@ -5,11 +5,19 @@ readonly database_host=${CONNECTOR_CONTRACT_DATABASE_HOST:-yugabytedb_ysql}
 readonly database_name=benchbase
 readonly plugin=${CONNECTOR_CONTRACT_PLUGIN:-pgoutput}
 readonly slot=${CONNECTOR_CONTRACT_SLOT:-connector_contract_slot}
+readonly replica_identity=${CONNECTOR_CONTRACT_REPLICA_IDENTITY:-FULL}
 
 case "$plugin" in
   pgoutput | yboutput) ;;
   *)
     echo "unsupported connector-contract plugin: $plugin" >&2
+    exit 2
+    ;;
+esac
+case "$replica_identity" in
+  FULL | DEFAULT) ;;
+  *)
+    echo "unsupported connector-contract replica identity: $replica_identity" >&2
     exit 2
     ;;
 esac
@@ -42,6 +50,13 @@ PGPASSWORD=connector_contract_setup_password bin/ysqlsh \
   --dbname "$database_name" \
   --set ON_ERROR_STOP=on \
   --file /connector-contract/schema.sql
+
+while IFS= read -r table; do
+  [[ $table =~ ^[a-z][a-z0-9_]*$ ]] || exit 2
+  ysql_admin benchbase --command \
+    "ALTER TABLE benchbase.$table REPLICA IDENTITY $replica_identity"
+done < <(ysql_admin benchbase --tuples-only --no-align --command \
+  "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='benchbase' AND c.relkind='r' ORDER BY c.relname")
 
 ysql_admin benchbase --command \
   "SELECT * FROM pg_create_logical_replication_slot('$slot', '$plugin', false, false, 'SEQUENCE')"

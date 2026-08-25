@@ -122,9 +122,14 @@ class YugabyteYsqlCatalogTest(unittest.TestCase):
         metadata: str,
         expected: int = 0,
         benchmark: str = "ycsb",
+        replica_identity_code: str = "f",
     ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
-            ["python3", str(TOOL), "--benchmark", benchmark, "--emit-tables"],
+            [
+                "python3", str(TOOL), "--benchmark", benchmark,
+                "--replica-identity-code", replica_identity_code,
+                "--emit-tables",
+            ],
             input=metadata,
             text=True,
             capture_output=True,
@@ -141,6 +146,14 @@ class YugabyteYsqlCatalogTest(unittest.TestCase):
             ["benchbase.checker_run_fence", "benchbase.session_txn", "benchbase.usertable"],
         )
         self.assertEqual(tables[-1]["columns"][0]["logical_sql_type"], "INT")
+
+    def test_default_replica_identity_profile_emits_same_normalized_tables(self) -> None:
+        default_catalog = catalog().replace("\tr\tf\n", "\tr\td\n")
+        full = json.loads(self.run_tool(catalog()).stdout)
+        default = json.loads(
+            self.run_tool(default_catalog, replica_identity_code="d").stdout
+        )
+        self.assertEqual(default, full)
 
     def test_exact_tpcc_catalog_emits_typed_whole_row_contract(self) -> None:
         result = self.run_tool(tpcc_catalog(), benchmark="tpcc")

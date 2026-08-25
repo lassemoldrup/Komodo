@@ -211,7 +211,7 @@ def production_replay(
         "".join(f"{table}\n" for table in tables).encode("ascii")
     ).hexdigest()
     replica_digest = hashlib.sha256(
-        "".join(f"{table}\tf\n" for table in tables).encode("ascii")
+        "".join(f"{table}\td\n" for table in tables).encode("ascii")
     ).hexdigest()
     compact_run_id = run_id.replace("-", "")
     command = [
@@ -223,9 +223,15 @@ def production_replay(
         "--expected-backend-fact",
         f"slot_name=blackbox_{compact_run_id}_slot",
         "--expected-backend-fact",
+        "physical_capture_profile=yb_final_write_v1",
+        "--expected-backend-fact",
+        "cdc_enable_intra_transactional_before_image=false",
+        "--expected-backend-fact",
+        "cdc_send_null_before_image_if_not_exists=true",
+        "--expected-backend-fact",
         f"publication_membership_sha256={membership_digest}",
         "--expected-backend-fact",
-        f"replica_identity_full_tables_sha256={replica_digest}",
+        f"replica_identity_tables_sha256={replica_digest}",
     ]
     result = subprocess.run(command, text=True, capture_output=True)
     require(result.returncode == 0,
