@@ -86,7 +86,7 @@ FINAL
 | `CDC_DUPLICATE_CONFLICT` | A stable CDC identity is replayed with different content. |
 | `MARKER_MISSING` | A post-load workload transaction has no marker row event. |
 | `MARKER_MULTIPLE` | A workload transaction contains more than one marker event. |
-| `MARKER_MALFORMED` | The marker is not an INSERT with a null before-image, or its key/after session and transaction fields are absent, inconsistent, or out of range. |
+| `MARKER_MALFORMED` | The marker is not an INSERT with an exact key and complete final row, or its key/final-row session and transaction fields are absent, inconsistent, or out of range. |
 | `MARKER_NOT_LAST` | The marker is not the final row event in its CDC transaction. |
 | `MARKER_DUPLICATE` | A run/session/transaction marker identity is reused. |
 | `UNMARKED_APPLICATION_TRANSACTION` | A post-load application transaction commits without exactly one marker. |
@@ -101,7 +101,7 @@ FINAL
 | `CDC_HALF_MISSING` | A successful client transaction has no marker-bearing CDC half at closure. |
 | `CORRELATION_MISMATCH` | Joined halves disagree on run/session/transaction marker identity. |
 | `CANONICAL_ENCODING_FAILED` | A key/value cannot be represented by the frozen codec. |
-| `PRIMARY_KEY_IMAGE_INCOMPLETE` | A key-changing CDC event lacks a complete before/after key. |
+| `PRIMARY_KEY_IMAGE_INCOMPLETE` | A CDC event key is missing/incomplete, or an INSERT/UPDATE final-row primary key disagrees with its event key. |
 | `COMMIT_SEQUENCE_INVALID` | Dense checker sequence assignment is inconsistent. |
 | `CHECKER_INPUT_REJECTED` | `SnapshotSOWWEngine` rejects normalized input. |
 

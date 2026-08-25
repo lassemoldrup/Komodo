@@ -100,7 +100,7 @@ def main() -> int:
         for row in shape_rows
         if row["value"]["source"]["table"] == "usertable"
         and row["value"]["op"] == "u"
-        and row["value"]["before"]["ycsb_key"] == 42
+        and row["key"]["ycsb_key"] == 42
         and row["value"]["after"]["ycsb_key"] == 42
     ]
     require(len(updates_to_original) == 2, "update-to-original raw CDC shape differs")
@@ -114,26 +114,20 @@ def main() -> int:
         for row in shape_rows
     )
     deleted_seven = any(
-        row["value"]["op"] == "d" and row["value"]["before"]["ycsb_key"] == 7
+        row["value"]["op"] == "d" and row["key"]["ycsb_key"] == 7
         for row in shape_rows
     )
     require(inserted_seven and deleted_seven, "insert-delete raw CDC shape differs")
-    primary_key_update = any(
-        row["value"]["op"] == "u"
-        and row["value"]["before"]["ycsb_key"] == 100
-        and row["value"]["after"]["ycsb_key"] == 101
-        for row in shape_rows
-    )
     primary_key_delete_insert = any(
-        row["value"]["op"] == "d" and row["value"]["before"]["ycsb_key"] == 100
+        row["value"]["op"] == "d" and row["key"]["ycsb_key"] == 100
         for row in shape_rows
     ) and any(
         row["value"]["op"] == "c" and row["value"]["after"]["ycsb_key"] == 101
         for row in shape_rows
     )
     require(
-        primary_key_update or primary_key_delete_insert,
-        "primary-key-change raw CDC shape differs",
+        primary_key_delete_insert,
+        "emitted primary-key-change delete/insert raw CDC shape differs",
     )
 
     bootstrap_rows, counts = YcsbBootstrapAdapter().encode_scan(
@@ -178,9 +172,8 @@ def main() -> int:
         value_bytes = base64.b64decode(value["base64"], validate=True)
         event = corpus_by_key.get(key_bytes.hex())
         require(event is not None, f"C++ corpus key is missing for {key_number}")
-        require(event["before"] == {"state": "absent"}, f"C++ insert before differs for {key_number}")
-        require(event["after"]["key_hex"] == key_bytes.hex(), f"C++ image key differs for {key_number}")
-        require(event["after"]["value_hex"] == value_bytes.hex(), f"C++ value differs for {key_number}")
+        require(event["final_write"]["key_hex"] == key_bytes.hex(), f"C++ final key differs for {key_number}")
+        require(event["final_write"]["value_hex"] == value_bytes.hex(), f"C++ value differs for {key_number}")
 
     shape_events = cpp_frames[1]["application_events"]
     require(
@@ -198,26 +191,19 @@ def main() -> int:
     ]
     require(len(cpp_updates) == 2, "C++ update-to-original event count differs")
     require(
-        cpp_updates[-1]["after"]["value_hex"]
+        cpp_updates[-1]["final_write"]["value_hex"]
         == base64.b64decode(values["live_sql_corpus"]["base64"], validate=True).hex(),
         "C++ update-to-original final value differs",
     )
     require(
-        any(event["operation"] == "c" and event["after"].get("key_hex") == key_7 for event in shape_events)
-        and any(event["operation"] == "d" and event["before"].get("key_hex") == key_7 for event in shape_events),
+        any(event["operation"] == "c" and event["final_write"].get("key_hex") == key_7 for event in shape_events)
+        and any(event["operation"] == "d" and event["final_write"].get("key_hex") == key_7 for event in shape_events),
         "C++ insert-delete shape differs",
     )
     require(
-        any(
-            event["before"].get("key_hex") == key_100
-            and event["after"].get("key_hex") == key_101
-            for event in shape_events
-        )
-        or (
-            any(event["operation"] == "d" and event["before"].get("key_hex") == key_100 for event in shape_events)
-            and any(event["operation"] == "c" and event["after"].get("key_hex") == key_101 for event in shape_events)
-        ),
-        "C++ primary-key-change shape differs",
+        any(event["operation"] == "d" and event["final_write"].get("key_hex") == key_100 for event in shape_events)
+        and any(event["operation"] == "c" and event["final_write"].get("key_hex") == key_101 for event in shape_events),
+        "C++ emitted primary-key-change delete/insert shape differs",
     )
 
     report = {

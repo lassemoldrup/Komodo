@@ -87,6 +87,25 @@ void requireExactKeys(const Json &object,
   }
 }
 
+void requireKeys(const Json &object,
+                 const std::initializer_list<std::string_view> required,
+                 const std::initializer_list<std::string_view> optional,
+                 const std::string_view label) {
+  requireObject(object, label);
+  std::unordered_set<std::string_view> remaining(required.begin(),
+                                                 required.end());
+  std::unordered_set<std::string_view> allowed(optional.begin(), optional.end());
+  for (const auto &[key, unused] : object.items()) {
+    (void)unused;
+    if (remaining.erase(key) == 0U && !allowed.contains(key)) {
+      schemaError(std::string(label) + " contains unexpected field " + key);
+    }
+  }
+  if (!remaining.empty()) {
+    schemaError(std::string(label) + " is missing a required field");
+  }
+}
+
 [[nodiscard]] const Json &member(const Json &object,
                                  const std::string_view name,
                                  const std::string_view label) {
@@ -909,14 +928,13 @@ private:
   [[nodiscard]] BackendCdcRecord decodeRow(const Json &key,
                                            const Json &envelope) const {
     if (profile_ == Profile::MariaDb) {
-      requireExactKeys(envelope,
-                       {"before", "after", "source", "transaction", "op",
-                        "ts_ms", "ts_us", "ts_ns"},
-                       "MariaDB row envelope");
+      requireKeys(envelope,
+                  {"after", "source", "transaction", "op", "ts_ms", "ts_us",
+                   "ts_ns"},
+                  {"before"}, "MariaDB row envelope");
     } else {
-      requireExactKeys(
-          envelope, {"before", "after", "source", "transaction", "op", "ts_ms"},
-          "YugabyteDB row envelope");
+      requireKeys(envelope, {"after", "source", "transaction", "op", "ts_ms"},
+                  {"before"}, "YugabyteDB row envelope");
     }
     requireObject(key, "row key");
     if (key.empty()) {
@@ -928,15 +946,17 @@ private:
       decodeError(CdcErrorCode::CdcRecordMalformed,
                   "row operation is unsupported");
     }
-    const auto &before = member(envelope, "before", "row envelope");
     const auto &after = member(envelope, "after", "row envelope");
-    if (!(before.is_null() || before.is_object()) ||
+    const auto before = envelope.find("before");
+    if ((before != envelope.end() &&
+         !(before->is_null() || before->is_object())) ||
         !(after.is_null() || after.is_object())) {
       decodeError(CdcErrorCode::CdcRecordMalformed,
-                  "row before/after image has an unsupported type");
+                  "row before/final image has an unsupported type");
     }
     if (profile_ == Profile::YugabytePgoutput &&
-        (containsSetWrapper(key) || containsSetWrapper(before) ||
+        (containsSetWrapper(key) ||
+         (before != envelope.end() && containsSetWrapper(*before)) ||
          containsSetWrapper(after))) {
       decodeError(CdcErrorCode::PrimaryKeyImageIncomplete,
                   "yboutput availability wrapper is not valid pgoutput data");
@@ -962,7 +982,6 @@ private:
         validateSource(member(envelope, "source", "row envelope"));
     result.operation = operation;
     result.key = key;
-    result.before = before;
     result.after = after;
     result.total_order =
         uintValue(member(transaction, "total_order", "row transaction"),
@@ -1037,13 +1056,15 @@ constexpr auto yugabyte_fact_contract = std::to_array<BackendFactRule>({
      "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"},
     {"connector_tasks", BackendFactValueRule::Exact, "1"},
     {"redis_stream", BackendFactValueRule::Exact, "cdc"},
-    {"cdc_enable_intra_transactional_before_image", BackendFactValueRule::Exact,
-     "true"},
-    {"cdc_send_null_before_image_if_not_exists", BackendFactValueRule::Exact,
-     "false"},
+    {"physical_capture_profile", BackendFactValueRule::CanonicalIdentifier,
+     {}},
+    {"cdc_enable_intra_transactional_before_image",
+     BackendFactValueRule::CanonicalIdentifier, {}},
+    {"cdc_send_null_before_image_if_not_exists",
+     BackendFactValueRule::CanonicalIdentifier, {}},
     {"database_image_digest", BackendFactValueRule::Sha256, {}},
     {"publication_membership_sha256", BackendFactValueRule::Sha256, {}},
-    {"replica_identity_full_tables_sha256", BackendFactValueRule::Sha256, {}},
+    {"replica_identity_tables_sha256", BackendFactValueRule::Sha256, {}},
     {"table_oid_type_typmod_sha256", BackendFactValueRule::Sha256, {}},
     {"dedicated_privileges_sha256", BackendFactValueRule::Sha256, {}},
 });

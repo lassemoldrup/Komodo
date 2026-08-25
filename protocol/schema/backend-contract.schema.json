@@ -112,7 +112,7 @@
       "required": [
         "transaction_framing",
         "commit_order",
-        "full_before_after_images",
+        "complete_final_writes",
         "marker_last",
         "connector_startup_schema_evidence",
         "char_read_semantics"
@@ -120,7 +120,7 @@
       "properties": {
         "transaction_framing": { "const": "contiguous_begin_rows_end" },
         "commit_order": { "const": "single_stream_completed_transaction_order" },
-        "full_before_after_images": { "const": true },
+        "complete_final_writes": { "const": true },
         "marker_last": { "const": true },
         "connector_startup_schema_evidence": {
           "type": "string",

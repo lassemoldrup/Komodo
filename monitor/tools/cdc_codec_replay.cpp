@@ -10,7 +10,6 @@
 #include <fstream>
 #include <iostream>
 #include <map>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -101,17 +100,6 @@ struct Options {
   return result;
 }
 
-[[nodiscard]] Json encodeImage(const CanonicalRowCodec &codec,
-                               const Json &image) {
-  if (image.is_null()) {
-    return Json{{"state", "absent"}};
-  }
-  const auto encoded = codec.encodeImage(image);
-  return Json{{"state", "present"},
-              {"key_hex", hex(encoded.key)},
-              {"value_hex", hex(encoded.value)}};
-}
-
 void validateEnd(const BackendCdcRecord &end,
                  const std::vector<BackendCdcRecord> &rows) {
   if (!end.event_count.has_value() || *end.event_count != rows.size()) {
@@ -183,40 +171,53 @@ int run(const Options &options) {
       throw std::runtime_error("codec replay transaction marker is not last");
     }
     Json rendered_rows = Json::array();
+    std::map<std::string, Json> collapsed_writes;
     for (const auto &row : rows) {
       const auto *codec = benchmark.rowCodec(row.canonical_table);
       if (codec == nullptr) {
         continue;
       }
       const auto event_key = codec->encodeKeyObject(row.key);
+      Json final_write;
+      if (row.operation == "d") {
+        if (!row.after.is_null()) {
+          throw std::runtime_error("delete event unexpectedly has a final row");
+        }
+        final_write = Json{{"state", "absent"},
+                           {"key_hex", hex(event_key)}};
+      } else if (row.operation == "c" || row.operation == "u") {
+        if (!row.after.is_object()) {
+          throw std::runtime_error(
+              "insert/update event lacks a complete final row");
+        }
+        const auto after = codec->encodeImage(row.after);
+        if (event_key != after.key) {
+          throw std::runtime_error(
+              "event key differs from the complete final-row identity");
+        }
+        final_write = Json{{"state", "present"},
+                           {"key_hex", hex(after.key)},
+                           {"value_hex", hex(after.value)}};
+      } else {
+        throw std::runtime_error("application event operation is unsupported");
+      }
+      collapsed_writes.insert_or_assign(
+          final_write.at("key_hex").get<std::string>(), final_write);
       Json rendered{{"table", row.canonical_table},
                     {"operation", row.operation},
                     {"event_key_hex", hex(event_key)},
-                    {"before", encodeImage(*codec, row.before)},
-                    {"after", encodeImage(*codec, row.after)}};
-      const auto before = row.before.is_null()
-                              ? std::optional<blackbox::CanonicalRowImage>{}
-                              : codec->encodeImage(row.before);
-      const auto after = row.after.is_null()
-                             ? std::optional<blackbox::CanonicalRowImage>{}
-                             : codec->encodeImage(row.after);
-      if (!before.has_value() && !after.has_value()) {
-        throw std::runtime_error("application event has no complete row image");
-      }
-      if ((before.has_value() && !after.has_value() &&
-           event_key != before->key) ||
-          (!before.has_value() && after.has_value() &&
-           event_key != after->key) ||
-          (before.has_value() && after.has_value() &&
-           event_key != before->key && event_key != after->key)) {
-        throw std::runtime_error(
-            "event key differs from the complete row image identity");
-      }
+                    {"final_write", std::move(final_write)}};
       rendered_rows.push_back(std::move(rendered));
       ++application_event_count;
     }
+    Json normalized_writes = Json::array();
+    for (auto &[unused, write] : collapsed_writes) {
+      (void)unused;
+      normalized_writes.push_back(std::move(write));
+    }
     frames.push_back(Json{{"rows", rows.size()},
-                          {"application_events", std::move(rendered_rows)}});
+                          {"application_events", std::move(rendered_rows)},
+                          {"normalized_writes", std::move(normalized_writes)}});
     active = false;
   }
   if (active) {

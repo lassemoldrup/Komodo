@@ -51,6 +51,10 @@ canonical digest through final reconciliation.
 
 The `cdc` stream retains Debezium's existing key/envelope field layout and is
 validated by the CDC assembler rather than these client-record schemas.
+Backend decoders validate that raw layout and discard `before` before the common
+row boundary. The shared CDC contract is an exact event key plus a complete
+typed final row for INSERT/UPDATE or `Absent` for DELETE; sparse final rows are
+never reconstructed.
 
 Before consuming evidence or appending status, a monitor atomically requires
 both its owner key and status stream to be absent, then creates the owner key.

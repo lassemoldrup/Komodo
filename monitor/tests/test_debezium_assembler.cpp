@@ -578,12 +578,44 @@ void checkCapturedYugabyteLifecycleAndRawFailures() {
                           CdcErrorCode::PrimaryKeyImageIncomplete);
   }
   {
-    auto invalid = captured;
-    auto envelope = envelopeAt(invalid, 10U);
-    envelope["before"] = nullptr;
-    setEnvelope(invalid, 10U, envelope);
-    expect_yugabyte_error(std::move(invalid),
-                          CdcErrorCode::PrimaryKeyImageIncomplete);
+    auto null_before = captured;
+    for (std::size_t index = 0; index < null_before.size(); ++index) {
+      auto envelope = envelopeAt(null_before, index);
+      if (envelope.contains("op")) {
+        envelope["before"] = nullptr;
+        setEnvelope(null_before, index, envelope);
+      }
+    }
+    BLACKBOX_CHECK(replay(null_before, yugabyteAssemblerConfig(), false) ==
+                   replay(captured, yugabyteAssemblerConfig(), false));
+    auto omitted_before = captured;
+    for (std::size_t index = 0; index < omitted_before.size(); ++index) {
+      auto envelope = envelopeAt(omitted_before, index);
+      if (envelope.contains("op")) {
+        envelope.erase("before");
+        setEnvelope(omitted_before, index, envelope);
+      }
+    }
+    BLACKBOX_CHECK(replay(omitted_before, yugabyteAssemblerConfig(), false) ==
+                   replay(captured, yugabyteAssemblerConfig(), false));
+
+    const auto retained_metrics = [](const Json &fixture) {
+      DebeziumTxnAssembler assembler(yugabyteAssemblerConfig());
+      for (const auto &record : recordsFromFixture(fixture)) {
+        (void)assembler.accept(record);
+      }
+      assembler.finish();
+      return assembler.metrics();
+    };
+    const auto full_metrics = retained_metrics(captured);
+    const auto null_metrics = retained_metrics(null_before);
+    const auto omitted_metrics = retained_metrics(omitted_before);
+    BLACKBOX_CHECK(full_metrics.active_assembly_high_water_bytes ==
+                   null_metrics.active_assembly_high_water_bytes);
+    BLACKBOX_CHECK(null_metrics.active_assembly_high_water_bytes ==
+                   omitted_metrics.active_assembly_high_water_bytes);
+    BLACKBOX_CHECK(full_metrics.accepted_raw_bytes >
+                   omitted_metrics.accepted_raw_bytes);
   }
   {
     auto invalid = captured;
@@ -604,10 +636,8 @@ void checkCapturedYugabyteLifecycleAndRawFailures() {
     setEnvelope(primary_key_change, 10U, envelope);
     const auto normalized =
         replay(primary_key_change, yugabyteAssemblerConfig(), false);
-    BLACKBOX_REQUIRE(normalized[3].writes.size() == 2U);
+    BLACKBOX_REQUIRE(normalized[3].writes.size() == 1U);
     BLACKBOX_CHECK(normalized[3].writes[0].state ==
-                   NormalizedValueState::Absent);
-    BLACKBOX_CHECK(normalized[3].writes[1].state ==
                    NormalizedValueState::Present);
   }
   {
@@ -1198,11 +1228,11 @@ void checkMarkerAndFenceFailuresAreClosed() {
   setEnvelope(malformed, 12U, envelope);
   expectError(std::move(malformed), CdcErrorCode::MarkerMalformed);
 
-  auto unexpected_before = captured;
-  envelope = envelopeAt(unexpected_before, 15U);
+  auto marker_before_superset = captured;
+  envelope = envelopeAt(marker_before_superset, 15U);
   envelope["before"] = Json{{"session_id", "ycsb/worker/1"}, {"txn_id", 1}};
-  setEnvelope(unexpected_before, 15U, envelope);
-  expectError(std::move(unexpected_before), CdcErrorCode::MarkerMalformed);
+  setEnvelope(marker_before_superset, 15U, envelope);
+  BLACKBOX_CHECK(replay(marker_before_superset) == replay(captured));
 
   auto mismatched_key = captured;
   auto marker_key = keyAt(mismatched_key, 15U);
@@ -1266,7 +1296,7 @@ void checkMarkerAndFenceFailuresAreClosed() {
   expectError(std::move(wrong_run), CdcErrorCode::RunIdMismatch);
 }
 
-void checkNormalizationFailuresAndPrimaryKeyUpdateRule() {
+void checkNormalizationFailuresAndFinalWriteRule() {
   const auto captured = loadFixture();
 
   auto missing_key = captured;
@@ -1298,29 +1328,30 @@ void checkNormalizationFailuresAndPrimaryKeyUpdateRule() {
   envelope = envelopeAt(mismatched_before_image, 20U);
   envelope["before"]["field1"] = "does-not-match-prior-after";
   setEnvelope(mismatched_before_image, 20U, envelope);
-  expectError(std::move(mismatched_before_image),
-              CdcErrorCode::CdcRecordMalformed);
+  BLACKBOX_CHECK(replay(mismatched_before_image) == replay(captured));
 
   auto mismatched_before_key = captured;
   envelope = envelopeAt(mismatched_before_key, 20U);
   envelope["before"]["ycsb_key"] = 101;
   setEnvelope(mismatched_before_key, 20U, envelope);
-  expectError(std::move(mismatched_before_key),
-              CdcErrorCode::CdcRecordMalformed);
+  BLACKBOX_CHECK(replay(mismatched_before_key) == replay(captured));
 
   auto repeated_insert = captured;
   envelope = envelopeAt(repeated_insert, 19U);
   envelope["op"] = "c";
   envelope["before"] = nullptr;
   setEnvelope(repeated_insert, 19U, envelope);
-  expectError(std::move(repeated_insert), CdcErrorCode::CdcRecordMalformed);
+  BLACKBOX_CHECK(!replay(repeated_insert).empty());
 
   auto repeated_delete = captured;
   envelope = envelopeAt(repeated_delete, 20U);
   envelope["op"] = "d";
   envelope["after"] = nullptr;
   setEnvelope(repeated_delete, 20U, envelope);
-  expectError(std::move(repeated_delete), CdcErrorCode::CdcRecordMalformed);
+  const auto repeated_delete_normalized = replay(repeated_delete);
+  BLACKBOX_REQUIRE(repeated_delete_normalized[5].writes.size() == 1U);
+  BLACKBOX_CHECK(repeated_delete_normalized[5].writes[0].state ==
+                 NormalizedValueState::Absent);
 
   auto update_after_delete = captured;
   auto delete_envelope = envelopeAt(update_after_delete, 20U);
@@ -1333,7 +1364,10 @@ void checkNormalizationFailuresAndPrimaryKeyUpdateRule() {
   envelope["after"] = delete_envelope["before"];
   envelope["after"]["field1"] = "after-delete";
   setEnvelope(update_after_delete, 21U, envelope);
-  expectError(std::move(update_after_delete), CdcErrorCode::CdcRecordMalformed);
+  const auto update_after_delete_normalized = replay(update_after_delete);
+  BLACKBOX_REQUIRE(update_after_delete_normalized[5].writes.size() == 1U);
+  BLACKBOX_CHECK(update_after_delete_normalized[5].writes[0].state ==
+                 NormalizedValueState::Present);
 
   auto oversized_unsigned_key = captured;
   const auto maximum_unsigned = std::numeric_limits<std::uint64_t>::max();
@@ -1347,8 +1381,9 @@ void checkNormalizationFailuresAndPrimaryKeyUpdateRule() {
   expectError(std::move(oversized_unsigned_key),
               CdcErrorCode::PrimaryKeyImageIncomplete);
 
-  // Derive the connector's alternate single-update representation from the
-  // captured delete+insert PK change and verify the mandated two-write result.
+  // The captured old-key DELETE plus new-key CREATE remains two ordinary
+  // writes. A synthesized single UPDATE is deliberately not expanded from its
+  // discarded raw before-image.
   auto primary_key_update = captured;
   auto update_envelope = envelopeAt(primary_key_update, 38U);
   const auto insert_envelope = envelopeAt(primary_key_update, 39U);
@@ -1367,15 +1402,11 @@ void checkNormalizationFailuresAndPrimaryKeyUpdateRule() {
   renumberStreamIds(primary_key_update);
   const auto transactions = replay(primary_key_update);
   BLACKBOX_REQUIRE(transactions.size() > 9U);
-  BLACKBOX_REQUIRE(transactions[9].writes.size() == 2U);
+  BLACKBOX_REQUIRE(transactions[9].writes.size() == 1U);
   BLACKBOX_CHECK(transactions[9].writes[0].key ==
                  CanonicalYcsbCodec::encodeKey("benchbase", "usertable", -2));
   BLACKBOX_CHECK(transactions[9].writes[0].state ==
                  NormalizedValueState::Present);
-  BLACKBOX_CHECK(transactions[9].writes[1].key ==
-                 CanonicalYcsbCodec::encodeKey("benchbase", "usertable", -1));
-  BLACKBOX_CHECK(transactions[9].writes[1].state ==
-                 NormalizedValueState::Absent);
 }
 
 void checkAttemptGapsAndContiguousFrames() {
@@ -1827,22 +1858,22 @@ void checkCapturedTpccTransactionsAndFailures() {
                 tpccAssemblerConfig(invalid), false);
   }
   {
-    auto invalid = fixture;
-    auto &entry = tpccRowEntry(invalid, "net_no_change", "item", 1U);
+    auto before_superset = fixture;
+    auto &entry = tpccRowEntry(before_superset, "net_no_change", "item", 1U);
     auto envelope = entryEnvelope(entry);
     envelope["before"]["i_name"] = "broken-chain";
     setEntryEnvelope(entry, envelope);
-    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
-                tpccAssemblerConfig(invalid), false);
+    BLACKBOX_CHECK(replay(tpccRawEntries(before_superset),
+                          tpccAssemblerConfig(before_superset), false) == actual);
   }
   {
-    auto invalid = fixture;
-    auto &entry = tpccRowEntry(invalid, "delivery_shape", "new_order");
+    auto null_before = fixture;
+    auto &entry = tpccRowEntry(null_before, "delivery_shape", "new_order");
     auto envelope = entryEnvelope(entry);
     envelope["before"] = nullptr;
     setEntryEnvelope(entry, envelope);
-    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
-                tpccAssemblerConfig(invalid), false);
+    BLACKBOX_CHECK(replay(tpccRawEntries(null_before),
+                          tpccAssemblerConfig(null_before), false) == actual);
   }
   {
     auto invalid = fixture;
@@ -1884,8 +1915,8 @@ void checkCapturedTpccTransactionsAndFailures() {
     setEntryEnvelope(entry, envelope);
     auto raw = tpccRawEntries(invalid);
     renumberStreamIds(raw);
-    expectError(std::move(raw), CdcErrorCode::CdcRecordMalformed,
-                tpccAssemblerConfig(invalid), false);
+    BLACKBOX_CHECK(
+        !replay(std::move(raw), tpccAssemblerConfig(invalid), false).empty());
   }
   {
     auto invalid = fixture;
@@ -1898,15 +1929,17 @@ void checkCapturedTpccTransactionsAndFailures() {
                 tpccAssemblerConfig(invalid), false);
   }
   {
-    auto invalid = fixture;
+    auto marker_before_superset = fixture;
     auto &entry =
-        tpccRowEntry(invalid, "stock_level_marker_only", "session_txn");
+        tpccRowEntry(marker_before_superset, "stock_level_marker_only",
+                     "session_txn");
     auto envelope = entryEnvelope(entry);
     envelope["before"] =
         Json{{"session_id", "tpcc/worker/1"}, {"txn_id", 6}};
     setEntryEnvelope(entry, envelope);
-    expectError(tpccRawEntries(invalid), CdcErrorCode::MarkerMalformed,
-                tpccAssemblerConfig(invalid), false);
+    BLACKBOX_CHECK(replay(tpccRawEntries(marker_before_superset),
+                          tpccAssemblerConfig(marker_before_superset), false) ==
+                   actual);
   }
   {
     auto invalid = fixture;
@@ -2014,13 +2047,13 @@ void checkCapturedTpccTransactionsAndFailures() {
                 tpccAssemblerConfig(invalid), false);
   }
   {
-    auto invalid = fixture;
-    auto &entry = tpccRowEntry(invalid, "new_order_shape", "stock", 1U);
+    auto before_superset = fixture;
+    auto &entry = tpccRowEntry(before_superset, "new_order_shape", "stock", 1U);
     auto envelope = entryEnvelope(entry);
     envelope["before"]["s_quantity"] = 40;
     setEntryEnvelope(entry, envelope);
-    expectError(tpccRawEntries(invalid), CdcErrorCode::CdcRecordMalformed,
-                tpccAssemblerConfig(invalid), false);
+    BLACKBOX_CHECK(replay(tpccRawEntries(before_superset),
+                          tpccAssemblerConfig(before_superset), false) == actual);
   }
   {
     auto invalid = fixture;
@@ -2042,7 +2075,7 @@ int runDebeziumAssemblerTests() {
   checkMeasurementMetrics();
   checkStructuralFailuresAreClosed();
   checkMarkerAndFenceFailuresAreClosed();
-  checkNormalizationFailuresAndPrimaryKeyUpdateRule();
+  checkNormalizationFailuresAndFinalWriteRule();
   checkAttemptGapsAndContiguousFrames();
   checkCapturedTpccTransactionsAndFailures();
   return 0;

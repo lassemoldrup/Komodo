@@ -47,8 +47,8 @@ The marker requirements are:
 - exactly one marker in every successful workload transaction;
 - no marker in a definitively aborted transaction;
 - marker is the final row event in the transaction;
-- every marker is an `INSERT` with a null before-image, a complete after-image,
-  and identical `(session_id, txn_id)` key/after identity;
+- every marker is an `INSERT` with an exact key, a complete final row, and
+  identical `(session_id, txn_id)` key/final-row identity;
 - `txn_id` changes on every physical attempt, and the composite primary key
   rejects a reused committed correlation identity;
 - every published record has `txn_id >= session_seq`, and the per-session
@@ -360,7 +360,8 @@ The monitor-ready boundary is pinned by
 `protocol/fixtures/mariadb_tpcc_transactions.json`. Its raw startup schema and
 BEGIN/row/END entries retain workload markers; independent reference and C++
 normalizers must agree on control/bootstrap/workload classification, marker
-filtering, correlation, repeated-write collapse, primary-key splits, touched
+filtering, correlation, repeated-write collapse, emitted old-key delete/new-key
+insert pairs, touched
 net-no-change keys, deletes, and the final bootstrap digest.
 
 ## D15: TPC-C trace SQL variants and client evidence
@@ -389,3 +390,29 @@ explicitly labeled synthetic diagnostics and exist only to pair with the
 captured primary-key-change, insert/delete, and net-no-change CDC shapes. The
 single `SessionDone` counts all eight accepted clients; discarded-attempt reads
 are excluded from both publication and reconciliation.
+
+## D16: CDC crosses the backend boundary as complete final writes
+
+The backend-neutral CDC row is an exact canonical event key plus an operation
+and, for INSERT/UPDATE, one complete typed final row. INSERT/UPDATE require the
+final row's primary key to equal the event key. DELETE requires the exact event
+key, has no final row, and normalizes to `Absent`.
+
+A raw connector `before` field may be a complete object, null, or omitted when
+the pinned backend envelope admits that shape. The backend decoder validates its
+raw type and then discards it. No common row type, assembler state, retained-byte
+account, normalized fixture, replay output, diagnostic, reconciliation input, or
+checker event stores or interprets it.
+
+Repeated raw writes stay ordered until final-value collapse, and every touched
+key remains in the normalized write set for repeated update,
+update-to-original, and insert-delete. A connector-emitted old-key DELETE plus
+new-key INSERT/CREATE is processed as two ordinary ordered writes; generic code
+does not pair them or infer a primary-key change.
+
+Sparse final rows are never reconstructed from raw before-images, transaction-
+local state, cached state, connector headers, or database reads. A backend-owned
+physical capture profile is admissible only when it proves complete final rows,
+exact delete keys, framing/count/order, and marker-last behavior. Backend
+contracts expose the normalized `complete_final_writes` capability; physical
+capture settings remain strict backend attestation facts.

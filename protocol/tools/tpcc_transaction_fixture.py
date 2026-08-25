@@ -85,31 +85,34 @@ def normalize_application_row(
 ) -> None:
     operation = envelope.get("op")
     require(operation in {"c", "u", "d"}, f"{table}: unsupported row operation")
-    before = envelope.get("before")
     after = envelope.get("after")
-    require((before is None) == (operation == "c"), f"{table}: before image/operation mismatch")
     require((after is None) == (operation == "d"), f"{table}: after image/operation mismatch")
-    reference_image = after if after is not None else before
-    require(isinstance(reference_image, dict), f"{table}: row image is not object")
     table_contract = codec.table(table)
     require(
-        set(key_object) == set(table_contract["key_columns"])
-        and all(key_object[column] == reference_image[column] for column in key_object),
-        f"{table}: Debezium key differs from row primary key",
+        set(key_object) == set(table_contract["key_columns"]),
+        f"{table}: Debezium event key shape differs",
     )
     try:
-        before_encoded = codec.encode_row(table, before) if before is not None else None
-        after_encoded = codec.encode_row(table, after) if after is not None else None
+        event_key = codec.encode_key(table, key_object)
+    except CodecError as error:
+        raise TransactionFixtureError(f"{table}: event key codec failed: {error.code}: {error}") from error
+    if operation == "d":
+        final_writes[event_key] = canonical_write(table, event_key, "absent")
+        return
+    require(isinstance(after, dict), f"{table}: final row is not object")
+    require(
+        all(column in after and key_object[column] == after[column]
+            for column in key_object),
+        f"{table}: Debezium key differs from final-row primary key",
+    )
+    try:
+        after_encoded = codec.encode_row(table, after)
     except CodecError as error:
         raise TransactionFixtureError(f"{table}: codec failed: {error.code}: {error}") from error
-    if before_encoded is not None and (
-        after_encoded is None or before_encoded[0] != after_encoded[0]
-    ):
-        final_writes[before_encoded[0]] = canonical_write(table, before_encoded[0], "absent")
-    if after_encoded is not None:
-        final_writes[after_encoded[0]] = canonical_write(
-            table, after_encoded[0], "present", after_encoded[1]
-        )
+    require(event_key == after_encoded[0], f"{table}: event key differs from final row")
+    final_writes[event_key] = canonical_write(
+        table, event_key, "present", after_encoded[1]
+    )
 
 
 def normalize_transaction(
@@ -232,7 +235,6 @@ def normalize_transaction(
         )
         identity = (correlation["session_id"], correlation["txn_id"])
         require(marker_envelope.get("op") == "c", f"{name}: marker is not an insert")
-        require(marker_envelope.get("before") is None, f"{name}: marker has before image")
         require(
             marker_key
             == {"session_id": correlation["session_id"], "txn_id": correlation["txn_id"]},

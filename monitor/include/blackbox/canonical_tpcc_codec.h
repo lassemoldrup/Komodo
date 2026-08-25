@@ -30,7 +30,7 @@ public:
                                                 std::string_view table,
                                                 const nlohmann::json &key);
 
-  // A Debezium before/after image contains exactly the complete table row.
+  // A Debezium final row image contains exactly the complete table row.
   [[nodiscard]] static CanonicalBytes
   encodeValue(std::string_view qualified_table, const nlohmann::json &row);
 

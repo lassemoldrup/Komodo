@@ -98,6 +98,18 @@ def require_exact_keys(
     )
 
 
+def require_required_optional_keys(
+    value: dict[str, Any], required: set[str], optional: set[str], label: str
+) -> None:
+    actual = set(value)
+    require(
+        required <= actual <= required | optional,
+        "RAW_ENVELOPE_PROFILE_MISMATCH",
+        f"{label} fields differ: required={sorted(required)} "
+        f"optional={sorted(optional)} actual={sorted(actual)}",
+    )
+
+
 def require_bounded_text(value: Any, code: str, label: str, maximum_bytes: int) -> str:
     require(isinstance(value, str) and bool(value), code, f"{label} must be nonempty text")
     encoded = value.encode("utf-8")
@@ -506,18 +518,18 @@ def validate_column(table: str, column: str, value: Any, label: str) -> None:
         "ycsb_key", "txn_id", "account_id", "w_id", "d_w_id", "d_id",
         "d_next_o_id",
     }:
-        require(type(value) is int, "FULL_IMAGE_INVALID", f"{label}.{column} is not an integer")
+        require(type(value) is int, "FINAL_WRITE_INVALID", f"{label}.{column} is not an integer")
         return
     if column in {"w_ytd", "w_tax", "d_ytd", "d_tax"}:
         require(
             isinstance(value, str) and re.fullmatch(r"-?[0-9]+\.[0-9]+", value) is not None,
-            "FULL_IMAGE_INVALID",
+            "FINAL_WRITE_INVALID",
             f"{label}.{column} is not a decimal string",
         )
         return
     nullable = table == "usertable" and column != "ycsb_key"
     if value is None:
-        require(nullable, "FULL_IMAGE_INVALID", f"{label}.{column} is unexpectedly null")
+        require(nullable, "FINAL_WRITE_INVALID", f"{label}.{column} is unexpectedly null")
         return
     limits = {
         "run_id": 36,
@@ -539,14 +551,14 @@ def validate_column(table: str, column: str, value: Any, label: str) -> None:
         "d_zip": 9,
     }
     limit = 100 if column.startswith("field") else limits[column]
-    require(isinstance(value, str), "FULL_IMAGE_INVALID", f"{label}.{column} is not text")
-    require(len(value) <= limit, "FULL_IMAGE_INVALID", f"{label}.{column} exceeds {limit} characters")
+    require(isinstance(value, str), "FINAL_WRITE_INVALID", f"{label}.{column} is not text")
+    require(len(value) <= limit, "FINAL_WRITE_INVALID", f"{label}.{column} exceeds {limit} characters")
 
 
 def validate_image(image: Any, table: str, label: str) -> dict[str, Any]:
-    require(isinstance(image, dict), "FULL_IMAGE_INVALID", f"{label} is absent or is not an object")
+    require(isinstance(image, dict), "FINAL_WRITE_INVALID", f"{label} is absent or is not an object")
     columns = set(TABLES[table]["columns"])
-    require_exact_keys(image, columns, label, "FULL_IMAGE_INVALID")
+    require_exact_keys(image, columns, label, "FINAL_WRITE_INVALID")
     for column, value in image.items():
         validate_column(table, column, value, label)
     return image
@@ -555,7 +567,12 @@ def validate_image(image: Any, table: str, label: str) -> dict[str, Any]:
 def validate_row(entry: dict[str, Any], row_number: int) -> dict[str, Any]:
     redis_id = entry["redis_id"]
     row = entry["value"]
-    require_exact_keys(row, {"before", "after", "source", "op", "ts_ms", "transaction"}, f"row {row_number}")
+    require_required_optional_keys(
+        row,
+        {"after", "source", "op", "ts_ms", "transaction"},
+        {"before"},
+        f"row {row_number}",
+    )
     require(row["op"] in {"c", "u", "d"}, "ROW_OPERATION_INVALID", f"row {row_number} operation is invalid")
     require(type(row["ts_ms"]) is int and row["ts_ms"] >= 0, "RAW_ENVELOPE_PROFILE_MISMATCH", f"row {row_number} ts_ms is invalid")
     require(isinstance(row["source"], dict), "RAW_ENVELOPE_PROFILE_MISMATCH", f"row {row_number} source is invalid")
@@ -611,31 +628,30 @@ def validate_row(entry: dict[str, Any], row_number: int) -> dict[str, Any]:
         f"row {row_number} collection order is invalid",
     )
 
-    before: dict[str, Any] | None
+    raw_before = row.get("before")
+    require(
+        raw_before is None or isinstance(raw_before, dict),
+        "RAW_ENVELOPE_PROFILE_MISMATCH",
+        f"row {row_number} raw before field has an unsupported type",
+    )
     after: dict[str, Any] | None
-    if row["op"] == "c":
-        require(row["before"] is None, "FULL_IMAGE_INVALID", f"insert row {row_number} has a before image")
-        before = None
-        after = validate_image(row["after"], table, f"row {row_number} after")
-    elif row["op"] == "u":
-        before = validate_image(row["before"], table, f"row {row_number} before")
+    if row["op"] in {"c", "u"}:
         after = validate_image(row["after"], table, f"row {row_number} after")
     else:
-        before = validate_image(row["before"], table, f"row {row_number} before")
-        require(row["after"] is None, "FULL_IMAGE_INVALID", f"delete row {row_number} has an after image")
+        require(row["after"] is None, "FINAL_WRITE_INVALID", f"delete row {row_number} has a final row")
         after = None
 
-    image_for_key = after if after is not None else before
-    assert image_for_key is not None
     primary_key = TABLES[table]["primary_key"]
     require_exact_keys(entry["key"], set(primary_key), f"row {row_number} key")
     for column in primary_key:
-        require(
-            entry["key"][column] == image_for_key[column],
-            "FULL_IMAGE_INVALID",
-            f"row {row_number} key differs from the complete row image at {redis_id}",
-        )
-    return {"entry": entry, "row": row, "table": table, "before": before, "after": after}
+        validate_column(table, column, entry["key"][column], f"row {row_number} key")
+        if after is not None:
+            require(
+                entry["key"][column] == after[column],
+                "FINAL_WRITE_INVALID",
+                f"row {row_number} key differs from the complete final row at {redis_id}",
+            )
+    return {"entry": entry, "row": row, "table": table, "after": after}
 
 
 def validate_completed_frame(
@@ -691,7 +707,6 @@ def validate_completed_frame(
     marker = rows[-1]
     require(marker["table"] == "session_txn", "MARKER_NOT_LAST", f"frame {begin_entry['redis_id']} final row is not session_txn")
     require(marker["row"]["op"] == "c", "MARKER_INVALID", "final marker is not an insert")
-    require(marker["before"] is None, "MARKER_INVALID", "marker insert has a before image")
     marker_after = marker["after"]
     assert marker_after is not None
     session_id = marker_after["session_id"]

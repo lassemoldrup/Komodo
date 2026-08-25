@@ -28,7 +28,7 @@
   "normalized_capabilities": {
     "transaction_framing": "contiguous_begin_rows_end",
     "commit_order": "single_stream_completed_transaction_order",
-    "full_before_after_images": true,
+    "complete_final_writes": true,
     "marker_last": true,
     "connector_startup_schema_evidence": "required",
     "char_read_semantics": "pad_to_declared_length"

@@ -84,7 +84,6 @@ struct BackendCdcRecord {
   std::string canonical_table;
   std::string operation;
   nlohmann::json key;
-  nlohmann::json before;
   nlohmann::json after;
   std::uint64_t total_order = 0;
   std::uint64_t data_collection_order = 0;
@@ -133,7 +132,7 @@ struct BackendFactRule {
 
 struct BackendNormalizedCapabilities {
   bool connector_startup_schema_evidence = false;
-  bool full_before_after_images = true;
+  bool complete_final_writes = true;
   bool marker_last = true;
   std::string_view transaction_framing = "contiguous_begin_rows_end";
   std::string_view commit_order = "single_stream_completed_transaction_order";

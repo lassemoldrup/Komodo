@@ -28,7 +28,7 @@
   "normalized_capabilities": {
     "transaction_framing": "contiguous_begin_rows_end",
     "commit_order": "single_stream_completed_transaction_order",
-    "full_before_after_images": true,
+    "complete_final_writes": true,
     "marker_last": true,
     "connector_startup_schema_evidence": "not_available",
     "char_read_semantics": "pad_to_declared_length"
@@ -65,11 +65,12 @@
     {"name": "connector_sha256", "value_rule": "exact", "expected_value": "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"},
     {"name": "connector_tasks", "value_rule": "exact", "expected_value": "1"},
     {"name": "redis_stream", "value_rule": "exact", "expected_value": "cdc"},
-    {"name": "cdc_enable_intra_transactional_before_image", "value_rule": "exact", "expected_value": "true"},
-    {"name": "cdc_send_null_before_image_if_not_exists", "value_rule": "exact", "expected_value": "false"},
+    {"name": "physical_capture_profile", "value_rule": "canonical_identifier"},
+    {"name": "cdc_enable_intra_transactional_before_image", "value_rule": "canonical_identifier"},
+    {"name": "cdc_send_null_before_image_if_not_exists", "value_rule": "canonical_identifier"},
     {"name": "database_image_digest", "value_rule": "sha256"},
     {"name": "publication_membership_sha256", "value_rule": "sha256"},
-    {"name": "replica_identity_full_tables_sha256", "value_rule": "sha256"},
+    {"name": "replica_identity_tables_sha256", "value_rule": "sha256"},
     {"name": "table_oid_type_typmod_sha256", "value_rule": "sha256"},
     {"name": "dedicated_privileges_sha256", "value_rule": "sha256"}
   ]

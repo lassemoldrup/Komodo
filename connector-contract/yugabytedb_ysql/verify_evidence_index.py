@@ -181,7 +181,24 @@ def verify_bundle(
     verify_manifest(directory, manifest)
     require(digest(report) == bundle["report_sha256"],
             f"report digest differs: {purpose}")
-    replay_bundle(directory, str(purpose), report, replay_bin)
+    if purpose == "complete_value_normalization":
+        legacy_replay = json.loads(
+            (directory / "cpp-codec-replay.json").read_text(encoding="utf-8")
+        )
+        events = legacy_replay.get("frames", [{}])[0].get("application_events", [])
+        require(
+            bool(events)
+            and "before" in events[0]
+            and "final_write" not in events[0],
+            "legacy normalization archive shape differs",
+        )
+        print(
+            "complete_value_normalization archive checksum verified; "
+            "normalized replay is explicitly superseded by the complete-final-write contract",
+            file=sys.stderr,
+        )
+    else:
+        replay_bundle(directory, str(purpose), report, replay_bin)
     regular_files = [item for item in directory.rglob("*") if item.is_file()]
     require(
         len(regular_files) == bundle["regular_file_count"] + 1,

@@ -375,14 +375,13 @@ private:
 
   struct RowEvent {
     Json key;
-    Json before;
     Json after;
     std::string operation;
     QualifiedTable table;
     std::uint64_t total_order = 0;
     std::uint64_t data_collection_order = 0;
     std::string stream_id;
-    std::size_t raw_bytes = 0;
+    std::size_t retained_bytes = 0;
   };
 
   struct ActiveTransaction {
@@ -777,22 +776,25 @@ private:
            "CDC transaction event limit exceeded");
     }
 
-    const auto raw_bytes = record.key_json.size() + record.envelope_json.size();
-    reserveActiveBytes(raw_bytes);
+    const auto retained_bytes =
+        decoded.key.dump().size() + decoded.after.dump().size() +
+        decoded.operation.size() + decoded.canonical_table.size() +
+        record.stream_id.size() + sizeof(decoded.total_order) +
+        sizeof(decoded.data_collection_order);
+    reserveActiveBytes(retained_bytes);
     active->second.rows.push_back(RowEvent{
         .key = decoded.key,
-        .before = decoded.before,
         .after = decoded.after,
         .operation = decoded.operation,
         .table = std::move(table),
         .total_order = total_order,
         .data_collection_order = collection_order,
         .stream_id = record.stream_id,
-        .raw_bytes = raw_bytes,
+        .retained_bytes = retained_bytes,
     });
     active->second.table_counts[active->second.rows.back().table.full_name] =
         collection_order;
-    active->second.raw_bytes += raw_bytes;
+    active->second.raw_bytes += retained_bytes;
     observed_events_per_transaction_high_water_ =
         std::max(observed_events_per_transaction_high_water_,
                  active->second.rows.size());
@@ -1013,10 +1015,9 @@ private:
   }
 
   [[nodiscard]] RunFencePhase validateFence(const RowEvent &row) const {
-    if (row.operation != "c" || !row.before.is_null() ||
-        !row.after.is_object()) {
+    if (row.operation != "c" || !row.after.is_object()) {
       fail(CdcErrorCode::FenceOrderInvalid,
-           "run fence must be one insert with a null before-image");
+           "run fence must be one insert with a complete final row");
     }
     requireExactKeys(row.key, {"run_id", "phase"}, "run fence key",
                      CdcErrorCode::FenceOrderInvalid);
@@ -1092,11 +1093,9 @@ private:
   }
 
   [[nodiscard]] MarkerInsert validateMarker(const RowEvent &row) const {
-    if (row.operation != "c" || !row.before.is_null() ||
-        !row.after.is_object()) {
+    if (row.operation != "c" || !row.after.is_object()) {
       fail(CdcErrorCode::MarkerMalformed,
-           "session_txn marker must be an insert with a null before-image and "
-           "complete after-image");
+           "session_txn marker must be an insert with a complete final row");
     }
     requireExactKeys(row.key, {"session_id", "txn_id"}, "session_txn key",
                      CdcErrorCode::MarkerMalformed);
@@ -1144,8 +1143,6 @@ private:
   [[nodiscard]] std::vector<NormalizedWrite>
   normalizeApplicationWrites(const std::vector<const RowEvent *> &rows) const {
     std::map<CanonicalBytes, NormalizedWrite, CanonicalBytesLess> collapsed;
-    std::map<CanonicalBytes, std::optional<CanonicalBytes>, CanonicalBytesLess>
-        local_state;
     const auto put_present = [&collapsed](CanonicalBytes key,
                                           CanonicalBytes value) {
       NormalizedWrite write{.key = key,
@@ -1159,34 +1156,6 @@ private:
                             .value = std::nullopt};
       collapsed.insert_or_assign(std::move(key), std::move(write));
     };
-    const auto require_before_matches =
-        [this, &local_state](const CanonicalRowImage &before,
-                             const std::string_view operation) {
-          const auto previous = local_state.find(before.key);
-          if (previous == local_state.end()) {
-            return;
-          }
-          if (!previous->second.has_value()) {
-            fail(CdcErrorCode::CdcRecordMalformed,
-                 "application " + std::string(operation) +
-                     " follows a transaction-local Absent row state");
-          }
-          if (*previous->second != before.value) {
-            fail(CdcErrorCode::CdcRecordMalformed,
-                 "application " + std::string(operation) +
-                     " before-image does not continue the prior after-image");
-          }
-        };
-    const auto require_insert_follows_absent =
-        [this, &local_state](const CanonicalBytes &key) {
-          const auto previous = local_state.find(key);
-          if (previous != local_state.end() && previous->second.has_value()) {
-            fail(CdcErrorCode::CdcRecordMalformed,
-                 "application insert follows a transaction-local Present row "
-                 "state");
-          }
-        };
-
     for (const auto *row_pointer : rows) {
       const auto &row = *row_pointer;
       const auto *codec =
@@ -1237,55 +1206,29 @@ private:
         }
       };
 
-      if (row.operation == "c") {
-        if (!row.before.is_null() || !row.after.is_object()) {
+      if (row.operation == "c" || row.operation == "u") {
+        if (!row.after.is_object()) {
           fail(CdcErrorCode::CdcRecordMalformed,
-               "application insert has invalid before/after images");
+               "application insert/update lacks a complete final row");
         }
-        const auto after = image(row.after, "insert after-image");
+        const auto after = image(row.after, "insert/update final row");
         if (event_key != after.key) {
           fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-               "application insert key and after-image disagree");
+               "application insert/update key and final row disagree");
         }
-        require_insert_follows_absent(after.key);
-        local_state.insert_or_assign(after.key, after.value);
         put_present(after.key, after.value);
         continue;
       }
       if (row.operation == "d") {
-        if (!row.before.is_object() || !row.after.is_null()) {
+        if (!row.after.is_null()) {
           fail(CdcErrorCode::CdcRecordMalformed,
-               "application delete has invalid before/after images");
+               "application delete unexpectedly has a final row");
         }
-        const auto before = image(row.before, "delete before-image");
-        if (event_key != before.key) {
-          fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-               "application delete key and before-image disagree");
-        }
-        require_before_matches(before, "delete");
-        local_state.insert_or_assign(before.key, std::nullopt);
-        put_absent(before.key);
+        put_absent(event_key);
         continue;
       }
-
-      if (!row.before.is_object() || !row.after.is_object()) {
-        fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-             "application update lacks complete before/after images");
-      }
-      const auto before = image(row.before, "update before-image");
-      const auto after = image(row.after, "update after-image");
-      if (event_key != after.key) {
-        fail(CdcErrorCode::PrimaryKeyImageIncomplete,
-             "application update key and after-image disagree");
-      }
-      require_before_matches(before, "update");
-      if (before.key != after.key) {
-        require_insert_follows_absent(after.key);
-        local_state.insert_or_assign(before.key, std::nullopt);
-        put_absent(before.key);
-      }
-      local_state.insert_or_assign(after.key, after.value);
-      put_present(after.key, after.value);
+      fail(CdcErrorCode::CdcRecordMalformed,
+           "application row operation is unsupported");
     }
 
     std::vector<NormalizedWrite> result;

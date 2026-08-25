@@ -166,7 +166,7 @@ key/value hex, and malformed vectors shared by Java, C++, and the bootstrap
 reference implementation.
 
 `protocol/fixtures/mariadb_tpcc_typed_rows.json` pins real MariaDB 12.3 and
-Debezium 3.6.1 row images for all nine tables, including numeric `FLOAT`,
+Debezium 3.6.1 raw row-image supersets for all nine tables, including numeric `FLOAT`,
 trimmed `CHAR`, nullable present/NULL, timestamps, decimals, UTF-8, and the empty
 `new_order` value. Its encoded bytes must match the executable goldens' codec.
 
@@ -178,6 +178,9 @@ primary-key changes,
 insert-then-delete, and net-no-change writes. The protocol verifier independently
 parses and normalizes those raw envelopes before comparing their expected
 classification, correlation, fences, final writes, and bootstrap manifest.
+Raw before fields in these regression supersets are not canonical values or
+predecessor-lineage evidence; only event keys and complete final writes enter
+normalization.
 
 `protocol/fixtures/mariadb_tpcc_client_txns.json` pins eight `ClientTxn` records
 against the eight workload markers in that raw fixture. Five semantic records

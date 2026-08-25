@@ -64,9 +64,8 @@ void checkSharedContract(const std::string_view backend) {
   BLACKBOX_CHECK(capabilities.connector_startup_schema_evidence ==
                  (expected_capabilities.at(
                       "connector_startup_schema_evidence") == "required"));
-  BLACKBOX_CHECK(
-      capabilities.full_before_after_images ==
-      expected_capabilities.at("full_before_after_images").get<bool>());
+  BLACKBOX_CHECK(capabilities.complete_final_writes ==
+                 expected_capabilities.at("complete_final_writes").get<bool>());
   BLACKBOX_CHECK(capabilities.marker_last ==
                  expected_capabilities.at("marker_last").get<bool>());
   BLACKBOX_CHECK(

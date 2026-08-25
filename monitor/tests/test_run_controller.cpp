@@ -673,8 +673,11 @@ void testRunOwnedYugabyteFactsRejectValidDrift() {
   const std::map<std::string, std::string> expected_values = {
       {"publication_name", "expected_publication"},
       {"slot_name", "expected_slot"},
+      {"physical_capture_profile", "yb_final_write_v1"},
+      {"cdc_enable_intra_transactional_before_image", "false"},
+      {"cdc_send_null_before_image_if_not_exists", "true"},
       {"publication_membership_sha256", std::string(64U, 'a')},
-      {"replica_identity_full_tables_sha256", std::string(64U, 'b')},
+      {"replica_identity_tables_sha256", std::string(64U, 'b')},
   };
   blackbox::RunControllerConfig config;
   for (const auto &[name, value] : expected_values) {

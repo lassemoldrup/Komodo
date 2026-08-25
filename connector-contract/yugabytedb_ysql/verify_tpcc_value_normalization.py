@@ -138,18 +138,18 @@ def cross_check_python_codec(
             table = "benchbase." + row["value"]["source"]["table"]
             require(event["table"] == table, "C++ replay table differs")
             require(event["operation"] == row["value"]["op"], "C++ replay operation differs")
-            for side in ("before", "after"):
-                image = row["value"][side]
-                rendered = event[side]
-                if image is None:
-                    require(rendered == {"state": "absent"},
-                            f"C++ {side} image presence differs for {table}")
-                    continue
-                key, value = codec.encode_row(table, image)
-                require(rendered.get("state") == "present"
+            rendered = event["final_write"]
+            event_key = codec.encode_key(table, row["key"])
+            if row["value"]["op"] == "d":
+                require(rendered == {"state": "absent", "key_hex": event_key.hex()},
+                        f"C++ delete key differs for {table}")
+            else:
+                key, value = codec.encode_row(table, row["value"]["after"])
+                require(event_key == key
+                        and rendered.get("state") == "present"
                         and rendered.get("key_hex") == key.hex()
                         and rendered.get("value_hex") == value.hex(),
-                        f"C++ {side} canonical bytes differ for {table}")
+                        f"C++ final canonical bytes differ for {table}")
             checked += 1
     return checked
 
@@ -158,15 +158,11 @@ def final_state_from_events(cpp_frames: list[dict[str, object]]) -> dict[str, st
     state: dict[str, str] = {}
     for frame in cpp_frames:
         for event in frame["application_events"]:
-            before = event["before"]
-            after = event["after"]
-            if before.get("state") == "present" and (
-                after.get("state") != "present" or after["key_hex"] != before["key_hex"]
-            ):
-                require(before["key_hex"] in state, "delete/key-change predecessor missing")
-                del state[before["key_hex"]]
-            if after.get("state") == "present":
-                state[after["key_hex"]] = after["value_hex"]
+            final_write = event["final_write"]
+            if final_write["state"] == "absent":
+                state.pop(final_write["key_hex"], None)
+            else:
+                state[final_write["key_hex"]] = final_write["value_hex"]
     return state
 
 
@@ -199,32 +195,21 @@ def main() -> int:
     stock_updates = [event for event in shape_events
                      if event["table"] == "benchbase.stock" and event["operation"] == "u"]
     require(len(stock_updates) == 2, "update-update shape differs")
-    require(stock_updates[1]["after"]["value_hex"]
-            == stock_updates[0]["before"]["value_hex"],
-            "update-to-original shape differs")
-    key_change_pairs = [
-        (event["before"]["key_hex"], event["after"]["key_hex"])
-        for event in shape_events
-        if event["operation"] == "u"
-        and event["before"].get("state") == "present"
-        and event["after"].get("state") == "present"
-        and event["before"]["key_hex"] != event["after"]["key_hex"]
-    ]
-    item_inserts = {event["after"]["key_hex"] for event in shape_events
+    require(stock_updates[1]["final_write"]["value_hex"]
+            != stock_updates[0]["final_write"]["value_hex"],
+            "update-to-original final-write sequence differs")
+    item_inserts = {event["final_write"]["key_hex"] for event in shape_events
                     if event["table"] == "benchbase.item" and event["operation"] == "c"}
-    item_deletes = {event["before"]["key_hex"] for event in shape_events
+    item_deletes = {event["final_write"]["key_hex"] for event in shape_events
                     if event["table"] == "benchbase.item" and event["operation"] == "d"}
     key_600 = codec.encode_key("benchbase.item", {"i_id": 600}).hex()
     key_500 = codec.encode_key("benchbase.item", {"i_id": 500}).hex()
     key_501 = codec.encode_key("benchbase.item", {"i_id": 501}).hex()
     require(key_600 in item_inserts and key_600 in item_deletes,
             "insert-delete shape differs")
-    # The pinned connector emits a primary-key change either as one update with
-    # differing key images or as an old-key delete plus a new-key insert.
     require(
-        (key_500, key_501) in key_change_pairs
-        or (key_500 in item_deletes and key_501 in item_inserts),
-        "primary-key change shape differs",
+        key_500 in item_deletes and key_501 in item_inserts,
+        "emitted primary-key change delete/insert shape differs",
     )
 
     final_state = final_state_from_events(cpp_frames)

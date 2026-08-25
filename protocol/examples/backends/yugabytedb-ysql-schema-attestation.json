@@ -202,12 +202,16 @@
       "canonical_value": "cdc"
     },
     {
+      "name": "physical_capture_profile",
+      "canonical_value": "yb_final_write_v1"
+    },
+    {
       "name": "cdc_enable_intra_transactional_before_image",
-      "canonical_value": "true"
+      "canonical_value": "false"
     },
     {
       "name": "cdc_send_null_before_image_if_not_exists",
-      "canonical_value": "false"
+      "canonical_value": "true"
     },
     {
       "name": "database_image_digest",
@@ -218,7 +222,7 @@
       "canonical_value": "6666666666666666666666666666666666666666666666666666666666666666"
     },
     {
-      "name": "replica_identity_full_tables_sha256",
+      "name": "replica_identity_tables_sha256",
       "canonical_value": "7777777777777777777777777777777777777777777777777777777777777777"
     },
     {
@@ -230,5 +234,5 @@
       "canonical_value": "9999999999999999999999999999999999999999999999999999999999999999"
     }
   ],
-  "canonical_attestation_digest": "d4d90ad6e19da2ac97a31056d047a6660c22eea16c36855ddb2f65821c4aa29b"
+  "canonical_attestation_digest": "d9c6bc9eda7bd0b3ebeccac25b9219150d8d8cc59a99cbf37d15a957fe271037"
 }

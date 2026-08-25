@@ -235,7 +235,24 @@ def verify_bundle(
         )
     if bundle.get("requires_local_artifacts"):
         verify_required_local_artifacts(directory, purpose)
-    replay_bundle(directory, purpose, report, replay_bin)
+    if purpose == "tpcc_value_normalization":
+        legacy_replay = json.loads(
+            (directory / "cpp-codec-replay.json").read_text(encoding="utf-8")
+        )
+        events = legacy_replay.get("frames", [{}])[0].get("application_events", [])
+        require(
+            bool(events)
+            and "before" in events[0]
+            and "final_write" not in events[0],
+            "legacy TPC-C normalization archive shape differs",
+        )
+        print(
+            "tpcc_value_normalization archive checksum verified; normalized "
+            "replay is explicitly superseded by the complete-final-write contract",
+            file=sys.stderr,
+        )
+    else:
+        replay_bundle(directory, purpose, report, replay_bin)
     regular_files = [item for item in directory.rglob("*") if item.is_file()]
     require(
         len(regular_files) == bundle["regular_file_count"] + 1,
