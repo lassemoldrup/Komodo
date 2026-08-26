@@ -1074,6 +1074,14 @@ def build_bootstrap_manifest(args: argparse.Namespace) -> dict[str, Any]:
     require(args.max_rows > 0, "bootstrap max rows must be positive")
     require(args.max_input_bytes > 0, "bootstrap max input bytes must be positive")
     require(args.max_canonical_bytes > 0, "bootstrap max canonical bytes must be positive")
+    if args.schema is not None:
+        validate_identifier(args.schema, "legacy bootstrap schema")
+    if args.table is not None:
+        validate_identifier(args.table, "legacy bootstrap table")
+    require(
+        (args.schema is None) == (args.table is None),
+        "legacy schema/table options must be supplied together",
+    )
     bootstrap_adapter = bootstrap_adapter_registry().require(adapter["benchmark"])
     rows, counts = bootstrap_adapter.encode_scan(
         adapter,
@@ -1081,7 +1089,7 @@ def build_bootstrap_manifest(args: argparse.Namespace) -> dict[str, Any]:
         max_rows=args.max_rows,
         max_input_bytes=args.max_input_bytes,
         max_canonical_bytes=args.max_canonical_bytes,
-        options={"schema": args.schema, "table": args.table},
+        options={},
     )
     row_count, digest = bootstrap_digest(rows)
     require(row_count == sum(counts.values()), "bootstrap row-count algebra mismatch")
@@ -1428,8 +1436,10 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap = subparsers.add_parser("bootstrap-manifest", help="emit a BootstrapManifest")
     bootstrap.add_argument("--run-id", required=True)
     bootstrap.add_argument("--benchmark", default="ycsb")
-    bootstrap.add_argument("--schema", default="benchbase")
-    bootstrap.add_argument("--table", default="usertable")
+    # Retained as ignored compatibility arguments for already-running older
+    # coordinators; current adapters derive physical identity from registration.
+    bootstrap.add_argument("--schema")
+    bootstrap.add_argument("--table")
     bootstrap.add_argument("--scan-file", required=True)
     bootstrap.add_argument("--max-rows", type=int, default=1000000)
     bootstrap.add_argument("--max-input-bytes", type=int, default=4294967296)

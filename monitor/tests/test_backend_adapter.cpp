@@ -95,9 +95,10 @@ void checkRegistry() {
   BLACKBOX_CHECK(
       blackbox::toString(MonitorErrorCode::SessionContractMismatch) ==
       "SESSION_CONTRACT_MISMATCH");
-  BLACKBOX_CHECK(BackendAdapterRegistry::adapters().size() == 2U);
+  BLACKBOX_CHECK(BackendAdapterRegistry::adapters().size() == 3U);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("mariadb") != nullptr);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("yugabytedb_ysql") != nullptr);
+  BLACKBOX_CHECK(BackendAdapterRegistry::find("oracle") != nullptr);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("unknown") == nullptr);
   try {
     (void)BackendAdapterRegistry::require("unknown");
@@ -157,9 +158,10 @@ void checkYugabyteSchemaAttestationFailures() {
     auto drifted_fact = parsed;
     auto &fact = drifted_fact.backend_facts[index];
     const auto rules = adapter.attestationFactContract();
-    const auto rule = std::find_if(
-        rules.begin(), rules.end(),
-        [&](const auto &candidate) { return candidate.name == fact.name; });
+    const auto rule =
+        std::find_if(rules.begin(), rules.end(), [&](const auto &candidate) {
+          return candidate.name == fact.name;
+        });
     BLACKBOX_REQUIRE(rule != rules.end());
     switch (rule->value_rule) {
     case blackbox::BackendFactValueRule::Exact:
@@ -278,6 +280,7 @@ void checkSyntheticCatalogSelectionAndFailurePropagation() {
 int runBackendAdapterTests() {
   checkSharedContract("mariadb");
   checkSharedContract("yugabytedb_ysql");
+  checkSharedContract("oracle");
   checkRegistry();
   checkCatalogOnlySchemaCapability();
   checkYugabyteSchemaAttestationFailures();

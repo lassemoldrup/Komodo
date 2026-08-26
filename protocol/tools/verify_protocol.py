@@ -856,10 +856,11 @@ def load_backend_contracts(
             len(fact_names) == len(set(fact_names)),
             f"{path.name}: duplicate attestation fact",
         )
+        namespace = contract["physical_namespace"]
         require(
-            contract["physical_namespace"]["database"] == "benchbase"
-            and contract["physical_namespace"]["schema"] == "benchbase",
-            f"{path.name}: physical namespace cannot preserve canonical table bytes",
+            namespace["canonical_schema"] == "benchbase"
+            and namespace["identifier_case"] in {"lower", "upper"},
+            f"{path.name}: physical namespace lacks an exact canonical mapping",
         )
         contracts[backend] = contract
     require(
@@ -888,7 +889,13 @@ def load_backend_contracts(
     require(
         yugabyte["accepted_database_types"] == ["POSTGRES"]
         and yugabyte["physical_namespace"]
-        == {"database": "benchbase", "schema": "benchbase", "search_path": "benchbase"}
+        == {
+            "database": "benchbase",
+            "schema": "benchbase",
+            "search_path": "benchbase",
+            "canonical_schema": "benchbase",
+            "identifier_case": "lower",
+        }
         and yugabyte["normalized_capabilities"]["connector_startup_schema_evidence"]
         == "not_available"
         and yugabyte["connector_contract"]
@@ -1014,8 +1021,8 @@ def verify_backend_attestation_examples(
         covered_backends.add(document["backend"])
         count += 1
     require(
-        covered_backends == {"mariadb", "yugabytedb_ysql"},
-        "backend attestation examples do not cover both registered backends",
+        covered_backends == set(backends),
+        "backend attestation examples do not cover every registered backend",
     )
     return count
 

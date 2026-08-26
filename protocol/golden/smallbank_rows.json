@@ -1,0 +1,27 @@
+{
+  "benchmark": "smallbank",
+  "canonical_schema": "benchbase",
+  "vectors": [
+    {
+      "name": "accounts_utf8",
+      "table": "benchbase.accounts",
+      "row": {"custid": 1, "name": "账户🙂"},
+      "expected_key_hex": "0000000962656e636862617365000000086163636f756e74730000000000000001",
+      "expected_value_hex": "0000000ae8b4a6e688b7f09f9982"
+    },
+    {
+      "name": "checking_negative_balance",
+      "table": "benchbase.checking",
+      "row": {"custid": -1, "bal": "-1.30"},
+      "expected_key_hex": "0000000962656e63686261736500000008636865636b696e67ffffffffffffffff",
+      "expected_value_hex": "ffffffffffffff7e"
+    },
+    {
+      "name": "savings_i64_and_decimal_boundary",
+      "table": "benchbase.savings",
+      "row": {"custid": 9223372036854775807, "bal": "9999999999999999.99"},
+      "expected_key_hex": "0000000962656e63686261736500000007736176696e67737fffffffffffffff",
+      "expected_value_hex": "0de0b6b3a763ffff"
+    }
+  ]
+}

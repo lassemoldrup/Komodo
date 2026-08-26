@@ -1,0 +1,85 @@
+{
+  "backend": "oracle",
+  "accepted_database_types": ["ORACLE"],
+  "physical_namespace": {
+    "database": "FREEPDB1",
+    "schema": "BLACKBOX_OWNER",
+    "search_path": "BLACKBOX_OWNER",
+    "canonical_schema": "benchbase",
+    "identifier_case": "upper"
+  },
+  "session_contract": {
+    "declared_isolations": ["REPEATABLE_READ"],
+    "configure_in_autocommit": true,
+    "configuration_statements": [
+      "ALTER SESSION SET CURRENT_SCHEMA=BLACKBOX_OWNER",
+      "ALTER SESSION SET TIME_ZONE='+00:00'",
+      "ALTER SESSION SET NLS_NUMERIC_CHARACTERS='.,'",
+      "ALTER SESSION SET NLS_DATE_LANGUAGE='AMERICAN'",
+      "ALTER SESSION SET NLS_COMP=BINARY",
+      "ALTER SESSION SET NLS_SORT=BINARY"
+    ],
+    "required_observations": [
+      {"name": "database_product_version", "expected_value": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0"},
+      {"name": "current_schema", "expected_value": "BLACKBOX_OWNER"},
+      {"name": "database_character_set", "expected_value": "AL32UTF8"},
+      {"name": "session_time_zone", "expected_value": "+00:00"},
+      {"name": "nls_numeric_characters", "expected_value": ".,"},
+      {"name": "nls_date_language", "expected_value": "AMERICAN"},
+      {"name": "nls_comp", "expected_value": "BINARY"},
+      {"name": "nls_sort", "expected_value": "BINARY"},
+      {"name": "transaction_isolation", "expected_value": "SERIALIZABLE"}
+    ]
+  },
+  "normalized_capabilities": {
+    "transaction_framing": "contiguous_begin_rows_end",
+    "commit_order": "single_stream_completed_transaction_order",
+    "complete_final_writes": true,
+    "marker_last": true,
+    "connector_startup_schema_evidence": "not_available",
+    "char_read_semantics": "pad_to_declared_length"
+  },
+  "connector_contract": {
+    "connector_class": "io.debezium.connector.oracle.OracleConnector",
+    "source_connector": "oracle",
+    "source_version": "3.6.1.Final",
+    "envelope_profile": "oracle_logminer_3_6_1",
+    "transaction_metadata": true,
+    "tasks": 1,
+    "redis_stream": "cdc"
+  },
+  "attestation_fact_contract": [
+    {"name": "database_name", "value_rule": "exact", "expected_value": "FREEPDB1"},
+    {"name": "schema_name", "value_rule": "exact", "expected_value": "BLACKBOX_OWNER"},
+    {"name": "server_version", "value_rule": "exact", "expected_value": "Oracle AI Database 26ai Free 23.26.2.0.0"},
+    {"name": "database_character_set", "value_rule": "exact", "expected_value": "AL32UTF8"},
+    {"name": "nls_comp", "value_rule": "exact", "expected_value": "BINARY"},
+    {"name": "nls_sort", "value_rule": "exact", "expected_value": "BINARY"},
+    {"name": "session_time_zone", "value_rule": "exact", "expected_value": "+00:00"},
+    {"name": "session_transaction_isolation", "value_rule": "exact", "expected_value": "SERIALIZABLE"},
+    {"name": "bootstrap_loader_isolation", "value_rule": "exact", "expected_value": "READ_COMMITTED"},
+    {"name": "archive_log_mode", "value_rule": "exact", "expected_value": "ARCHIVELOG"},
+    {"name": "force_logging", "value_rule": "exact", "expected_value": "YES"},
+    {"name": "supplemental_log_data_min", "value_rule": "exact", "expected_value": "YES"},
+    {"name": "online_redo_log_groups", "value_rule": "exact", "expected_value": "6"},
+    {"name": "online_redo_large_groups", "value_rule": "exact", "expected_value": "4"},
+    {"name": "online_redo_large_group_bytes", "value_rule": "exact", "expected_value": "536870912"},
+    {"name": "table_supplemental_logging", "value_rule": "exact", "expected_value": "ALL_COLUMNS"},
+    {"name": "log_mining_strategy", "value_rule": "exact", "expected_value": "online_catalog"},
+    {"name": "log_mining_batch_size_default", "value_rule": "exact", "expected_value": "20000"},
+    {"name": "log_mining_sleep_profile", "value_rule": "exact", "expected_value": "0_200_1000_200"},
+    {"name": "physical_capture_profile", "value_rule": "exact", "expected_value": "oracle_logminer_all_columns_v1"},
+    {"name": "connector_class", "value_rule": "exact", "expected_value": "io.debezium.connector.oracle.OracleConnector"},
+    {"name": "connector_source", "value_rule": "exact", "expected_value": "oracle"},
+    {"name": "connector_version", "value_rule": "exact", "expected_value": "3.6.1.Final"},
+    {"name": "connector_sha256", "value_rule": "exact", "expected_value": "b3a81a6d4e0822788a2c1a04bfd6007adcfedd0d07edeb6deebd8df73834fed8"},
+    {"name": "connector_ojdbc_sha256", "value_rule": "exact", "expected_value": "ef295bf01374dac7d791b3bc6526d10e8910ecac4645a95a3ca0c01cfc5c21d0"},
+    {"name": "benchbase_ojdbc_sha256", "value_rule": "exact", "expected_value": "ec8b7f2020b03b19f572e1bc34f94330610e86d3113ffe1e1f0474b8f5ce88ed"},
+    {"name": "connector_tasks", "value_rule": "exact", "expected_value": "1"},
+    {"name": "redis_stream", "value_rule": "exact", "expected_value": "cdc"},
+    {"name": "database_image_digest", "value_rule": "sha256"},
+    {"name": "capture_table_roster_sha256", "value_rule": "sha256"},
+    {"name": "table_definition_sha256", "value_rule": "sha256"},
+    {"name": "dedicated_privileges_sha256", "value_rule": "sha256"}
+  ]
+}

@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+# Execute one externally declared performance cell. Benchmark, backend, mode,
+# workload, capture profile, and workload parameters are opaque inputs.
+set -Eeuo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+BACKEND=
+BENCHMARK=
+MODE=
+WORKLOAD=
+CAPTURE_PROFILE=
+EXECUTION_PROFILE=
+ARCHIVE=
+ARCHIVE_SHA256=
+CONFIG=
+EXPECTED_SESSIONS=
+OUTPUT=
+MONITOR_BIN=
+DATABASE_CONTAINER=
+CONNECTOR_CONTAINER=
+REPETITION=0
+LOADER_TIMEOUT=3600
+WORKLOAD_TIMEOUT=900
+STACK_TIMEOUT=600
+STATUS_TIMEOUT=900
+DRAIN_LIMIT=120
+RESOURCE_INTERVAL=1
+REDIS_MAXMEMORY=8589934592
+MONITOR_BOOTSTRAP_STATE_BYTES=268435456
+MONITOR_RETAINED_IDENTITY_BYTES=2147483648
+MONITOR_CHECKER_STATE_BYTES=536870912
+HIGH_WATER_THRESHOLD=70
+HEADLINE_TRANSACTION_TYPE=
+HEADLINE_RATE_LABEL=
+PARAMETERS=()
+STACK_MAY_BE_RUNNING=0
+
+while (( $# > 0 )); do
+  case "$1" in
+    --backend) BACKEND=$2; shift 2 ;;
+    --benchmark) BENCHMARK=$2; shift 2 ;;
+    --mode) MODE=$2; shift 2 ;;
+    --workload) WORKLOAD=$2; shift 2 ;;
+    --capture-profile) CAPTURE_PROFILE=$2; shift 2 ;;
+    --execution-profile) EXECUTION_PROFILE=$2; shift 2 ;;
+    --archive) ARCHIVE=$2; shift 2 ;;
+    --archive-sha256) ARCHIVE_SHA256=$2; shift 2 ;;
+    --config) CONFIG=$2; shift 2 ;;
+    --expected-sessions) EXPECTED_SESSIONS=$2; shift 2 ;;
+    --output) OUTPUT=$2; shift 2 ;;
+    --monitor-bin) MONITOR_BIN=$2; shift 2 ;;
+    --database-container) DATABASE_CONTAINER=$2; shift 2 ;;
+    --connector-container) CONNECTOR_CONTAINER=$2; shift 2 ;;
+    --repetition) REPETITION=$2; shift 2 ;;
+    --parameter) PARAMETERS+=("$2"); shift 2 ;;
+    --loader-timeout-seconds) LOADER_TIMEOUT=$2; shift 2 ;;
+    --workload-timeout-seconds) WORKLOAD_TIMEOUT=$2; shift 2 ;;
+    --stack-timeout-seconds) STACK_TIMEOUT=$2; shift 2 ;;
+    --status-timeout-seconds) STATUS_TIMEOUT=$2; shift 2 ;;
+    --drain-limit-seconds) DRAIN_LIMIT=$2; shift 2 ;;
+    --resource-interval-seconds) RESOURCE_INTERVAL=$2; shift 2 ;;
+    --redis-maxmemory-bytes) REDIS_MAXMEMORY=$2; shift 2 ;;
+    --monitor-bootstrap-state-bytes) MONITOR_BOOTSTRAP_STATE_BYTES=$2; shift 2 ;;
+    --monitor-retained-identity-bytes) MONITOR_RETAINED_IDENTITY_BYTES=$2; shift 2 ;;
+    --monitor-checker-state-bytes) MONITOR_CHECKER_STATE_BYTES=$2; shift 2 ;;
+    --high-water-threshold-percent) HIGH_WATER_THRESHOLD=$2; shift 2 ;;
+    --headline-transaction-type) HEADLINE_TRANSACTION_TYPE=$2; shift 2 ;;
+    --headline-rate-label) HEADLINE_RATE_LABEL=$2; shift 2 ;;
+    *) printf 'unknown registered performance-cell argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
+for name in BACKEND BENCHMARK MODE WORKLOAD CAPTURE_PROFILE EXECUTION_PROFILE; do
+  value=${!name}
+  [[ $value =~ ^[A-Za-z][A-Za-z0-9_]{0,63}$ ]] || {
+    printf '%s is not a bounded registry name\n' "$name" >&2
+    exit 2
+  }
+done
+[[ $EXECUTION_PROFILE == direct_benchbase || $EXECUTION_PROFILE == coordinated_e2e ]]
+for value in "$REPETITION" "$LOADER_TIMEOUT" "$WORKLOAD_TIMEOUT" "$STACK_TIMEOUT" "$STATUS_TIMEOUT" "$DRAIN_LIMIT" "$REDIS_MAXMEMORY" "$MONITOR_BOOTSTRAP_STATE_BYTES" "$MONITOR_RETAINED_IDENTITY_BYTES" "$MONITOR_CHECKER_STATE_BYTES"; do
+  [[ $value =~ ^[1-9][0-9]*$ ]] || { printf 'positive integer parameter is invalid\n' >&2; exit 2; }
+done
+[[ $RESOURCE_INTERVAL =~ ^[0-9]+([.][0-9]+)?$ ]]
+[[ $HIGH_WATER_THRESHOLD =~ ^[0-9]+([.][0-9]+)?$ ]]
+[[ -f $ARCHIVE ]] || { printf 'build artifact is missing\n' >&2; exit 2; }
+[[ -x $MONITOR_BIN && -f $ROOT/protocol/backends/$BACKEND.json &&
+   -f $ROOT/protocol/adapters/$BENCHMARK.json ]] || {
+  printf 'cell registration or monitor executable is missing\n' >&2
+  exit 2
+}
+printf '%s  %s\n' "$ARCHIVE_SHA256" "$ARCHIVE" | sha256sum --check --status
+[[ ! -e $OUTPUT ]] || { printf 'cell output already exists: %s\n' "$OUTPUT" >&2; exit 2; }
+mkdir -p "$OUTPUT/loader-results" "$OUTPUT/workload-results"
+OUTPUT=$(cd "$OUTPUT" && pwd -P)
+
+for parameter in "${PARAMETERS[@]}"; do
+  name=${parameter%%=*}
+  [[ $parameter == *=* &&
+     ( $name == BLACKBOX_LOADER_SCALE_VALUE || $name == BENCHBASE_MEASUREMENT_* ) &&
+     $name =~ ^[A-Z][A-Z0-9_]{0,95}$ ]] || {
+    printf 'forwarded workload parameter is invalid: %s\n' "$parameter" >&2
+    exit 2
+  }
+  export "${parameter?}"
+done
+
+DIST_PARENT=$(mktemp -d /tmp/registered-performance-cell.XXXXXX)
+cleanup() {
+  local status=$?
+  if (( STACK_MAY_BE_RUNNING == 1 )) && declare -F teardown_stack >/dev/null; then
+    teardown_stack
+  fi
+  rm -rf -- "$DIST_PARENT"
+  return "$status"
+}
+trap cleanup EXIT
+tar -xzf "$ARCHIVE" -C "$DIST_PARENT"
+mapfile -t roots < <(find "$DIST_PARENT" -mindepth 1 -maxdepth 1 -type d -print)
+(( ${#roots[@]} == 1 )) || { printf 'BenchBase archive root differs\n' >&2; exit 2; }
+DIST=${roots[0]}
+SOURCE_CONFIG="$DIST/$CONFIG"
+[[ -f $SOURCE_CONFIG ]] || { printf 'declared BenchBase config is missing\n' >&2; exit 2; }
+CONFIG_PATH=$SOURCE_CONFIG
+if [[ $EXECUTION_PROFILE == direct_benchbase ]]; then
+  CONFIG_PATH="$OUTPUT/benchbase-uninstrumented.xml"
+  python3 - "$SOURCE_CONFIG" "$CONFIG_PATH" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+source, output = (Path(value) for value in sys.argv[1:])
+tree = ET.parse(source)
+root = tree.getroot()
+blackbox = root.find("blackbox")
+if blackbox is None:
+    raise SystemExit("source configuration has no blackbox element to remove")
+root.remove(blackbox)
+tree.write(output, encoding="utf-8", xml_declaration=True)
+PY
+fi
+
+shell_join() {
+  local output='' argument
+  for argument in "$@"; do
+    printf -v output '%s%q ' "$output" "$argument"
+  done
+  printf '%s' "$output"
+}
+
+write_checksums() {
+  local directory=$1 temporary
+  temporary=$(mktemp /tmp/registered-performance-checksums.XXXXXX)
+  if ! (cd "$directory" &&
+    find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z |
+      xargs -0 sha256sum >"$temporary"); then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  mv "$temporary" "$directory/SHA256SUMS"
+  (cd "$directory" && sha256sum --check SHA256SUMS >/dev/null)
+}
+
+LOADER_DECLARATION="$OUTPUT/loader-declaration.json"
+LOADER_ARGS=(
+  java -Xms1g -Xmx1g -XX:+AlwaysPreTouch -XX:+UseG1GC -jar benchbase.jar
+  -b "$BENCHMARK" -c "$CONFIG_PATH" --create=false --load=true --execute=false
+  --directory "$OUTPUT/loader-results"
+)
+MEASURED_ARGS=(
+  "$ROOT/scripts/run_measured_command.sh"
+  --resource-output "$OUTPUT/resource-samples.csv"
+  --network-output "$OUTPUT/network-metrics.json"
+  --sample-duration-seconds "$WORKLOAD_TIMEOUT"
+  --sample-interval-seconds "$RESOURCE_INTERVAL"
+  --process-label benchbase
+  --container "$BACKEND=$DATABASE_CONTAINER"
+)
+if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
+  MEASURED_ARGS+=(--container redis=cdc-redis --container "debezium=$CONNECTOR_CONTAINER")
+fi
+MEASURED_ARGS+=(-- java -Xms1g -Xmx1g -XX:+AlwaysPreTouch -XX:+UseG1GC -jar benchbase.jar
+  -b "$BENCHMARK" -c "$CONFIG_PATH" --create=false --load=false --execute=true
+  --directory "$OUTPUT/workload-results")
+LOADER_COMMAND="cd $(printf '%q' "$DIST") && exec $(shell_join "${LOADER_ARGS[@]}")"
+WORKLOAD_COMMAND="cd $(printf '%q' "$DIST") && exec $(shell_join "${MEASURED_ARGS[@]}")"
+printf '%s\n' "$LOADER_COMMAND" >"$OUTPUT/loader-command.txt"
+printf '%s\n' "$WORKLOAD_COMMAND" >"$OUTPUT/workload-command.txt"
+printf '%s\n' "${PARAMETERS[@]}" >"$OUTPUT/workload-parameters.txt"
+
+capture_full_streams() {
+  [[ -f $OUTPUT/run-id.txt ]] || return 0
+  local run_id
+  run_id=$(tr -d '[:space:]' <"$OUTPUT/run-id.txt")
+  redis-cli -h host.docker.internal --json XRANGE cdc - + >"$OUTPUT/cdc-stream.json" || true
+  redis-cli -h host.docker.internal --json XRANGE "blackbox:client:$run_id" - + \
+    >"$OUTPUT/client-stream.json" || true
+  redis-cli -h host.docker.internal --json XRANGE "blackbox:status:$run_id" - + \
+    >"$OUTPUT/status-stream.json" || true
+  redis-cli -h host.docker.internal --raw INFO all >"$OUTPUT/redis-info-after.txt" || true
+}
+
+capture_containers() {
+  if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
+    docker logs "$CONNECTOR_CONTAINER" >"$OUTPUT/connector.log" 2>&1 || true
+    docker inspect "$CONNECTOR_CONTAINER" "$DATABASE_CONTAINER" cdc-redis \
+      >"$OUTPUT/container-inspect.json" 2>/dev/null || true
+  else
+    docker inspect "$DATABASE_CONTAINER" >"$OUTPUT/container-inspect.json" 2>/dev/null || true
+  fi
+  docker logs "$DATABASE_CONTAINER" >"$OUTPUT/database.log" 2>&1 || true
+}
+
+teardown_stack() {
+  BLACKBOX_BACKEND="$BACKEND" bash -lc \
+    '. "$1/scripts/blackbox_lifecycle.sh"; blackbox_backend_teardown' _ "$ROOT" \
+    >"$OUTPUT/teardown.log" 2>&1 || true
+}
+
+write_marker_storage() {
+  local values rows bytes
+  values=$(blackbox_backend_marker_storage)
+  read -r rows bytes <<<"${values//$'\t'/ }"
+  jq -n --argjson rows "$rows" --argjson bytes "$bytes" \
+    '{row_count:$rows,allocated_bytes:$bytes}' >"$OUTPUT/marker-storage.json"
+}
+
+wait_for_database_container() {
+  local deadline=$(( $(date +%s) + STACK_TIMEOUT ))
+  while (( $(date +%s) <= deadline )); do
+    local state health
+    state=$(docker inspect --format '{{.State.Status}}' "$DATABASE_CONTAINER" 2>/dev/null || true)
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+      "$DATABASE_CONTAINER" 2>/dev/null || true)
+    if [[ $state == running && ( -z $health || $health == healthy ) ]]; then
+      return 0
+    fi
+    if [[ $state == exited || $state == dead || $health == unhealthy ]]; then
+      printf 'database container entered terminal state: state=%s health=%s\n' \
+        "$state" "$health" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  printf 'database container did not become ready: %s\n' "$DATABASE_CONTAINER" >&2
+  return 1
+}
+
+if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
+  STACK_MAY_BE_RUNNING=1
+  set +e
+  BLACKBOX_BACKEND="$BACKEND" \
+  BLACKBOX_BENCHMARK="$BENCHMARK" \
+  BLACKBOX_CAPTURE_PROFILE="$CAPTURE_PROFILE" \
+  BLACKBOX_DECLARED_ISOLATION=REPEATABLE_READ \
+  BLACKBOX_EXPECTED_SESSION_IDS="$EXPECTED_SESSIONS" \
+  BLACKBOX_LOADER_COMMAND="$LOADER_COMMAND" \
+  BLACKBOX_WORKLOAD_COMMAND="$WORKLOAD_COMMAND" \
+  BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$LOADER_DECLARATION" \
+  BLACKBOX_LOADER_VALIDATION_PATH="$OUTPUT/loader-validation.json" \
+  BLACKBOX_BOOTSTRAP_MANIFEST_PATH="$OUTPUT/bootstrap-manifest.json" \
+  BLACKBOX_RUN_ID_PATH="$OUTPUT/run-id.txt" \
+  BLACKBOX_MONITOR_METRICS_PATH="$OUTPUT/monitor-metrics.json" \
+  BLACKBOX_MONITOR_BIN="$MONITOR_BIN" \
+  BLACKBOX_LOADER_BATCH_SIZE="${BENCHBASE_MEASUREMENT_BATCH_SIZE:?}" \
+  BLACKBOX_LOADER_SCALE_VALUE="${BLACKBOX_LOADER_SCALE_VALUE:-}" \
+  BLACKBOX_STACK_TIMEOUT_SECONDS="$STACK_TIMEOUT" \
+  BLACKBOX_LOADER_TIMEOUT_SECONDS="$LOADER_TIMEOUT" \
+  BLACKBOX_WORKLOAD_TIMEOUT_SECONDS="$WORKLOAD_TIMEOUT" \
+  BLACKBOX_STATUS_TIMEOUT_SECONDS="$STATUS_TIMEOUT" \
+  BLACKBOX_QUIESCENCE_TIMEOUT_SECONDS="$DRAIN_LIMIT" \
+  BLACKBOX_PROCESSING_MODE=audited \
+  BLACKBOX_MEASUREMENT_MODE=audited \
+  BLACKBOX_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY" \
+  BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY" \
+  BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_BYTES="$MONITOR_BOOTSTRAP_STATE_BYTES" \
+  BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$MONITOR_RETAINED_IDENTITY_BYTES" \
+  BLACKBOX_MONITOR_MAX_CHECKER_STATE_BYTES="$MONITOR_CHECKER_STATE_BYTES" \
+    timeout --foreground --signal=TERM --kill-after=60 \
+      "$((LOADER_TIMEOUT + WORKLOAD_TIMEOUT + STATUS_TIMEOUT + 600))" \
+      "$ROOT/scripts/e2e.sh" >"$OUTPUT/e2e.log" 2>&1
+  CELL_STATUS=$?
+  set -e
+  printf '%s\n' "$CELL_STATUS" >"$OUTPUT/e2e-exit-status.txt"
+  capture_full_streams
+  capture_containers
+  (( CELL_STATUS == 0 )) || {
+    teardown_stack
+    STACK_MAY_BE_RUNNING=0
+    write_checksums "$OUTPUT"
+    exit "$CELL_STATUS"
+  }
+else
+  export BLACKBOX_BACKEND="$BACKEND" BLACKBOX_BENCHMARK="$BENCHMARK"
+  export BLACKBOX_ACTIVE_RUN_ID
+  BLACKBOX_ACTIVE_RUN_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  printf '%s\n' "$BLACKBOX_ACTIVE_RUN_ID" >"$OUTPUT/run-id.txt"
+  export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$LOADER_DECLARATION"
+  export BLACKBOX_LOADER_BATCH_SIZE="${BENCHBASE_MEASUREMENT_BATCH_SIZE:?}"
+  export BLACKBOX_STACK_TIMEOUT_SECONDS="$STACK_TIMEOUT"
+  # shellcheck source=scripts/blackbox_lifecycle.sh
+  . "$ROOT/scripts/blackbox_lifecycle.sh"
+  blackbox_acquire_live_stack_lock
+  BLACKBOX_ADAPTER_CONTRACT=$(blackbox_adapter_contract)
+  BLACKBOX_BACKEND_CONTRACT=$(blackbox_backend_contract)
+  export BLACKBOX_ADAPTER_CONTRACT BLACKBOX_BACKEND_CONTRACT
+  blackbox_backend_prepare_run
+  blackbox_backend_teardown >"$OUTPUT/pre-teardown.log" 2>&1
+  blackbox_backend_start_uninstrumented_database >"$OUTPUT/stack.log" 2>&1
+  STACK_MAY_BE_RUNNING=1
+  wait_for_database_container
+  blackbox_backend_verify_session_isolation
+  if declare -F blackbox_backend_verify_uninstrumented_schema >/dev/null; then
+    blackbox_backend_verify_uninstrumented_schema
+  else
+    blackbox_backend_verify_schema
+  fi
+  timeout --foreground --signal=TERM --kill-after=30 "$LOADER_TIMEOUT" \
+    bash -lc "$LOADER_COMMAND" >"$OUTPUT/loader.log" 2>&1
+  blackbox_validate_loader_state >"$OUTPUT/loader-validation.json"
+  blackbox_capture_bootstrap_scan "$OUTPUT/bootstrap-scan.txt"
+  blackbox_build_bootstrap_manifest "$OUTPUT/bootstrap-scan.txt" >"$OUTPUT/bootstrap-manifest.json"
+  write_marker_storage
+  jq -e '.row_count == 0' "$OUTPUT/marker-storage.json" >/dev/null
+  timeout --foreground --signal=TERM --kill-after=30 "$WORKLOAD_TIMEOUT" \
+    bash -lc "$WORKLOAD_COMMAND" >"$OUTPUT/workload.log" 2>&1
+  write_marker_storage
+  jq -e '.row_count == 0' "$OUTPUT/marker-storage.json" >/dev/null
+  capture_containers
+fi
+
+result_args=(
+  --artifact-dir "$OUTPUT" --backend "$BACKEND" --benchmark "$BENCHMARK"
+  --mode "$MODE" --execution-profile "$EXECUTION_PROFILE" --workload "$WORKLOAD"
+  --capture-profile "$CAPTURE_PROFILE" --repetition "$REPETITION"
+  --drain-limit-seconds "$DRAIN_LIMIT"
+  --high-water-threshold-percent "$HIGH_WATER_THRESHOLD"
+)
+if [[ -n $HEADLINE_TRANSACTION_TYPE ]]; then
+  result_args+=(--headline-transaction-type "$HEADLINE_TRANSACTION_TYPE"
+    --headline-rate-label "$HEADLINE_RATE_LABEL")
+fi
+python3 "$ROOT/scripts/registered_performance_result.py" "${result_args[@]}"
+for stream in cdc-stream.json client-stream.json; do
+  if [[ -f $OUTPUT/$stream ]]; then
+    gzip --fast "$OUTPUT/$stream"
+  fi
+done
+sha256sum "$ARCHIVE" "$MONITOR_BIN" >"$OUTPUT/build-artifact-checksums.txt"
+teardown_stack
+STACK_MAY_BE_RUNNING=0
+write_checksums "$OUTPUT"
+jq -e '.accepted == true' "$OUTPUT/result.json" >/dev/null

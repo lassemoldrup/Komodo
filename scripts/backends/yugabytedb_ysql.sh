@@ -105,7 +105,7 @@ blackbox_backend_require_commands() {
 }
 
 blackbox_backend_teardown() {
-  blackbox_compose down --volumes --remove-orphans
+  blackbox_compose_all_profiles down --volumes --remove-orphans
 }
 
 blackbox_backend_wait_for_schema_initialization() {
@@ -419,6 +419,37 @@ blackbox_backend_verify_schema() {
       "YugabyteDB dedicated role/ownership/DDL privilege contract differs: role=$role_contract_mismatches ownership=$ownership_mismatches privileges=$privilege_mismatches membership=$membership_mismatches unauthorized_ddl_logins=$unauthorized_ddl_logins"
     return 1
   fi
+}
+
+blackbox_backend_verify_uninstrumented_schema() {
+  blackbox_backend_capture_schema_metadata |
+    python3 "$BLACKBOX_ROOT/scripts/backends/yugabytedb_ysql_catalog.py" \
+      --benchmark "$BLACKBOX_BENCHMARK" \
+      --replica-identity-code "$BLACKBOX_YSQL_REPLICA_IDENTITY_CODE" || return 1
+  local expected_tables actual_tables replica_tables expected_replica_tables
+  expected_tables=$(tr ',' '\n' <<<"$BLACKBOX_YSQL_CAPTURE_TABLES" | LC_ALL=C sort)
+  actual_tables=$(blackbox_backend_admin_query \
+    "SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='benchbase' AND c.relkind='r' ORDER BY 1") || return 1
+  [[ $actual_tables == "$expected_tables" ]] || {
+    blackbox_die "YugabyteDB uninstrumented table roster differs"
+    return 1
+  }
+  replica_tables=$(blackbox_backend_admin_query \
+    "SELECT n.nspname || '.' || c.relname || E'\\t' || c.relreplident::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='benchbase' AND c.relkind='r' ORDER BY 1") || return 1
+  expected_replica_tables=$(awk \
+    -v identity="$BLACKBOX_YSQL_REPLICA_IDENTITY_CODE" \
+    '{print $0 "\t" identity}' <<<"$expected_tables")
+  [[ $replica_tables == "$expected_replica_tables" ]] || {
+    blackbox_die "YugabyteDB uninstrumented replica-identity roster differs"
+    return 1
+  }
+  local capture_counts
+  capture_counts=$(blackbox_backend_admin_query \
+    "SELECT (SELECT count(*) FROM pg_publication) || E'\\t' || (SELECT count(*) FROM pg_replication_slots)") || return 1
+  [[ $capture_counts == $'0\t0' ]] || {
+    blackbox_die "YugabyteDB uninstrumented mode contains capture objects"
+    return 1
+  }
 }
 
 blackbox_backend_count_table() {

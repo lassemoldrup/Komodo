@@ -155,39 +155,62 @@ services:
   # ---------------------------------------------------------------- Oracle --
   oracle:
     profiles: [oracle]
-    # 23.26 renamed the banner to "Oracle AI Database 26ai ...", which broke
-    # Debezium <=3.2 (it resolved the version with
-    # `WHERE BANNER_FULL LIKE 'Oracle Database%'`). 3.6.1 reads the version
-    # from JDBC metadata instead, so current Oracle works. See README.
-    image: ${ORACLE_IMAGE:-gvenzl/oracle-free:23.26.2-slim}
+    image: docker.io/gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
     container_name: cdc-oracle
     environment:
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-oraclepw}
+      ORACLE_PASSWORD: ${BLACKBOX_ORACLE_SYS_PASSWORD:-BlackboxOracleSys_2026}
+      BLACKBOX_ORACLE_LOGMINER_PASSWORD: ${BLACKBOX_ORACLE_LOGMINER_PASSWORD:-BlackboxLogMiner_2026}
     ports:
       - "1521:1521"
     volumes:
-      # Runs on every start: ARCHIVELOG, supplemental logging, CDC user, schema.
+      # Database-lifetime prerequisites only; no application rows or tables.
       - ./oracle/startdb.d:/container-entrypoint-startdb.d:ro
     healthcheck:
       # Gate on the setup hook finishing, not just the listener being up.
       # A file test rather than a sqlplus call: sqlplus startup can exceed a
       # short healthcheck timeout and leave the container stuck in "starting".
-      test: ["CMD-SHELL", "test -f /tmp/cdc-setup.done"]
+      test: ["CMD-SHELL", "test -f /tmp/blackbox-oracle-prerequisites.done"]
       interval: 5s
       timeout: 5s
       retries: 60
       start_period: 60s
     networks: [cdc]
 
-  debezium-oracle:
+  oracle_init:
     profiles: [oracle]
-    image: quay.io/debezium/server:3.6.1.Final
-    container_name: cdc-debezium-oracle
+    image: docker.io/gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
+    container_name: cdc-oracle-init
     depends_on:
       oracle:
         condition: service_healthy
+    entrypoint: ["/bin/bash", "/blackbox/init.sh"]
+    environment:
+      BLACKBOX_ORACLE_SYS_PASSWORD: ${BLACKBOX_ORACLE_SYS_PASSWORD:-BlackboxOracleSys_2026}
+      BLACKBOX_ORACLE_OWNER_PASSWORD: ${BLACKBOX_ORACLE_OWNER_PASSWORD:-BlackboxOwner_2026}
+      BLACKBOX_ORACLE_APPLICATION_PASSWORD: ${BLACKBOX_ORACLE_APPLICATION_PASSWORD:-BlackboxApplication_2026}
+      BLACKBOX_ORACLE_CAPTURE_TABLES: ${BLACKBOX_ORACLE_CAPTURE_TABLES:-BLACKBOX_OWNER.ACCOUNTS,BLACKBOX_OWNER.SAVINGS,BLACKBOX_OWNER.CHECKING,BLACKBOX_OWNER.CHECKER_RUN_FENCE,BLACKBOX_OWNER.SESSION_TXN}
+    volumes:
+      - ./oracle/init.sh:/blackbox/init.sh:ro
+      - ./oracle/initdb/02-common-schema.sql:/blackbox/common-schema.sql:ro
+      - ${BLACKBOX_ADAPTER_SCHEMA_FILE:-./oracle/initdb/adapters/smallbank.sql}:/blackbox/adapter-schema.sql:ro
+      - ${BLACKBOX_ADAPTER_WARMUP_FILE:-./oracle/initdb/adapters/smallbank-warmup.sql}:/blackbox/adapter-warmup.sql:ro
+    restart: "no"
+    networks: [cdc]
+
+  debezium-oracle:
+    profiles: [oracle]
+    image: quay.io/debezium/server@sha256:8d3a3ad6e16ccc52c2efbb76b2e8198697f1e4bfe67ed5557b405a5a01c85da5
+    container_name: cdc-debezium-oracle
+    depends_on:
+      oracle_init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
+    environment:
+      DEBEZIUM_SOURCE_DATABASE_USER: c##blackbox_logminer
+      DEBEZIUM_SOURCE_DATABASE_PASSWORD: ${BLACKBOX_ORACLE_LOGMINER_PASSWORD:-BlackboxLogMiner_2026}
+      DEBEZIUM_SOURCE_TOPIC_PREFIX: ${BLACKBOX_BACKEND_SOURCE_ID:-oracle_blackbox_main}
+      DEBEZIUM_SOURCE_TABLE_INCLUDE_LIST: ${BLACKBOX_ORACLE_CAPTURE_TABLES:-BLACKBOX_OWNER.ACCOUNTS,BLACKBOX_OWNER.SAVINGS,BLACKBOX_OWNER.CHECKING,BLACKBOX_OWNER.CHECKER_RUN_FENCE,BLACKBOX_OWNER.SESSION_TXN}
     volumes:
       - ./debezium/application-oracle.properties:/debezium/config/application.properties:ro
     tmpfs:

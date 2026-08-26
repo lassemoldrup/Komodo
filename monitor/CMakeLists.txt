@@ -32,6 +32,7 @@ add_library(blackbox_monitor
   src/backend_adapter.cpp
   src/benchmark_adapter.cpp
   src/canonical_tpcc_codec.cpp
+  src/canonical_smallbank_codec.cpp
   src/canonical_ycsb_codec.cpp
   src/cdc_error.cpp
   src/cdc_types.cpp
@@ -147,6 +148,7 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     tests/test_backend_adapter.cpp
     tests/test_benchmark_adapter.cpp
     tests/test_canonical_tpcc_codec.cpp
+    tests/test_canonical_smallbank_codec.cpp
     tests/test_canonical_ycsb_codec.cpp
     tests/test_checker_adapter.cpp
     tests/test_client_txn.cpp
@@ -229,6 +231,14 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     NAME blackbox_yugabytedb_lifecycle_fixture_checksum
     COMMAND ${CMAKE_COMMAND} -E sha256sum
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/yugabytedb_pgoutput_2_5_2_lifecycle.json
+  )
+  add_test(
+    NAME blackbox_oracle_smallbank_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/oracle_logminer_3_6_1_smallbank.json
+  )
+  set_tests_properties(blackbox_oracle_smallbank_fixture_checksum PROPERTIES
+    PASS_REGULAR_EXPRESSION "59234a0dd2c115dde046ad3531160de5f8d094532403e9dbc947fced25e23f00"
   )
   set_tests_properties(blackbox_yugabytedb_lifecycle_fixture_checksum PROPERTIES
     PASS_REGULAR_EXPRESSION "afd4da9f220ca46cd6a358bea7c4620773c272efccfaea5fe1bbcaae270b5735"
@@ -317,5 +327,16 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
             --replay $<TARGET_FILE:blackbox_cdc_replay>
             --fixture
             ${CMAKE_CURRENT_SOURCE_DIR}/../protocol/fixtures/mariadb_tpcc_transactions.json
+  )
+  add_test(
+    NAME blackbox_oracle_smallbank_codec_replay
+    COMMAND blackbox_cdc_codec_replay
+      --input ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/oracle_logminer_3_6_1_smallbank.json
+      --backend oracle
+      --benchmark smallbank
+      --backend-source-id oracle_blackbox_main
+  )
+  set_tests_properties(blackbox_oracle_smallbank_codec_replay PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"completed_transactions\": 2"
   )
 endif()

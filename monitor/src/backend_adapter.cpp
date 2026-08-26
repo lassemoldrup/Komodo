@@ -6,7 +6,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -94,7 +98,8 @@ void requireKeys(const Json &object,
   requireObject(object, label);
   std::unordered_set<std::string_view> remaining(required.begin(),
                                                  required.end());
-  std::unordered_set<std::string_view> allowed(optional.begin(), optional.end());
+  std::unordered_set<std::string_view> allowed(optional.begin(),
+                                               optional.end());
   for (const auto &[key, unused] : object.items()) {
     (void)unused;
     if (remaining.erase(key) == 0U && !allowed.contains(key)) {
@@ -614,25 +619,55 @@ public:
   enum class Profile {
     MariaDb,
     YugabytePgoutput,
+    OracleLogMiner,
   };
 
   PinnedEnvelopeDecoder(BackendCdcDecoderConfig config, const Profile profile)
       : source_id_(std::move(config.backend_source_id)),
         connector_version_(std::move(config.connector_version)),
         profile_(profile) {
-    const auto add_table = [this](const std::string &name) {
+    const auto add_table = [this](const std::string &name,
+                                  const bool application) {
       const auto parsed = parseQualifiedTable(name);
+      auto physical_leaf = parsed.has_value() ? parsed->table : std::string{};
+      if (profile_ == Profile::OracleLogMiner) {
+        std::transform(physical_leaf.begin(), physical_leaf.end(),
+                       physical_leaf.begin(), [](const unsigned char value) {
+                         return static_cast<char>(std::toupper(value));
+                       });
+      }
       if (!parsed.has_value() || !canonical_tables_.insert(name).second ||
-          !canonical_by_leaf_.emplace(parsed->table, name).second) {
+          !canonical_by_leaf_.emplace(physical_leaf, name).second) {
         throw std::invalid_argument(
             "backend CDC decoder table roster is invalid or ambiguous");
       }
+      if (profile_ == Profile::OracleLogMiner && application) {
+        const AdapterTableContract *contract = nullptr;
+        for (const auto *adapter : BenchmarkAdapterRegistry::adapters()) {
+          if (adapter == nullptr) {
+            continue;
+          }
+          const auto *candidate = adapter->table(name);
+          if (candidate != nullptr) {
+            if (contract != nullptr && contract != candidate) {
+              throw std::invalid_argument(
+                  "Oracle CDC table has ambiguous registered contracts");
+            }
+            contract = candidate;
+          }
+        }
+        if (contract == nullptr) {
+          throw std::invalid_argument(
+              "Oracle CDC application table lacks a registered contract");
+        }
+        oracle_contracts_.emplace(name, contract);
+      }
     };
     for (const auto &table : config.application_tables) {
-      add_table(table);
+      add_table(table, true);
     }
     for (const auto &table : config.control_tables) {
-      add_table(table);
+      add_table(table, false);
     }
     if (source_id_.empty() || source_id_.size() > 256U ||
         connector_version_.empty() || canonical_tables_.empty()) {
@@ -770,7 +805,14 @@ private:
 
   [[nodiscard]] const std::string &
   canonicalTableFromLeaf(const std::string_view leaf) const {
-    if (!isCanonicalIdentifier(leaf)) {
+    const bool valid_oracle =
+        profile_ == Profile::OracleLogMiner && !leaf.empty() &&
+        leaf.size() <= 128U && leaf.front() >= 'A' && leaf.front() <= 'Z' &&
+        std::all_of(leaf.begin() + 1U, leaf.end(), [](const char character) {
+          return (character >= 'A' && character <= 'Z') ||
+                 (character >= '0' && character <= '9') || character == '_';
+        });
+    if (!valid_oracle && !isCanonicalIdentifier(leaf)) {
       decodeError(CdcErrorCode::UnexpectedTable,
                   "raw CDC table leaf is not canonical");
     }
@@ -784,6 +826,14 @@ private:
 
   [[nodiscard]] const std::string &
   canonicalDataCollection(const std::string_view identity) const {
+    if (profile_ == Profile::OracleLogMiner) {
+      constexpr std::string_view prefix = "FREEPDB1.BLACKBOX_OWNER.";
+      if (!identity.starts_with(prefix)) {
+        decodeError(CdcErrorCode::UnexpectedTable,
+                    "Oracle data collection namespace differs");
+      }
+      return canonicalTableFromLeaf(identity.substr(prefix.size()));
+    }
     const auto found = canonical_tables_.find(std::string(identity));
     if (found == canonical_tables_.end()) {
       decodeError(CdcErrorCode::UnexpectedTable,
@@ -860,12 +910,22 @@ private:
                         "server_id", "gtid", "file", "pos", "row", "thread",
                         "query"},
                        "MariaDB source metadata");
-    } else {
+    } else if (profile_ == Profile::YugabytePgoutput) {
       requireExactKeys(source,
                        {"version", "connector", "name", "ts_ms", "snapshot",
                         "db", "sequence", "schema", "table", "txId", "lsn",
                         "xmin", "origin", "origin_lsn"},
                        "YugabyteDB source metadata");
+    } else {
+      requireExactKeys(
+          source, {"version",  "connector",    "name",         "ts_ms",
+                   "snapshot", "db",           "sequence",     "ts_us",
+                   "ts_ns",    "schema",       "table",        "txId",
+                   "scn",      "commit_scn",   "lcr_position", "rs_id",
+                   "ssn",      "redo_thread",  "user_name",    "redo_sql",
+                   "row_id",   "commit_ts_ms", "start_scn",    "start_ts_ms",
+                   "txSeq"},
+          "Oracle source metadata");
     }
     const auto version =
         stringValue(member(source, "version", "source"), "source.version");
@@ -875,10 +935,14 @@ private:
         stringValue(member(source, "name", "source"), "source.name", 256U);
     const auto database =
         stringValue(member(source, "db", "source"), "source.db", 64U);
+    const auto expected_database =
+        profile_ == Profile::OracleLogMiner ? "FREEPDB1" : "benchbase";
+    const auto expected_connector = profile_ == Profile::MariaDb ? "mariadb"
+                                    : profile_ == Profile::OracleLogMiner
+                                        ? "oracle"
+                                        : "postgresql";
     if (version != connector_version_ || source_name != source_id_ ||
-        database != "benchbase" ||
-        connector !=
-            (profile_ == Profile::MariaDb ? "mariadb" : "postgresql")) {
+        database != expected_database || connector != expected_connector) {
       decodeError(CdcErrorCode::CdcRecordMalformed,
                   "raw CDC source/version identity is unsupported");
     }
@@ -905,7 +969,7 @@ private:
       requireNullableInteger(member(source, "thread", "source"),
                              "source.thread");
       requireNullableString(member(source, "query", "source"), "source.query");
-    } else {
+    } else if (profile_ == Profile::YugabytePgoutput) {
       const auto schema =
           stringValue(member(source, "schema", "source"), "source.schema", 64U);
       if (schema != "benchbase") {
@@ -921,17 +985,44 @@ private:
                             "source.origin");
       requireNullableInteger(member(source, "origin_lsn", "source"),
                              "source.origin_lsn");
+    } else {
+      const auto schema = stringValue(member(source, "schema", "source"),
+                                      "source.schema", 128U);
+      if (schema != "BLACKBOX_OWNER") {
+        decodeError(CdcErrorCode::UnexpectedTable,
+                    "Oracle source schema is not BLACKBOX_OWNER");
+      }
+      if (!member(source, "sequence", "source").is_null()) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle source.sequence is unexpectedly present");
+      }
+      (void)uintValue(member(source, "ts_us", "source"), "source.ts_us");
+      (void)uintValue(member(source, "ts_ns", "source"), "source.ts_ns");
+      for (const auto field : {"txId", "scn", "commit_scn", "rs_id",
+                               "user_name", "row_id", "start_scn"}) {
+        (void)stringValue(member(source, field, "source"),
+                          std::string("source.") + field, 512U);
+      }
+      requireNullableString(member(source, "lcr_position", "source"),
+                            "source.lcr_position");
+      requireNullableString(member(source, "redo_sql", "source"),
+                            "source.redo_sql");
+      for (const auto field :
+           {"ssn", "redo_thread", "commit_ts_ms", "start_ts_ms", "txSeq"}) {
+        (void)uintValue(member(source, field, "source"),
+                        std::string("source.") + field);
+      }
     }
     return canonicalTableFromLeaf(table);
   }
 
   [[nodiscard]] BackendCdcRecord decodeRow(const Json &key,
                                            const Json &envelope) const {
-    if (profile_ == Profile::MariaDb) {
-      requireKeys(envelope,
-                  {"after", "source", "transaction", "op", "ts_ms", "ts_us",
-                   "ts_ns"},
-                  {"before"}, "MariaDB row envelope");
+    if (profile_ != Profile::YugabytePgoutput) {
+      requireKeys(
+          envelope,
+          {"after", "source", "transaction", "op", "ts_ms", "ts_us", "ts_ns"},
+          {"before"}, "MariaDB row envelope");
     } else {
       requireKeys(envelope, {"after", "source", "transaction", "op", "ts_ms"},
                   {"before"}, "YugabyteDB row envelope");
@@ -969,7 +1060,7 @@ private:
         member(transaction, "id", "row transaction"), "row transaction.id");
     (void)uintValue(member(envelope, "ts_ms", "row envelope"),
                     "row envelope.ts_ms");
-    if (profile_ == Profile::MariaDb) {
+    if (profile_ != Profile::YugabytePgoutput) {
       (void)uintValue(member(envelope, "ts_us", "row envelope"),
                       "row envelope.ts_us");
       (void)uintValue(member(envelope, "ts_ns", "row envelope"),
@@ -981,8 +1072,12 @@ private:
     result.canonical_table =
         validateSource(member(envelope, "source", "row envelope"));
     result.operation = operation;
-    result.key = key;
-    result.after = after;
+    result.key = profile_ == Profile::OracleLogMiner
+                     ? canonicalOracleFields(key, result.canonical_table)
+                     : key;
+    result.after = profile_ == Profile::OracleLogMiner && after.is_object()
+                       ? canonicalOracleFields(after, result.canonical_table)
+                       : after;
     result.total_order =
         uintValue(member(transaction, "total_order", "row transaction"),
                   "row transaction.total_order");
@@ -992,11 +1087,159 @@ private:
     return result;
   }
 
+  [[nodiscard]] Json
+  canonicalOracleFields(const Json &object,
+                        const std::string_view canonical_table) const {
+    requireObject(object, "Oracle row object");
+    Json result = Json::object();
+    for (const auto &[name, value] : object.items()) {
+      if (name.empty() || name.size() > 128U || name.front() < 'A' ||
+          name.front() > 'Z' ||
+          !std::all_of(name.begin() + 1U, name.end(), [](const char character) {
+            return (character >= 'A' && character <= 'Z') ||
+                   (character >= '0' && character <= '9') || character == '_';
+          })) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle column name is not uppercase canonical text");
+      }
+      std::string canonical(name);
+      std::transform(canonical.begin(), canonical.end(), canonical.begin(),
+                     [](const unsigned char character) {
+                       return static_cast<char>(std::tolower(character));
+                     });
+      if (result.contains(canonical)) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle column mapping is ambiguous");
+      }
+      result[canonical] = value;
+    }
+    const auto contract = oracle_contracts_.find(std::string(canonical_table));
+    if (contract != oracle_contracts_.end()) {
+      for (auto &[name, value] : result.items()) {
+        const auto column = std::find_if(
+            contract->second->columns.begin(), contract->second->columns.end(),
+            [&name](const AdapterColumnContract &candidate) {
+              return candidate.name == name;
+            });
+        if (column == contract->second->columns.end()) {
+          decodeError(CdcErrorCode::CdcRecordMalformed,
+                      "Oracle row contains an unregistered column");
+        }
+        normalizeOracleValue(value, *column);
+      }
+    } else if (canonical_table == "benchbase.session_txn") {
+      normalizeOracleSignedNumber(result, "txn_id", false);
+    }
+    return result;
+  }
+
+  static void normalizeOracleSignedNumber(Json &object,
+                                          const std::string_view field,
+                                          const bool i32) {
+    const auto found = object.find(field);
+    if (found == object.end() || !found->is_string()) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "Oracle control NUMBER is not canonical text");
+    }
+    const auto text = found->get<std::string>();
+    std::int64_t value = 0;
+    const auto parsed =
+        std::from_chars(text.data(), text.data() + text.size(), value);
+    if (text.empty() || parsed.ec != std::errc{} ||
+        parsed.ptr != text.data() + text.size() ||
+        (text.size() > 1U && text.front() == '0') || text == "-0" ||
+        (text.starts_with('-') && text.size() > 2U && text[1] == '0') ||
+        (i32 && (value < std::numeric_limits<std::int32_t>::min() ||
+                 value > std::numeric_limits<std::int32_t>::max()))) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "Oracle control NUMBER text is noncanonical or out of range");
+    }
+    *found = value;
+  }
+
+  static void normalizeOracleValue(Json &value,
+                                   const AdapterColumnContract &column) {
+    if (value.is_null()) {
+      if (!column.nullable) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle non-null column is null");
+      }
+      return;
+    }
+    if (column.canonical_type == "i32" || column.canonical_type == "i64") {
+      Json wrapper{{std::string(column.name), value}};
+      normalizeOracleSignedNumber(wrapper, column.name,
+                                  column.canonical_type == "i32");
+      value = std::move(wrapper[std::string(column.name)]);
+      return;
+    }
+    if (column.canonical_type == "fixed_decimal") {
+      if (!value.is_string()) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle fixed decimal is not string encoded");
+      }
+      return;
+    }
+    if (column.canonical_type == "float32") {
+      if (value.is_number()) {
+        return;
+      }
+      if (!value.is_string()) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle BINARY_FLOAT has an unsupported JSON type");
+      }
+      const auto text = value.get<std::string>();
+      double number = 0;
+      const auto parsed =
+          std::from_chars(text.data(), text.data() + text.size(), number);
+      if (text.empty() || parsed.ec != std::errc{} ||
+          parsed.ptr != text.data() + text.size() || !std::isfinite(number) ||
+          !std::isfinite(static_cast<float>(number))) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle BINARY_FLOAT text is malformed or non-finite");
+      }
+      value = number;
+      return;
+    }
+    if (column.canonical_type == "timestamp_utc") {
+      const auto milliseconds = uintValue(value, "Oracle timestamp");
+      if (milliseconds % 1000U != 0U ||
+          milliseconds / 1000U > static_cast<std::uint64_t>(
+                                     std::numeric_limits<std::time_t>::max())) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle timestamp is not an exact supported UTC second");
+      }
+      const auto seconds = static_cast<std::time_t>(milliseconds / 1000U);
+      std::tm utc{};
+      if (gmtime_r(&seconds, &utc) == nullptr) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle timestamp cannot be converted to UTC");
+      }
+      std::array<char, 21> rendered{};
+      if (std::strftime(rendered.data(), rendered.size(), "%Y-%m-%dT%H:%M:%SZ",
+                        &utc) != 20U) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "Oracle timestamp UTC rendering failed");
+      }
+      value = std::string(rendered.data(), 20U);
+      return;
+    }
+    if ((column.canonical_type == "utf8_varchar" ||
+         column.canonical_type == "utf8_char") &&
+        value.is_string()) {
+      return;
+    }
+    decodeError(CdcErrorCode::CdcRecordMalformed,
+                "Oracle column has an unsupported canonical representation");
+  }
+
   std::string source_id_;
   std::string connector_version_;
   Profile profile_;
   std::unordered_set<std::string> canonical_tables_;
   std::unordered_map<std::string, std::string> canonical_by_leaf_;
+  std::unordered_map<std::string, const AdapterTableContract *>
+      oracle_contracts_;
 };
 
 constexpr auto mariadb_fact_contract = std::to_array<BackendFactRule>({
@@ -1056,16 +1299,61 @@ constexpr auto yugabyte_fact_contract = std::to_array<BackendFactRule>({
      "4e83132cbebdec53e553f69d4cfdbe48dac563105aabc5db4b880cdcf0118d98"},
     {"connector_tasks", BackendFactValueRule::Exact, "1"},
     {"redis_stream", BackendFactValueRule::Exact, "cdc"},
-    {"physical_capture_profile", BackendFactValueRule::CanonicalIdentifier,
-     {}},
+    {"physical_capture_profile", BackendFactValueRule::CanonicalIdentifier, {}},
     {"cdc_enable_intra_transactional_before_image",
-     BackendFactValueRule::CanonicalIdentifier, {}},
+     BackendFactValueRule::CanonicalIdentifier,
+     {}},
     {"cdc_send_null_before_image_if_not_exists",
-     BackendFactValueRule::CanonicalIdentifier, {}},
+     BackendFactValueRule::CanonicalIdentifier,
+     {}},
     {"database_image_digest", BackendFactValueRule::Sha256, {}},
     {"publication_membership_sha256", BackendFactValueRule::Sha256, {}},
     {"replica_identity_tables_sha256", BackendFactValueRule::Sha256, {}},
     {"table_oid_type_typmod_sha256", BackendFactValueRule::Sha256, {}},
+    {"dedicated_privileges_sha256", BackendFactValueRule::Sha256, {}},
+});
+
+constexpr auto oracle_fact_contract = std::to_array<BackendFactRule>({
+    {"database_name", BackendFactValueRule::Exact, "FREEPDB1"},
+    {"schema_name", BackendFactValueRule::Exact, "BLACKBOX_OWNER"},
+    {"server_version", BackendFactValueRule::Exact,
+     "Oracle AI Database 26ai Free 23.26.2.0.0"},
+    {"database_character_set", BackendFactValueRule::Exact, "AL32UTF8"},
+    {"nls_comp", BackendFactValueRule::Exact, "BINARY"},
+    {"nls_sort", BackendFactValueRule::Exact, "BINARY"},
+    {"session_time_zone", BackendFactValueRule::Exact, "+00:00"},
+    {"session_transaction_isolation", BackendFactValueRule::Exact,
+     "SERIALIZABLE"},
+    {"bootstrap_loader_isolation", BackendFactValueRule::Exact,
+     "READ_COMMITTED"},
+    {"archive_log_mode", BackendFactValueRule::Exact, "ARCHIVELOG"},
+    {"force_logging", BackendFactValueRule::Exact, "YES"},
+    {"supplemental_log_data_min", BackendFactValueRule::Exact, "YES"},
+    {"online_redo_log_groups", BackendFactValueRule::Exact, "6"},
+    {"online_redo_large_groups", BackendFactValueRule::Exact, "4"},
+    {"online_redo_large_group_bytes", BackendFactValueRule::Exact,
+     "536870912"},
+    {"table_supplemental_logging", BackendFactValueRule::Exact, "ALL_COLUMNS"},
+    {"log_mining_strategy", BackendFactValueRule::Exact, "online_catalog"},
+    {"log_mining_batch_size_default", BackendFactValueRule::Exact, "20000"},
+    {"log_mining_sleep_profile", BackendFactValueRule::Exact, "0_200_1000_200"},
+    {"physical_capture_profile", BackendFactValueRule::Exact,
+     "oracle_logminer_all_columns_v1"},
+    {"connector_class", BackendFactValueRule::Exact,
+     "io.debezium.connector.oracle.OracleConnector"},
+    {"connector_source", BackendFactValueRule::Exact, "oracle"},
+    {"connector_version", BackendFactValueRule::Exact, "3.6.1.Final"},
+    {"connector_sha256", BackendFactValueRule::Exact,
+     "b3a81a6d4e0822788a2c1a04bfd6007adcfedd0d07edeb6deebd8df73834fed8"},
+    {"connector_ojdbc_sha256", BackendFactValueRule::Exact,
+     "ef295bf01374dac7d791b3bc6526d10e8910ecac4645a95a3ca0c01cfc5c21d0"},
+    {"benchbase_ojdbc_sha256", BackendFactValueRule::Exact,
+     "ec8b7f2020b03b19f572e1bc34f94330610e86d3113ffe1e1f0474b8f5ce88ed"},
+    {"connector_tasks", BackendFactValueRule::Exact, "1"},
+    {"redis_stream", BackendFactValueRule::Exact, "cdc"},
+    {"database_image_digest", BackendFactValueRule::Sha256, {}},
+    {"capture_table_roster_sha256", BackendFactValueRule::Sha256, {}},
+    {"table_definition_sha256", BackendFactValueRule::Sha256, {}},
     {"dedicated_privileges_sha256", BackendFactValueRule::Sha256, {}},
 });
 
@@ -1218,11 +1506,88 @@ public:
   }
 };
 
+class OracleBackendAdapter final : public BackendAdapter {
+public:
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "oracle";
+  }
+
+  [[nodiscard]] std::string_view connectorVersion() const noexcept override {
+    return "3.6.1.Final";
+  }
+
+  [[nodiscard]] BackendServerDefaults serverDefaults() const noexcept override {
+    return BackendServerDefaults{
+        .character_set = "AL32UTF8",
+        .collation = "BINARY",
+        .time_zone = "+00:00",
+        .sql_mode = {},
+        .transaction_isolation = "SERIALIZABLE",
+        .snapshot_isolation = true,
+    };
+  }
+
+  [[nodiscard]] BackendSessionRequirements
+  sessionRequirements() const noexcept override {
+    return BackendSessionRequirements{
+        .set_names = "ALTER SESSION SET CURRENT_SCHEMA=BLACKBOX_OWNER",
+        .character_set_client = "AL32UTF8",
+        .character_set_connection = "AL32UTF8",
+        .character_set_results = "AL32UTF8",
+        .collation_connection = "BINARY",
+        .time_zone = "+00:00",
+        .sql_mode = {},
+        .transaction_isolation = "SERIALIZABLE",
+        .snapshot_isolation = true,
+    };
+  }
+
+  [[nodiscard]] BackendDatabaseDefaults
+  databaseDefaults() const noexcept override {
+    return BackendDatabaseDefaults{.character_set = "AL32UTF8",
+                                   .collation = "BINARY"};
+  }
+
+  [[nodiscard]] ApplicationTableRequirements
+  applicationTableRequirements() const noexcept override {
+    return ApplicationTableRequirements{
+        .engine = {},
+        .character_set = "AL32UTF8",
+        .collation = "BINARY",
+        .char_read_semantics = "pad_to_declared_length",
+    };
+  }
+
+  [[nodiscard]] BackendNormalizedCapabilities
+  normalizedCapabilities() const noexcept override {
+    return BackendNormalizedCapabilities{.connector_startup_schema_evidence =
+                                             false};
+  }
+
+  [[nodiscard]] std::span<const BackendFactRule>
+  attestationFactContract() const noexcept override {
+    return oracle_fact_contract;
+  }
+
+  [[nodiscard]] std::unique_ptr<CdcStartupSchemaDecoder>
+  createCdcStartupSchemaDecoder(CdcStartupSchemaConfig) const override {
+    return std::make_unique<CatalogOnlyStartupSchemaDecoder>();
+  }
+
+  [[nodiscard]] std::unique_ptr<BackendCdcDecoder>
+  createCdcDecoder(BackendCdcDecoderConfig config) const override {
+    return std::make_unique<PinnedEnvelopeDecoder>(
+        std::move(config), PinnedEnvelopeDecoder::Profile::OracleLogMiner);
+  }
+};
+
 const MariaDbBackendAdapter mariadb_adapter;
 const YugabyteYsqlBackendAdapter yugabyte_ysql_adapter;
-const std::array<const BackendAdapter *, 2> registered_adapters = {
+const OracleBackendAdapter oracle_adapter;
+const std::array<const BackendAdapter *, 3> registered_adapters = {
     &mariadb_adapter,
     &yugabyte_ysql_adapter,
+    &oracle_adapter,
 };
 
 } // namespace

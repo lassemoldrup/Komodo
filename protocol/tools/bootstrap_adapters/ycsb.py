@@ -92,11 +92,13 @@ class YcsbBootstrapAdapter:
         max_canonical_bytes: int,
         options: dict[str, Any],
     ) -> tuple[list[tuple[bytes, bytes]], dict[str, int]]:
-        schema = options["schema"]
-        table = options["table"]
+        del options
+        expected_table = contract["application_tables"][0]
+        schema, separator, table = expected_table.partition(".")
+        if separator != ".":
+            raise BootstrapAdapterError("YCSB scan table is not qualified")
         if IDENTIFIER.fullmatch(schema) is None or IDENTIFIER.fullmatch(table) is None:
             raise BootstrapAdapterError("schema/table is not a canonical lowercase identifier")
-        expected_table = f"{schema}.{table}"
         if contract["application_tables"] != [expected_table]:
             raise BootstrapAdapterError("YCSB scan table differs from adapter roster")
         try:

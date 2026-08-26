@@ -1,0 +1,86 @@
+{
+  "benchmark": "smallbank",
+  "canonical_schema": "benchbase",
+  "runtime_capabilities": {
+    "client_trace": true,
+    "cdc_normalization": true,
+    "bootstrap_scan": true
+  },
+  "declared_isolations": ["REPEATABLE_READ"],
+  "transaction_types": [
+    "Amalgamate",
+    "Balance",
+    "DepositChecking",
+    "SendPayment",
+    "TransactSavings",
+    "WriteCheck"
+  ],
+  "application_tables": [
+    "benchbase.accounts",
+    "benchbase.checking",
+    "benchbase.savings"
+  ],
+  "projection_policy": {
+    "ordinary_rows": "whole_row_points",
+    "predicate_semantics": "omitted",
+    "aggregate_scalars": "omitted_without_event",
+    "implicit_dml_reads": "omitted_without_event",
+    "locking_reads": "omitted_without_event"
+  },
+  "tables": [
+    {
+      "name": "benchbase.accounts",
+      "key_columns": ["custid"],
+      "value_columns": ["name"],
+      "columns": [
+        {"name": "custid", "sql_type": "BIGINT", "nullable": false, "canonical_type": "i64"},
+        {"name": "name", "sql_type": "VARCHAR(64)", "nullable": false, "canonical_type": "utf8_varchar"}
+      ]
+    },
+    {
+      "name": "benchbase.checking",
+      "key_columns": ["custid"],
+      "value_columns": ["bal"],
+      "columns": [
+        {"name": "custid", "sql_type": "BIGINT", "nullable": false, "canonical_type": "i64"},
+        {"name": "bal", "sql_type": "DECIMAL(18,2)", "nullable": false, "canonical_type": "fixed_decimal"}
+      ]
+    },
+    {
+      "name": "benchbase.savings",
+      "key_columns": ["custid"],
+      "value_columns": ["bal"],
+      "columns": [
+        {"name": "custid", "sql_type": "BIGINT", "nullable": false, "canonical_type": "i64"},
+        {"name": "bal", "sql_type": "DECIMAL(18,2)", "nullable": false, "canonical_type": "fixed_decimal"}
+      ]
+    }
+  ],
+  "result_sets": [
+    {"transaction_type":"Amalgamate","procedure":"Amalgamate","statement_id":"GetAccountSource","trace_statement_id":"GetAccountFull","trace_projection":"full_row","table":"benchbase.accounts","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"Amalgamate","procedure":"Amalgamate","statement_id":"GetAccountDestination","trace_statement_id":"GetAccountFull","trace_projection":"full_row","table":"benchbase.accounts","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"Amalgamate","procedure":"Amalgamate","statement_id":"GetSavingsBalance","trace_statement_id":"GetSavingsBalanceFull","trace_projection":"full_row","table":"benchbase.savings","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"Amalgamate","procedure":"Amalgamate","statement_id":"GetCheckingBalance","trace_statement_id":"GetCheckingBalanceFull","trace_projection":"full_row","table":"benchbase.checking","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"Balance","procedure":"Balance","statement_id":"GetAccount","trace_statement_id":"GetAccountFull","trace_projection":"full_row","table":"benchbase.accounts","classification":"snapshot","result_shape":"returned_rows","empty_result":"no_event","semantics_ignored":["predicate"]},
+    {"transaction_type":"Balance","procedure":"Balance","statement_id":"GetSavingsBalance","trace_statement_id":"GetSavingsBalanceFull","trace_projection":"full_row","table":"benchbase.savings","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"Balance","procedure":"Balance","statement_id":"GetCheckingBalance","trace_statement_id":"GetCheckingBalanceFull","trace_projection":"full_row","table":"benchbase.checking","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"DepositChecking","procedure":"DepositChecking","statement_id":"GetAccount","trace_statement_id":"GetAccountFull","trace_projection":"full_row","table":"benchbase.accounts","classification":"snapshot","result_shape":"returned_rows","empty_result":"no_event","semantics_ignored":["predicate"]},
+    {"transaction_type":"SendPayment","procedure":"SendPayment","statement_id":"GetAccountSource","trace_statement_id":"GetAccountFull","trace_projection":"full_row","table":"benchbase.accounts","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"SendPayment","procedure":"SendPayment","statement_id":"GetAccountDestination","trace_statement_id":"GetAccountFull","trace_projection":"full_row","table":"benchbase.accounts","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"SendPayment","procedure":"SendPayment","statement_id":"GetCheckingBalance","trace_statement_id":"GetCheckingBalanceFull","trace_projection":"full_row","table":"benchbase.checking","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"TransactSavings","procedure":"TransactSavings","statement_id":"GetAccount","trace_statement_id":"GetAccountFull","trace_projection":"full_row","table":"benchbase.accounts","classification":"snapshot","result_shape":"returned_rows","empty_result":"no_event","semantics_ignored":["predicate"]},
+    {"transaction_type":"TransactSavings","procedure":"TransactSavings","statement_id":"GetSavingsBalance","trace_statement_id":"GetSavingsBalanceFull","trace_projection":"full_row","table":"benchbase.savings","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"WriteCheck","procedure":"WriteCheck","statement_id":"GetAccount","trace_statement_id":"GetAccountFull","trace_projection":"full_row","table":"benchbase.accounts","classification":"snapshot","result_shape":"returned_rows","empty_result":"no_event","semantics_ignored":["predicate"]},
+    {"transaction_type":"WriteCheck","procedure":"WriteCheck","statement_id":"GetSavingsBalance","trace_statement_id":"GetSavingsBalanceFull","trace_projection":"full_row","table":"benchbase.savings","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]},
+    {"transaction_type":"WriteCheck","procedure":"WriteCheck","statement_id":"GetCheckingBalance","trace_statement_id":"GetCheckingBalanceFull","trace_projection":"full_row","table":"benchbase.checking","classification":"snapshot","result_shape":"exact_key_row","empty_result":"absent","semantics_ignored":["predicate"]}
+  ],
+  "loader": {
+    "scale_parameter": null,
+    "cardinalities": [
+      {"table":"benchbase.accounts","kind":"configuration","configuration_name":"record_count"},
+      {"table":"benchbase.checking","kind":"configuration","configuration_name":"record_count"},
+      {"table":"benchbase.savings","kind":"configuration","configuration_name":"record_count"}
+    ],
+    "relationships": []
+  }
+}

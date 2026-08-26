@@ -40,7 +40,7 @@ blackbox_backend_require_commands() {
 }
 
 blackbox_backend_teardown() {
-  blackbox_compose down --volumes --remove-orphans
+  blackbox_compose_all_profiles down --volumes --remove-orphans
 }
 
 blackbox_backend_start_database_schema() {

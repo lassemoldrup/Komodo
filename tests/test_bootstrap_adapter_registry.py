@@ -20,13 +20,13 @@ SPEC.loader.exec_module(REGISTRY_MODULE)
 
 
 class BootstrapAdapterRegistryTest(unittest.TestCase):
-    def test_discovers_ycsb_and_tpcc_without_coordinator_branches(self) -> None:
+    def test_discovers_registered_adapters_without_coordinator_branches(self) -> None:
         registry = REGISTRY_MODULE.BootstrapAdapterRegistry.discover(
             ROOT / "protocol" / "tools" / "bootstrap_adapters"
         )
         self.assertEqual(
             registry.benchmarks,
-            ("tpcc", "ycsb", "ycsb_fractured_read_probe"),
+            ("smallbank", "tpcc", "ycsb", "ycsb_fractured_read_probe"),
         )
         self.assertEqual(registry.require("tpcc").benchmark, "tpcc")
         self.assertEqual(registry.require("ycsb").benchmark, "ycsb")

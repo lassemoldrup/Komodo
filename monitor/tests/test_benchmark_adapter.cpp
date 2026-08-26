@@ -264,11 +264,12 @@ void checkExecutableGoldensUseRegisteredTables() {
 }
 
 void checkRegistryValidationAndCapabilities() {
-  BLACKBOX_CHECK(BenchmarkAdapterRegistry::adapters().size() == 3U);
+  BLACKBOX_CHECK(BenchmarkAdapterRegistry::adapters().size() == 4U);
   BLACKBOX_CHECK(BenchmarkAdapterRegistry::find("ycsb") != nullptr);
-  BLACKBOX_CHECK(
-      BenchmarkAdapterRegistry::find("ycsb_fractured_read_probe") != nullptr);
+  BLACKBOX_CHECK(BenchmarkAdapterRegistry::find("ycsb_fractured_read_probe") !=
+                 nullptr);
   BLACKBOX_CHECK(BenchmarkAdapterRegistry::find("tpcc") != nullptr);
+  BLACKBOX_CHECK(BenchmarkAdapterRegistry::find("smallbank") != nullptr);
   BLACKBOX_CHECK(BenchmarkAdapterRegistry::find("unknown") == nullptr);
   BLACKBOX_CHECK(blackbox::isProtocolName("NewOrder"));
   BLACKBOX_CHECK(blackbox::isProtocolName("a"));
@@ -331,7 +332,8 @@ void checkRegistryValidationAndCapabilities() {
 void checkStartupSchemaContracts() {
   const auto &backend = blackbox::BackendAdapterRegistry::require("mariadb");
   const auto requirements = backend.applicationTableRequirements();
-  for (const auto benchmark : {"ycsb", "ycsb_fractured_read_probe", "tpcc"}) {
+  for (const auto benchmark :
+       {"ycsb", "ycsb_fractured_read_probe", "tpcc", "smallbank"}) {
     const auto contract =
         loadJson(std::filesystem::path(BLACKBOX_PROTOCOL_ADAPTER_DIR) /
                  (std::string(benchmark) + ".json"));
@@ -424,6 +426,7 @@ int runBenchmarkAdapterTests() {
   checkSharedAdapterContract("ycsb");
   checkSharedAdapterContract("ycsb_fractured_read_probe");
   checkSharedAdapterContract("tpcc");
+  checkSharedAdapterContract("smallbank");
   checkExecutableGoldensUseRegisteredTables();
   checkRegistryValidationAndCapabilities();
   checkStartupSchemaContracts();

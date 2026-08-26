@@ -60,16 +60,18 @@
     "physical_namespace": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["database", "schema", "search_path"],
+      "required": ["database", "schema", "search_path", "canonical_schema", "identifier_case"],
       "properties": {
-        "database": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
-        "schema": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "database": { "$ref": "common.schema.json#/$defs/physicalIdentifier" },
+        "schema": { "$ref": "common.schema.json#/$defs/physicalIdentifier" },
         "search_path": {
           "oneOf": [
             { "type": "null" },
-            { "$ref": "common.schema.json#/$defs/canonicalIdentifier" }
+            { "$ref": "common.schema.json#/$defs/physicalIdentifier" }
           ]
-        }
+        },
+        "canonical_schema": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
+        "identifier_case": { "type": "string", "enum": ["lower", "upper"] }
       }
     },
     "session_contract": {

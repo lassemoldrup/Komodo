@@ -1,5 +1,6 @@
 #include "blackbox/benchmark_adapter.h"
 
+#include "blackbox/canonical_smallbank_codec.h"
 #include "blackbox/canonical_tpcc_codec.h"
 #include "blackbox/canonical_ycsb_codec.h"
 
@@ -784,6 +785,117 @@ constexpr std::array tpcc_result_sets = {
 };
 constexpr std::array<const CanonicalRowCodec *, 0> tpcc_codecs{};
 
+constexpr std::array smallbank_transactions = {
+    std::string_view{"Amalgamate"},      std::string_view{"Balance"},
+    std::string_view{"DepositChecking"}, std::string_view{"SendPayment"},
+    std::string_view{"TransactSavings"}, std::string_view{"WriteCheck"},
+};
+constexpr std::array smallbank_isolations = {
+    std::string_view{"REPEATABLE_READ"},
+};
+constexpr std::array smallbank_key = {std::string_view{"custid"}};
+constexpr std::array accounts_values = {std::string_view{"name"}};
+constexpr std::array balance_values = {std::string_view{"bal"}};
+constexpr std::array accounts_columns = {
+    Column{"custid", "BIGINT", false, true, false},
+    Column{"name", "VARCHAR(64)", false, false, false},
+};
+constexpr std::array balance_columns = {
+    Column{"custid", "BIGINT", false, true, false},
+    Column{"bal", "DECIMAL(18,2)", false, false, false},
+};
+constexpr std::array smallbank_tables = {
+    AdapterTableContract{"benchbase.accounts", smallbank_key, accounts_values,
+                         accounts_columns},
+    AdapterTableContract{"benchbase.checking", smallbank_key, balance_values,
+                         balance_columns},
+    AdapterTableContract{"benchbase.savings", smallbank_key, balance_values,
+                         balance_columns},
+};
+constexpr std::array smallbank_result_sets = {
+    AdapterResultSetContract{
+        "Amalgamate", "Amalgamate", "GetAccountSource", "benchbase.accounts",
+        ResultSetClassification::Snapshot, ResultSetShape::ExactKeyRow,
+        "absent", ignored_predicate, std::nullopt, "GetAccountFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "Amalgamate", "Amalgamate", "GetAccountDestination",
+        "benchbase.accounts", ResultSetClassification::Snapshot,
+        ResultSetShape::ExactKeyRow, "absent", ignored_predicate, std::nullopt,
+        "GetAccountFull", "full_row"},
+    AdapterResultSetContract{
+        "Amalgamate", "Amalgamate", "GetSavingsBalance", "benchbase.savings",
+        ResultSetClassification::Snapshot, ResultSetShape::ExactKeyRow,
+        "absent", ignored_predicate, std::nullopt, "GetSavingsBalanceFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "Amalgamate", "Amalgamate", "GetCheckingBalance", "benchbase.checking",
+        ResultSetClassification::Snapshot, ResultSetShape::ExactKeyRow,
+        "absent", ignored_predicate, std::nullopt, "GetCheckingBalanceFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "Balance", "Balance", "GetAccount", "benchbase.accounts",
+        ResultSetClassification::Snapshot, ResultSetShape::ReturnedRows,
+        "no_event", ignored_predicate, std::nullopt, "GetAccountFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "Balance", "Balance", "GetSavingsBalance", "benchbase.savings",
+        ResultSetClassification::Snapshot, ResultSetShape::ExactKeyRow,
+        "absent", ignored_predicate, std::nullopt, "GetSavingsBalanceFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "Balance", "Balance", "GetCheckingBalance", "benchbase.checking",
+        ResultSetClassification::Snapshot, ResultSetShape::ExactKeyRow,
+        "absent", ignored_predicate, std::nullopt, "GetCheckingBalanceFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "DepositChecking", "DepositChecking", "GetAccount",
+        "benchbase.accounts", ResultSetClassification::Snapshot,
+        ResultSetShape::ReturnedRows, "no_event", ignored_predicate,
+        std::nullopt, "GetAccountFull", "full_row"},
+    AdapterResultSetContract{
+        "SendPayment", "SendPayment", "GetAccountSource", "benchbase.accounts",
+        ResultSetClassification::Snapshot, ResultSetShape::ExactKeyRow,
+        "absent", ignored_predicate, std::nullopt, "GetAccountFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "SendPayment", "SendPayment", "GetAccountDestination",
+        "benchbase.accounts", ResultSetClassification::Snapshot,
+        ResultSetShape::ExactKeyRow, "absent", ignored_predicate, std::nullopt,
+        "GetAccountFull", "full_row"},
+    AdapterResultSetContract{
+        "SendPayment", "SendPayment", "GetCheckingBalance",
+        "benchbase.checking", ResultSetClassification::Snapshot,
+        ResultSetShape::ExactKeyRow, "absent", ignored_predicate, std::nullopt,
+        "GetCheckingBalanceFull", "full_row"},
+    AdapterResultSetContract{
+        "TransactSavings", "TransactSavings", "GetAccount",
+        "benchbase.accounts", ResultSetClassification::Snapshot,
+        ResultSetShape::ReturnedRows, "no_event", ignored_predicate,
+        std::nullopt, "GetAccountFull", "full_row"},
+    AdapterResultSetContract{
+        "TransactSavings", "TransactSavings", "GetSavingsBalance",
+        "benchbase.savings", ResultSetClassification::Snapshot,
+        ResultSetShape::ExactKeyRow, "absent", ignored_predicate, std::nullopt,
+        "GetSavingsBalanceFull", "full_row"},
+    AdapterResultSetContract{
+        "WriteCheck", "WriteCheck", "GetAccount", "benchbase.accounts",
+        ResultSetClassification::Snapshot, ResultSetShape::ReturnedRows,
+        "no_event", ignored_predicate, std::nullopt, "GetAccountFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "WriteCheck", "WriteCheck", "GetSavingsBalance", "benchbase.savings",
+        ResultSetClassification::Snapshot, ResultSetShape::ExactKeyRow,
+        "absent", ignored_predicate, std::nullopt, "GetSavingsBalanceFull",
+        "full_row"},
+    AdapterResultSetContract{
+        "WriteCheck", "WriteCheck", "GetCheckingBalance", "benchbase.checking",
+        ResultSetClassification::Snapshot, ResultSetShape::ExactKeyRow,
+        "absent", ignored_predicate, std::nullopt, "GetCheckingBalanceFull",
+        "full_row"},
+};
+constexpr std::array<const CanonicalRowCodec *, 0> smallbank_codecs{};
+
 const StaticBenchmarkAdapter
     ycsb_adapter("ycsb", ycsb_transactions, ycsb_isolations, ycsb_tables,
                  ycsb_result_sets,
@@ -808,10 +920,19 @@ const StaticBenchmarkAdapter
                                             .bootstrap_scan = true},
                  tpcc_codecs, CanonicalTpccCodec::tableCodec);
 
-const std::array<const BenchmarkAdapter *, 3> registered_adapters = {
+const StaticBenchmarkAdapter
+    smallbank_adapter("smallbank", smallbank_transactions, smallbank_isolations,
+                      smallbank_tables, smallbank_result_sets,
+                      AdapterRuntimeCapabilities{.client_trace = true,
+                                                 .cdc_normalization = true,
+                                                 .bootstrap_scan = true},
+                      smallbank_codecs, CanonicalSmallBankCodec::tableCodec);
+
+const std::array<const BenchmarkAdapter *, 4> registered_adapters = {
     &ycsb_adapter,
     &ycsb_fractured_read_probe_adapter,
     &tpcc_adapter,
+    &smallbank_adapter,
 };
 
 } // namespace

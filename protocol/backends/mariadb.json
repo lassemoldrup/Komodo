@@ -4,7 +4,9 @@
   "physical_namespace": {
     "database": "benchbase",
     "schema": "benchbase",
-    "search_path": null
+    "search_path": null,
+    "canonical_schema": "benchbase",
+    "identifier_case": "lower"
   },
   "session_contract": {
     "declared_isolations": ["READ_COMMITTED", "REPEATABLE_READ"],

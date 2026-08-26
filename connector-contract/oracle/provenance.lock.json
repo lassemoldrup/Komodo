@@ -1,0 +1,32 @@
+{
+  "database": {
+    "image": "docker.io/gvenzl/oracle-free@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8",
+    "build": "Oracle AI Database 26ai Free 23.26.2.0.0",
+    "platform": "linux/amd64"
+  },
+  "debezium_server": {
+    "image": "quay.io/debezium/server@sha256:8d3a3ad6e16ccc52c2efbb76b2e8198697f1e4bfe67ed5557b405a5a01c85da5",
+    "version": "3.6.1.Final",
+    "oracle_connector_jar_sha256": "b3a81a6d4e0822788a2c1a04bfd6007adcfedd0d07edeb6deebd8df73834fed8",
+    "bundled_ojdbc11_version": "23.26.0.0.0",
+    "bundled_ojdbc11_sha256": "ef295bf01374dac7d791b3bc6526d10e8910ecac4645a95a3ca0c01cfc5c21d0"
+  },
+  "benchbase_jdbc": {
+    "coordinates": "com.oracle.database.jdbc:ojdbc11:23.7.0.25.01",
+    "sha256": "ec8b7f2020b03b19f572e1bc34f94330610e86d3113ffe1e1f0474b8f5ce88ed"
+  },
+  "logminer": {
+    "strategy": "online_catalog",
+    "batch_size_default": 20000,
+    "sleep_time_min_ms": 0,
+    "sleep_time_default_ms": 200,
+    "sleep_time_max_ms": 1000,
+    "sleep_time_increment_ms": 200,
+    "database_supplemental_logging": "minimum",
+    "captured_table_supplemental_logging": "all_columns",
+    "snapshot_mode": "no_data",
+    "snapshot_locking_mode": "none",
+    "connector_tasks": 1,
+    "redis_stream": "cdc"
+  }
+}

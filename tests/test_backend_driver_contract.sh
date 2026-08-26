@@ -63,6 +63,7 @@ blackbox_backend_status() { mock_driver_gate status && printf 'status:healthy\n'
 DRIVER
 cp "$TEST_ROOT/drivers/template.sh" "$TEST_ROOT/drivers/mariadb.sh"
 cp "$TEST_ROOT/drivers/template.sh" "$TEST_ROOT/drivers/yugabytedb_ysql.sh"
+cp "$TEST_ROOT/drivers/template.sh" "$TEST_ROOT/drivers/oracle.sh"
 
 run_backend() {
   local backend=$1 source_id=$2 example=$3 output=$4
@@ -113,8 +114,12 @@ run_backend mariadb mariadb-main \
 run_backend yugabytedb_ysql yugabytedb-ysql-main \
   "$ROOT/protocol/examples/backends/yugabytedb-ysql-schema-attestation.json" \
   "$TEST_ROOT/yugabyte.events"
+run_backend oracle oracle-main \
+  "$ROOT/protocol/examples/backends/oracle-schema-attestation.json" \
+  "$TEST_ROOT/oracle.events"
 
 diff -u "$TEST_ROOT/mariadb.events" "$TEST_ROOT/yugabyte.events"
+diff -u "$TEST_ROOT/mariadb.events" "$TEST_ROOT/oracle.events"
 
 export ROOT
 MOCK_FAILURE_EXAMPLE="$ROOT/protocol/examples/schema-attestation-startup.json"

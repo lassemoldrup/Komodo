@@ -190,6 +190,25 @@ blackbox_compose() {
 }
 
 
+blackbox_compose_all_profiles() {
+  local profile profile_arguments=()
+  while IFS= read -r profile; do
+    [[ -n $profile ]] && profile_arguments+=(--profile "$profile")
+  done < <(
+    "$BLACKBOX_DOCKER" compose --file "$BLACKBOX_ROOT/docker-compose.yml" \
+      config --profiles
+  )
+  if (( ${#profile_arguments[@]} == 0 )); then
+    # Test doubles and older Compose implementations may not expose profile
+    # discovery; retain the selected-profile contract in that environment.
+    blackbox_compose "$@"
+    return
+  fi
+  "$BLACKBOX_DOCKER" compose --file "$BLACKBOX_ROOT/docker-compose.yml" \
+    "${profile_arguments[@]}" "$@"
+}
+
+
 blackbox_adapter_contract() {
   python3 "$BLACKBOX_RECORD_TOOL" adapter-contract --benchmark "$BLACKBOX_BENCHMARK"
 }
@@ -417,8 +436,6 @@ blackbox_build_bootstrap_manifest() {
   python3 "$BLACKBOX_RECORD_TOOL" bootstrap-manifest \
     --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
     --benchmark "$BLACKBOX_BENCHMARK" \
-    --schema benchbase \
-    --table usertable \
     --scan-file "$scan_file" \
     --max-rows "$BLACKBOX_BOOTSTRAP_MAX_ROWS" \
     --max-input-bytes "$BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES" \
