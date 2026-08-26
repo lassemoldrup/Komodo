@@ -6,11 +6,10 @@ CO_CHECKER_ROOT ?= $(abspath ../co-checker)
 BENCHBASE_ROOT ?= $(abspath ../benchbase)
 PROBE_BUILD_DIR ?= /tmp/db-monitoring-fractured-read-probe-build
 MAVEN ?= mvn
-PERFORMANCE_OUTPUT_ROOT ?=
 MONITOR_PERFORMANCE_CORPUS_DIR ?= /media/newhd/yifan/db-monitoring-builds/blackbox-performance/measurements/final-120s-20260819T143836Z/trials/repetition-01/06-assembly_join_check
 MONITOR_PERFORMANCE_OUTPUT_ROOT ?=
 
-.PHONY: up down reset status stream follow txn bench sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live test-yugabytedb-ysql-connector-contract performance-smoke performance-measure monitor-performance-measure
+.PHONY: up down reset status stream follow txn sql logs e2e monitor-build probe-client-build test-monitor test-lifecycle test-lifecycle-live test-correctness-live test-yugabytedb-ysql-connector-contract monitor-performance-measure
 
 ## Start the stack for $(DB)
 up:
@@ -46,10 +45,6 @@ follow:
 txn:
 	@DB=$(DB) ./scripts/txn.sh
 
-## Throughput + latency benchmark (MariaDB only for now)
-bench:
-	@DB=$(DB) ./scripts/bench.sh
-
 ## SQL shell
 sql:
 	@DB=$(DB) ./scripts/sql.sh
@@ -57,7 +52,7 @@ sql:
 logs:
 	$(COMPOSE) logs -f --tail=100
 
-## Run the audited MariaDB lifecycle (requires loader/workload command hooks)
+## Run the audited lifecycle for $(DB) (requires loader/workload command hooks)
 e2e: monitor-build
 	BLACKBOX_MONITOR_BIN=$(MONITOR_BUILD_DIR)/blackbox_run_monitor \
 		./scripts/e2e.sh
@@ -87,7 +82,6 @@ test-lifecycle: test-monitor
 	./tests/test_live_lock.sh
 	bash ./tests/test_backend_driver_contract.sh
 	./tests/test_e2e_lifecycle.sh
-	./tests/test_blackbox_performance_harness.sh
 	./tests/test_blackbox_monitor_performance_harness.sh
 
 test-yugabytedb-ysql-connector-contract:
@@ -108,22 +102,6 @@ test-correctness-live: test-monitor probe-client-build
 	BLACKBOX_BENCHBASE_ROOT="$(abspath $(BENCHBASE_ROOT))" \
 	BLACKBOX_MAVEN="$(MAVEN)" \
 		./tests/test_semantic_correctness.sh
-
-## Run both formal performance modes once with the fixed smoke configuration
-performance-smoke:
-	@set -- --smoke; \
-	if [ -n "$(PERFORMANCE_OUTPUT_ROOT)" ]; then \
-		set -- "$$@" --output-root "$(PERFORMANCE_OUTPUT_ROOT)"; \
-	fi; \
-	./scripts/run_blackbox_performance.sh "$$@"
-
-## Run three rotated measured repetitions of both formal performance modes
-performance-measure:
-	@set --; \
-	if [ -n "$(PERFORMANCE_OUTPUT_ROOT)" ]; then \
-		set -- "$$@" --output-root "$(PERFORMANCE_OUTPUT_ROOT)"; \
-	fi; \
-	./scripts/run_blackbox_performance.sh "$$@"
 
 ## Replay one captured 120-second corpus through join-only and checked monitors
 monitor-performance-measure:

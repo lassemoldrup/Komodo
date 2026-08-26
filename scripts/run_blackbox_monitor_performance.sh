@@ -7,7 +7,6 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORKSPACE_ROOT=$(cd "$ROOT/.." && pwd)
 CO_CHECKER_ROOT="$WORKSPACE_ROOT/co-checker"
 REPORTER="$ROOT/scripts/blackbox_monitor_performance_report.py"
-CHECKSUM_TOOL="$ROOT/scripts/blackbox_performance_report.py"
 REPLAY_TOOL="$ROOT/scripts/xrange_to_redis_pipe.py"
 MEASURED_COMMAND="$ROOT/scripts/run_measured_command.sh"
 ARTIFACT_PREFIX=/media/newhd/yifan/db-monitoring-builds
@@ -413,10 +412,10 @@ verify_inputs() {
   done
   SI_MONITORING_HEAD=$(git -C "$ROOT" rev-parse HEAD)
   CO_CHECKER_HEAD=$(git -C "$CO_CHECKER_ROOT" rev-parse HEAD)
-  for tool in awk docker du flock jq pgrep python3 redis-cli sha256sum timeout; do
+  for tool in awk docker du find flock jq pgrep python3 redis-cli sha256sum sort timeout xargs; do
     command -v "$tool" >/dev/null 2>&1 || die "required command is unavailable: $tool"
   done
-  [[ -x $REPORTER && -x $CHECKSUM_TOOL && -x $REPLAY_TOOL && -x $MEASURED_COMMAND ]] ||
+  [[ -x $REPORTER && -x $REPLAY_TOOL && -x $MEASURED_COMMAND ]] ||
     die "monitor performance helper is not executable"
 }
 
@@ -1347,8 +1346,18 @@ PY
 
 checksum_trial() {
   local trial_dir=$1
-  python3 "$CHECKSUM_TOOL" checksums --root "$trial_dir" --output "$trial_dir/SHA256SUMS"
+  write_checksums "$trial_dir"
   (cd "$trial_dir" && sha256sum --check SHA256SUMS >/dev/null)
+}
+
+
+write_checksums() {
+  local directory=$1 temporary
+  temporary=$(mktemp /tmp/blackbox-monitor-checksums.XXXXXX)
+  (cd "$directory" &&
+    find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z |
+      xargs -0 sha256sum >"$temporary")
+  mv "$temporary" "$directory/SHA256SUMS"
 }
 
 
@@ -1393,7 +1402,7 @@ finalize_reports() {
   record_command "$OUTPUT_ROOT/report-commands.txt" python3 "$REPORTER" --root "$OUTPUT_ROOT"
   python3 "$REPORTER" --root "$OUTPUT_ROOT"
   docker_command ps --no-trunc --format json >"$OUTPUT_ROOT/provenance/docker-ps-after.jsonl"
-  python3 "$CHECKSUM_TOOL" checksums --root "$OUTPUT_ROOT" --output "$OUTPUT_ROOT/SHA256SUMS"
+  write_checksums "$OUTPUT_ROOT"
   (cd "$OUTPUT_ROOT" && sha256sum --check SHA256SUMS >/dev/null)
 }
 

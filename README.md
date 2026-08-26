@@ -23,7 +23,7 @@ Connector IDs and source positions are diagnostic metadata only.
 |---|---|---|
 | MariaDB | 12.3 / Debezium 3.6.1 | live-gated |
 | YugabyteDB YSQL | 2025.2.5.2-b5 / dz.2.5.2.yb.2026.1 | Milestone 9 gated |
-| Oracle | exploratory assets only | not admitted |
+| Oracle | Free 23.26.2.0.0 / Debezium Oracle 3.6.1 | SmallBank live-gated |
 
 ## Quick start
 
@@ -353,7 +353,7 @@ implicit-DML, and locking-read exclusions are not used as negative tests.
 ## Performance measurement
 
 The formal performance experiment has exactly two modes. Both use the current
-BenchBase checkout, the same RR database/server contract, evidence-compatible
+BenchBase checkout, the same admitted SI contract, evidence-compatible
 schema, deterministic loaded bytes, scale, mix, seed, terminal count, rate,
 warmup, and measured duration:
 
@@ -361,83 +361,54 @@ warmup, and measured duration:
   benchmark SQL, `Worker`, and retry behavior, with no client capture/encoding,
   marker, Redis publication, Debezium consumer, or C++ monitor.
 - `full_e2e` enables audited client capture and canonical encoding, marker and
-  Redis publication, MariaDB CDC collection by external Debezium Server, and
+  Redis publication, backend-selected CDC collection by external Debezium Server, and
   the C++ monitor's assembly/normalization of raw Debezium records, joiner, and
   checker.
 
 Debezium belongs to the full black-box system but is not part of the C++
-Monitor. The initial TPC-C target is one warehouse, four terminals, 120 seconds,
-three repetitions, and mix `45,43,4,4,4`:
+Monitor. Formal runs are declared entirely by external matrix data and use the
+generic registered scheduler and cell runner:
 
 ```bash
-./scripts/run_blackbox_performance.sh \
-  --benchmark tpcc \
-  --warehouses 1 \
-  --terminals 4 \
-  --duration-seconds 120 \
-  --repetitions 3 \
-  --mix 45,43,4,4,4 \
-  --loader-timestamp-utc 2000-01-01T00:00:00Z \
-  --rate unlimited \
-  --drain-timeout-seconds 30 \
-  --status-timeout-seconds 900 \
-  --high-water-threshold-percent 70 \
-  --monitor-bootstrap-state-bytes 1073741824 \
-  --output-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/tpcc-w1-t4
+python3 scripts/run_registered_evaluation_matrix.py \
+  experiments/mariadb_three_benchmark_performance_matrix.json
+  experiments/oracle_three_benchmark_performance_matrix.json \
+  experiments/yugabytedb_three_benchmark_performance_matrix.json
 ```
+
+One invocation can therefore execute the complete three-database evaluation.
+After all matrices finish, the scheduler prints the absolute paths of every
+`raw-results.csv`, `summary.csv`, `summary.md`, and `summary.json`. Each source
+matrix still owns its output root, so a new run first uses new `output_root`
+values; `--resume` only validates and summarizes already accepted repetitions.
+
+The scheduler validates backend and benchmark registrations but treats backend,
+benchmark, workload, capture profile, mode, and repetition names as opaque
+values. Each matrix selects either `direct_benchbase` or `coordinated_e2e` as
+its execution profile. This keeps the formal performance path independent of
+database and benchmark names.
 
 Backlog and head-of-line measurements remain in the reports as diagnostic
 telemetry. Acceptance requires terminal queues and unmatched evidence to be
-zero, the end-to-verdict tail to stay within `--drain-timeout-seconds`, and
+zero, the end-to-verdict tail to stay within `--drain-limit-seconds`, and
 resource high-water marks to remain below
 `--high-water-threshold-percent`; it does not impose a backlog-trend rule.
 
-By default, the smoke target executes both formal modes once with scale one and
-two requested measurement seconds. YCSB smoke uses two terminals and one second
-of warmup; TPC-C smoke uses four terminals and no warmup so the standard mix is
-exercised without adding another workload interval after its larger bootstrap.
-The default measured YCSB target uses three rotated repetitions, four terminals,
-scale ten, five seconds of warmup, and twenty requested measurement seconds:
+The correctness evidence paths are prerequisites recorded in each matrix. A
+formal performance invocation verifies their checksum and admitted terminal
+status, but it does not rerun the correctness suite. Baseline and E2E cells are
+separate matrix entries, so the matrix can select either one or both without a
+hard-coded mode roster.
 
-```bash
-docker exec db-monitoring-dev bash -lc '
-  cd /home/yifan/code/db-monitoring/si-monitoring
-  make performance-smoke \
-    PERFORMANCE_OUTPUT_ROOT=/media/newhd/yifan/db-monitoring-builds/blackbox-performance/smoke-20260818
-  make performance-measure \
-    PERFORMANCE_OUTPUT_ROOT=/media/newhd/yifan/db-monitoring-builds/blackbox-performance/run-20260818
-'
-```
-
-Pass `--mode NAME` directly to `scripts/run_blackbox_performance.sh` to run
-only one mode. Selection is set-like: names must be unique, the selected roster
-is normalized to canonical order, and each repetition rotates only that roster.
-Omitting `--mode` runs both modes. For example, this runs only full E2E:
-
-```bash
-./scripts/run_blackbox_performance.sh \
-  --benchmark tpcc \
-  --output-root /media/newhd/yifan/db-monitoring-builds/blackbox-performance/full-e2e-only \
-  --mode full_e2e
-```
-
-Selected-mode runs record their roster in each trial's metadata and in
-`mode_order.csv`. Client overhead is available only when both modes are
-present. Full-E2E artifacts always keep client, external CDC, C++ Monitor, and
-complete evidence-path metrics distinct.
-
-The generated BenchBase configurations use loader batch size 128 by default.
-Pass `--loader-batch-size N` to select another positive value. The selection is
-written to configuration, trial metadata, and `loader_validation.json`; loader
-acceptance never assumes 128. Every current-loader trial independently compares
+The matrix supplies loader batch size through
+`BENCHBASE_MEASUREMENT_BATCH_SIZE`; the admitted matrices use 128. The selection
+is written to configuration and `loader-validation.json`. Every trial compares
 the exact loader-declared table counts with SQL counts before creating the
 codec-dependent bootstrap manifest.
 
-The generated configurations also record a fixed loader timestamp. It defaults
-to `2000-01-01T00:00:00Z` and can be selected with
-`--loader-timestamp-utc YYYY-MM-DDTHH:MM:SSZ` or the
-`BLACKBOX_PERFORMANCE_LOADER_TIMESTAMP_UTC` environment variable. The runner
-rejects offsets, fractional seconds, whitespace, and invalid calendar values.
+The matrices can also record a fixed loader timestamp through
+`BENCHBASE_MEASUREMENT_LOADER_TIMESTAMP_UTC`. The runner rejects offsets,
+fractional seconds, whitespace, and invalid calendar values.
 For TPC-C this fixes `c_since`, `h_date`, `o_entry_d`, and non-null
 `ol_delivery_d` loader values across modes and repetitions; workload-generated
 timestamps remain real-time. The exact value is preserved in both generated
@@ -496,27 +467,10 @@ corpus preload. The reports are `raw_monitor_trials.csv`,
 same numerator corpus, while checker core consume time remains diagnostic and
 is not reported as whole-process throughput.
 
-An output root must be below `/media/newhd/yifan/db-monitoring-builds` and must
-not already contain files. Normal measured runs require clean current BenchBase,
-monitor, and checker worktrees; `--smoke` is the explicit exception used to test
-uncommitted harness changes. The runner also requires that its own process is
-inside `db-monitoring-dev`.
-
-The performance runner explicitly starts Redis with an 8 GiB no-eviction limit
-and exposes every assembler, pending-client, pending-CDC, retained-identity,
-per-transaction, bootstrap, and checker-state capacity as a command-line
-option; `--help` lists their defaults. The full-E2E trial verifies Redis's
-effective `maxmemory` and policy and every monitor-reported
-limit against trial metadata, requires terminal backlogs to be zero, and
-requires
-all observed high-water marks to remain strictly below the selected threshold
-(70 percent by default).
-
-Performance output is restricted to `/media/newhd/yifan/db-monitoring-builds`
-and defaults to a 107374182400-byte (100 GiB) run budget. The coordinator checks
-the aggregate at mode boundaries, supervises it during the run, and streams
-large Redis captures through a bounded writer. `--output-max-bytes` can lower
-the budget but should not be raised for the canonical run.
+The matrix output root must be a new absolute path. Capacity and acceptance
+limits are explicit cell arguments. A full-E2E trial verifies Redis and monitor
+limits, requires zero terminal backlog, and rejects any observed high-water mark
+at or above the declared threshold.
 
 Throughput, request latency, the authoritative actual elapsed time, and the
 measured epoch window come from BenchBase's raw CSV and summary JSON. Logical
@@ -556,37 +510,21 @@ IDs/timestamps, and `final_status_boundary.json` preserves the run-scoped
 BenchBase client measurement window, the exact-ID component window, and the
 final-status boundary together.
 
-Each output root contains generated input configurations, build logs and exact
-commands, host/JVM/container/image provenance, `mode_order.csv`, and one
-checksummed directory per raw trial. The aggregate deliverables are
-`headline_results.md`, its machine-readable `headline_results.csv`,
-`raw_trials.csv`, `transaction_results.csv`, `component_results.csv`,
-`summary_statistics.csv` (median,
-min, max, and MAD without outlier removal), `overhead.csv`,
-`artifact_index.csv`, and the root `SHA256SUMS`. `transaction_results.csv`
-contains one overall/per-type row per mode and repetition. The headline compares
-uninstrumented and full-E2E BenchBase logical throughput, then reports full-E2E
-client outcome metrics, external CDC ingestion, C++ Monitor throughput,
-complete evidence-path throughput, drain, and resources without crossing
-component boundaries. `overhead.csv` contains only the full-E2E logical-TPS
-effect relative to uninstrumented BenchBase; it does not attribute that effect
-to individual components. The CSV retains unrounded values and canonical mode
-identifiers; Markdown applies concise display rounding and labels. Existing
-output roots can be backfilled without rereading captured streams:
+Each output root contains the copied matrix, one checksummed directory per raw
+repetition, `raw-results.csv`, `summary.json`, the concise `summary.csv` and
+`summary.md`, and the root `SHA256SUMS`. The concise reports contain only cell
+identity plus median client p95 latency, E2E time, client throughput, monitor
+throughput, and E2E throughput. Baseline cells leave monitor and E2E fields
+empty. `raw-results.csv` and `summary.json` retain the complete unrounded data
+and comparison results for provenance.
+
+Existing completed roots can regenerate only the aggregate reports without
+rerunning a workload:
 
 ```bash
-python3 scripts/blackbox_performance_report.py headline \
-  --input-csv OUTPUT_ROOT/raw_trials.csv \
-  --csv-output OUTPUT_ROOT/headline_results.csv \
-  --markdown-output OUTPUT_ROOT/headline_results.md
-python3 scripts/blackbox_performance_report.py checksums \
-  --root OUTPUT_ROOT --output OUTPUT_ROOT/SHA256SUMS
+python3 scripts/run_registered_evaluation_matrix.py MATRIX.json --resume
 (cd OUTPUT_ROOT && sha256sum --check SHA256SUMS)
 ```
-
-When backfilling a preserved result, also record the headline command and the
-reporter commit in that result's derivation/provenance before regenerating its
-root manifest. Trial artifacts and their manifests remain unchanged.
 
 Large distributions, Redis captures, BenchBase result sets, Compose logs, and
 resource samples remain under that output root on the artifact volume.
@@ -616,17 +554,22 @@ conflict scans. The pinned release has no IntentDB-only write-buffer flag, so
 this profile is a measured workaround rather than the preferred permanent
 engine fix.
 
-**Oracle** — needs ARCHIVELOG, force logging, and `SUPPLEMENTAL LOG DATA (ALL)
-COLUMNS` per table (the equivalent of `REPLICA IDENTITY FULL`);
-`oracle/startdb.d/` applies all of it on every start. Single instance only:
+**Oracle** — the pinned database-lifetime prerequisite creates ARCHIVELOG,
+force/minimal supplemental logging, and the LogMiner principal. The separate
+run-owned initializer creates an empty `BLACKBOX_OWNER` application schema,
+the narrow application principal, LogMiner flush state, exact connector table
+membership, and `SUPPLEMENTAL LOG DATA (ALL) COLUMNS` per captured table. The
+application owns no DDL privilege; audited workload sessions use Oracle
+SERIALIZABLE (= SI), while write-only bootstrap loading uses the separately
+attested READ COMMITTED setting. Single instance only:
 under RAC each node keeps its own redo thread and commit ordering across threads
 is not guaranteed. Long-running transactions can be dropped silently by
 `log.mining.transaction.retention`.
 
-**Version pins** — YugabyteDB, Debezium Server, Java, Redis, and the official
-logical connector use immutable image digests/artifact checksums recorded in
-`connector-contract/yugabytedb_ysql/provenance.lock.json`. Upgrades reopen all
-Milestone 9 correctness gates.
+**Version pins** — immutable image digests and artifact checksums are recorded
+in each connector contract's `provenance.lock.json`, including Oracle Free,
+Debezium Server, the Oracle connector, its bundled JDBC driver, and the
+BenchBase JDBC driver. Upgrades reopen that backend's capability gates.
 
 ## Database parameters
 
@@ -680,13 +623,10 @@ Per-table: `REPLICA IDENTITY DEFAULT` in the admitted final-write profile and
 `pgoutput` slot with `yb_lsn_type=SEQUENCE`; one connector task and one `cdc`
 Redis stream.
 
-The bounded complete-final-write comparison is declared by
-`experiments/complete_final_write_yugabytedb_ycsb_capture_ab.json` and run with
-`python3 scripts/run_complete_final_write_capture_profile_experiment.py <manifest>`.
-It builds
-BenchBase and the monitor once, alternates the two opaque profiles, requires at
-least three repetitions per profile, and writes the paired report beside the
-ordinary raw/component CSV and checksum manifest.
+The bounded complete-final-write comparison is preserved as historical evidence
+under the artifact volume. Current formal matrices use the admitted
+`yb_final_write_v1` capture profile directly; the one-off A/B orchestration is
+not part of the maintained performance path.
 
 **Oracle** (`oracle/startdb.d/`)
 
@@ -695,8 +635,16 @@ ordinary raw/component CSV and checksum manifest.
 | archive log mode | `NOARCHIVELOG` | `ARCHIVELOG` |
 | force logging | NO | YES |
 | minimal supplemental logging | NO | YES |
-| per-table supplemental logging | none | `ALL COLUMNS` on both tables |
-| default isolation | READ COMMITTED | SERIALIZABLE (= SI), via an `AFTER LOGON` trigger on the `SITEST` schema |
+| per-table supplemental logging | none | `ALL COLUMNS` on the selected adapter and control tables |
+| workload isolation | READ COMMITTED | SERIALIZABLE (= SI), applied and verified by the Java backend adapter |
+| bootstrap loader isolation | READ COMMITTED | READ COMMITTED (write-only, separately attested) |
+| LogMiner strategy | connector default | `online_catalog` with bounded sleep 0/200/1000/200 ms |
+
+The admitted three-database/three-benchmark matrices are external JSON data in
+`experiments/`. Run `python3 scripts/run_registered_evaluation_matrix.py
+<matrix>`; the generic scheduler validates backend/benchmark registrations and
+correctness evidence, then treats backend, benchmark, workload, mode, capture
+profile, and repetition as opaque cell values.
 
 **Redis** — `--save ""` (default has RDB save points), `--appendonly no`
 (default), `--maxmemory 2gb` (default unlimited). It is a transport, not a
@@ -710,7 +658,8 @@ mariadb/conf.d/cdc.cnf                    # binlog, isolation, durability, throu
 mariadb/initdb/*.sql                      # accounts + benchmark-neutral controls
 mariadb/initdb/adapters/*.sql             # one selected application schema
 yugabytedb_ysql/initdb/, init.sh          # empty schema/publication, SEQUENCE slot last
-oracle/startdb.d/                         # ARCHIVELOG, suppl. logging, user, schema
+oracle/startdb.d/                         # database-lifetime LogMiner prerequisites
+oracle/initdb/, init.sh                   # empty run-owned schema/capture state
 debezium/application*.properties          # one per backend
 debezium/Dockerfile.yugabytedb-ysql       # checksum-verified connector on pinned Java 17
 scripts/lib.sh                            # backend detection, shared SQL helpers
@@ -718,9 +667,12 @@ scripts/e2e.sh                            # sole backend-neutral lifecycle coord
 scripts/backends/                         # physical SQL/Compose/catalog drivers
 scripts/blackbox_lifecycle.sh             # generic fences, Redis/status, scan helpers
 scripts/blackbox_record.py                # manifests and bootstrap digest
+scripts/run_registered_evaluation_matrix.py # external data-driven scheduler
+scripts/run_registered_performance_cell.sh # generic per-cell executor
+scripts/registered_performance_result.py # generic per-repetition metrics
 scripts/txn.sh                            # client protocol reference, all backends
 scripts/stream.sh                         # read/follow, handles all envelopes
-scripts/bench.sh, sql.sh, status.sh
+scripts/sql.sh, status.sh                  # manual operator inspection
 monitor/                                  # C++ CDC reader, assembler, fixtures, tests
 ```
 
@@ -734,5 +686,7 @@ adapter contract and matching init SQL; the default remains `ycsb`.
 Development defaults, plaintext. MariaDB `root`/`rootpw`, `debezium`/`debezium_pw`,
 `app`/`app_pw`. YugabyteDB application
 `blackbox_application`/`blackbox_application_password` and replication
-`blackbox_replication`/`blackbox_replication_password`. Oracle `sys`/`oraclepw`,
-`c##dbzuser`/`dbz`, `sitest`/`sitestpw`.
+`blackbox_replication`/`blackbox_replication_password`. Audited Oracle runs
+derive fresh SYS, schema-owner, application, and LogMiner passwords from the
+new coordinator-owned run ID; the Compose defaults exist only for manual
+non-audited exploration.
