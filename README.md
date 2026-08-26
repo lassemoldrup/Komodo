@@ -335,8 +335,14 @@ composite IDs that are bounded diagnostics only. The
 `run_tpcc_normalization_capture.sh` seals the TPC-C boundary-value gate proving
 Java JDBC capture, C++ CDC normalization, and the rendered bootstrap scan
 byte-identical on one live pinned stack; its archive is replay-verified by
-`verify_tpcc_evidence_index.py` and the associated suite test. Run the
-required offline fail-closed injections against that capture with:
+`verify_tpcc_evidence_index.py` and the associated suite test. Generated sealed
+archives live outside Git. Set `BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT` to the
+absolute directory containing their recorded `evidence/archives/` layout;
+tracked indexes remain under `connector-contract/yugabytedb_ysql/manifests/`.
+Evidence tests skip when that external root is unavailable, while direct index
+verification fails closed unless `--evidence-root` or the environment variable
+is provided. Run the required offline fail-closed injections against that
+capture with:
 
 ```bash
 ./tests/run_tpcc_full_mix_mutations.sh \

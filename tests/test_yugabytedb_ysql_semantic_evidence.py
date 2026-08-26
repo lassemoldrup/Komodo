@@ -15,7 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "connector-contract" / "yugabytedb_ysql"
 VERIFIER = ROOT / "tests" / "verify_yugabytedb_ysql_ycsb_semantic.py"
-REPLAY_BIN = Path(os.environ.get("BLACKBOX_EVIDENCE_REPLAY_BIN", ""))
+EVIDENCE_ROOT_VALUE = os.environ.get("BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT")
+EVIDENCE_ROOT = Path(EVIDENCE_ROOT_VALUE) if EVIDENCE_ROOT_VALUE else None
+REPLAY_BIN_VALUE = os.environ.get("BLACKBOX_EVIDENCE_REPLAY_BIN")
+REPLAY_BIN = Path(REPLAY_BIN_VALUE) if REPLAY_BIN_VALUE else None
 sys.path.insert(0, str(CONTRACT))
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "protocol" / "tools"))
@@ -27,7 +30,7 @@ from verify_evidence_index import replay_bundle as replay_acceptance_bundle  # n
 
 def semantic_bundle() -> dict[str, object]:
     index = json.loads(
-        (CONTRACT / "evidence" / "ycsb_acceptance_bundles.json").read_text(
+        (CONTRACT / "manifests" / "ycsb_acceptance_bundles.json").read_text(
             encoding="utf-8"
         )
     )
@@ -40,7 +43,7 @@ def semantic_bundle() -> dict[str, object]:
 
 def acceptance_bundle(purpose: str) -> dict[str, object]:
     index = json.loads(
-        (CONTRACT / "evidence" / "ycsb_acceptance_bundles.json").read_text(
+        (CONTRACT / "manifests" / "ycsb_acceptance_bundles.json").read_text(
             encoding="utf-8"
         )
     )
@@ -69,14 +72,18 @@ def run_verifier(directory: Path, output: Path) -> subprocess.CompletedProcess[s
 class YugabyteYsqlSemanticEvidenceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        if not REPLAY_BIN.is_file():
-            raise RuntimeError("BLACKBOX_EVIDENCE_REPLAY_BIN is required")
+        if EVIDENCE_ROOT is None or not EVIDENCE_ROOT.is_dir():
+            raise unittest.SkipTest("BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT is required")
+        if REPLAY_BIN is None or not REPLAY_BIN.is_file():
+            raise unittest.SkipTest("BLACKBOX_EVIDENCE_REPLAY_BIN is required")
 
     def test_acceptance_index_verifies_archives_from_a_clean_checkout(self) -> None:
         result = subprocess.run(
             [
                 sys.executable,
                 str(CONTRACT / "verify_evidence_index.py"),
+                "--evidence-root",
+                str(EVIDENCE_ROOT),
                 "--evidence-replay-bin",
                 str(REPLAY_BIN),
             ],
@@ -88,7 +95,7 @@ class YugabyteYsqlSemanticEvidenceTest(unittest.TestCase):
 
     def test_acceptance_replay_binds_purpose_to_raw_scenario(self) -> None:
         bundle = acceptance_bundle("ordinary_two_session_workload")
-        with archived_bundle(CONTRACT, bundle) as directory:
+        with archived_bundle(EVIDENCE_ROOT, bundle) as directory:
             with self.assertRaisesRegex(SystemExit, "normalization raw replay failed"):
                 replay_acceptance_bundle(
                     directory,
@@ -98,7 +105,7 @@ class YugabyteYsqlSemanticEvidenceTest(unittest.TestCase):
                 )
 
     def test_violation_rejects_mutated_final_attestation_digest(self) -> None:
-        with archived_bundle(CONTRACT, semantic_bundle()) as archived:
+        with archived_bundle(EVIDENCE_ROOT, semantic_bundle()) as archived:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary) / "evidence"
                 shutil.copytree(archived, directory)
@@ -126,7 +133,7 @@ class YugabyteYsqlSemanticEvidenceTest(unittest.TestCase):
                 )
 
     def test_dropped_client_rejects_unregistered_marker_session(self) -> None:
-        with archived_bundle(CONTRACT, semantic_bundle()) as archived:
+        with archived_bundle(EVIDENCE_ROOT, semantic_bundle()) as archived:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary) / "evidence"
                 shutil.copytree(archived, directory)
@@ -210,7 +217,9 @@ class YugabyteYsqlSemanticEvidenceTest(unittest.TestCase):
             "empty_canonical_key": lambda directory: client_read(directory, "empty_key"),
         }
         for name, mutate in mutations.items():
-            with self.subTest(name=name), archived_bundle(CONTRACT, semantic_bundle()) as archived:
+            with self.subTest(name=name), archived_bundle(
+                EVIDENCE_ROOT, semantic_bundle()
+            ) as archived:
                 with tempfile.TemporaryDirectory() as temporary:
                     directory = Path(temporary) / "evidence"
                     shutil.copytree(archived, directory)
@@ -276,7 +285,9 @@ class YugabyteYsqlSemanticEvidenceTest(unittest.TestCase):
             "ambiguous_reconciliation": lambda directory: mutate_final(directory, "ambiguous"),
         }
         for name, mutate in mutations.items():
-            with self.subTest(name=name), archived_bundle(CONTRACT, semantic_bundle()) as archived:
+            with self.subTest(name=name), archived_bundle(
+                EVIDENCE_ROOT, semantic_bundle()
+            ) as archived:
                 with tempfile.TemporaryDirectory() as temporary:
                     directory = Path(temporary) / "evidence"
                     shutil.copytree(archived, directory)

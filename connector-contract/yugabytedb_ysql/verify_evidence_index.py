@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from evidence_archive import archived_bundle, digest
+from evidence_archive import archived_bundle, configured_evidence_root, digest
 
 
 ROOT = Path(__file__).resolve().parent
@@ -258,11 +258,13 @@ def verify_bundle(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-local", action="store_true")
+    parser.add_argument("--evidence-root", type=Path)
     parser.add_argument("--evidence-replay-bin", type=Path, required=True)
     args = parser.parse_args()
     require(args.evidence_replay_bin.is_file(), "production evidence replay binary is missing")
+    archive_root = configured_evidence_root(args.evidence_root)
     index = json.loads(
-        (ROOT / "evidence" / "ycsb_acceptance_bundles.json").read_text(
+        (ROOT / "manifests" / "ycsb_acceptance_bundles.json").read_text(
             encoding="utf-8"
         )
     )
@@ -278,7 +280,7 @@ def main() -> int:
         path = ROOT / str(bundle["bundle_path"])
         require(not args.require_local or path.is_dir(),
                 f"local evidence bundle is missing: {path}")
-        with archived_bundle(ROOT, bundle) as archived:
+        with archived_bundle(archive_root, bundle) as archived:
             verify_bundle(archived, bundle, args.evidence_replay_bin)
         if path.is_dir():
             verify_bundle(path, bundle, args.evidence_replay_bin)

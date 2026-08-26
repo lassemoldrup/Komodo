@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -12,6 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "connector-contract" / "yugabytedb_ysql"
+EVIDENCE_ROOT_VALUE = os.environ.get("BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT")
+EVIDENCE_ROOT = Path(EVIDENCE_ROOT_VALUE) if EVIDENCE_ROOT_VALUE else None
+EXTERNAL_EVIDENCE_AVAILABLE = EVIDENCE_ROOT is not None and EVIDENCE_ROOT.is_dir()
 sys.path.insert(0, str(CONTRACT))
 
 from evidence_archive import archived_bundle  # noqa: E402
@@ -30,20 +34,29 @@ class YugabyteYsqlDistributedEvidenceTest(unittest.TestCase):
     @staticmethod
     def indexed_bundle(purpose: str) -> dict[str, object]:
         index = json.loads(
-            (CONTRACT / "evidence" / "distributed_correctness_bundles.json").read_text()
+            (CONTRACT / "manifests" / "distributed_correctness_bundles.json").read_text()
         )
         return next(bundle for bundle in index["bundles"] if bundle["purpose"] == purpose)
 
+    @unittest.skipUnless(
+        EXTERNAL_EVIDENCE_AVAILABLE,
+        "BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT is required",
+    )
     def test_complete_evidence_index_shape(self) -> None:
         result = subprocess.run(
-            [sys.executable, str(CONTRACT / "verify_distributed_evidence_index.py")],
+            [
+                sys.executable,
+                str(CONTRACT / "verify_distributed_evidence_index.py"),
+                "--evidence-root",
+                str(EVIDENCE_ROOT),
+            ],
             check=True,
             text=True,
             capture_output=True,
         )
         self.assertIn("distributed correctness evidence index verified", result.stdout)
         index = json.loads(
-            (CONTRACT / "evidence" / "distributed_correctness_bundles.json").read_text()
+            (CONTRACT / "manifests" / "distributed_correctness_bundles.json").read_text()
         )
         self.assertEqual(len(index["bundles"]), 11)
         self.assertEqual(
@@ -329,9 +342,13 @@ class YugabyteYsqlDistributedEvidenceTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("did not saturate", result.stderr)
 
+    @unittest.skipUnless(
+        EXTERNAL_EVIDENCE_AVAILABLE,
+        "BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT is required",
+    )
     def test_index_replay_rejects_resealed_partial_delivery(self) -> None:
         bundle = self.indexed_bundle("cross_tablet_marker_last")
-        with archived_bundle(CONTRACT, bundle) as archived:
+        with archived_bundle(EVIDENCE_ROOT, bundle) as archived:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary) / "evidence"
                 shutil.copytree(archived, directory)
@@ -347,9 +364,13 @@ class YugabyteYsqlDistributedEvidenceTest(unittest.TestCase):
                         directory / "experiment-report.json",
                     )
 
+    @unittest.skipUnless(
+        EXTERNAL_EVIDENCE_AVAILABLE,
+        "BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT is required",
+    )
     def test_index_replay_binds_purpose_to_exact_scenario(self) -> None:
         bundle = self.indexed_bundle("commit_order_realtime")
-        with archived_bundle(CONTRACT, bundle) as directory:
+        with archived_bundle(EVIDENCE_ROOT, bundle) as directory:
             with self.assertRaisesRegex(SystemExit, "purpose/scenario differs"):
                 replay_bundle(
                     directory,

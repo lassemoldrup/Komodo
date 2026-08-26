@@ -13,7 +13,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "connector-contract" / "yugabytedb_ysql"
-REPLAY_BIN = Path(os.environ.get("BLACKBOX_EVIDENCE_REPLAY_BIN", ""))
+EVIDENCE_ROOT_VALUE = os.environ.get("BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT")
+EVIDENCE_ROOT = Path(EVIDENCE_ROOT_VALUE) if EVIDENCE_ROOT_VALUE else None
+REPLAY_BIN_VALUE = os.environ.get("BLACKBOX_EVIDENCE_REPLAY_BIN")
+REPLAY_BIN = Path(REPLAY_BIN_VALUE) if REPLAY_BIN_VALUE else None
 sys.path.insert(0, str(CONTRACT))
 
 from evidence_archive import archived_bundle  # noqa: E402
@@ -31,7 +34,7 @@ def load_index_verifier():
 
 def normalization_bundle() -> dict[str, object]:
     index = json.loads(
-        (CONTRACT / "evidence" / "tpcc_acceptance_bundles.json").read_text(
+        (CONTRACT / "manifests" / "tpcc_acceptance_bundles.json").read_text(
             encoding="utf-8"
         )
     )
@@ -45,14 +48,18 @@ def normalization_bundle() -> dict[str, object]:
 class YugabyteYsqlTpccEvidenceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        if not REPLAY_BIN.is_file():
-            raise RuntimeError("BLACKBOX_EVIDENCE_REPLAY_BIN is required")
+        if EVIDENCE_ROOT is None or not EVIDENCE_ROOT.is_dir():
+            raise unittest.SkipTest("BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT is required")
+        if REPLAY_BIN is None or not REPLAY_BIN.is_file():
+            raise unittest.SkipTest("BLACKBOX_EVIDENCE_REPLAY_BIN is required")
 
     def test_tpcc_index_verifies_archives_from_a_clean_checkout(self) -> None:
         result = subprocess.run(
             [
                 sys.executable,
                 str(CONTRACT / "verify_tpcc_evidence_index.py"),
+                "--evidence-root",
+                str(EVIDENCE_ROOT),
                 "--evidence-replay-bin",
                 str(REPLAY_BIN),
             ],
@@ -64,7 +71,7 @@ class YugabyteYsqlTpccEvidenceTest(unittest.TestCase):
 
     def test_mutated_jdbc_bytes_fail_the_raw_replay(self) -> None:
         verifier = load_index_verifier()
-        with archived_bundle(CONTRACT, normalization_bundle()) as archived:
+        with archived_bundle(EVIDENCE_ROOT, normalization_bundle()) as archived:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary) / "bundle"
                 shutil.copytree(archived, directory)
@@ -87,7 +94,7 @@ class YugabyteYsqlTpccEvidenceTest(unittest.TestCase):
 
     def test_mutated_cdc_timestamp_text_fails_closed(self) -> None:
         verifier = load_index_verifier()
-        with archived_bundle(CONTRACT, normalization_bundle()) as archived:
+        with archived_bundle(EVIDENCE_ROOT, normalization_bundle()) as archived:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary) / "bundle"
                 shutil.copytree(archived, directory)
@@ -109,7 +116,7 @@ class YugabyteYsqlTpccEvidenceTest(unittest.TestCase):
     def test_gutted_purpose_roster_fails_closed(self) -> None:
         verifier = load_index_verifier()
         index = json.loads(
-            (CONTRACT / "evidence" / "tpcc_acceptance_bundles.json").read_text(
+            (CONTRACT / "manifests" / "tpcc_acceptance_bundles.json").read_text(
                 encoding="utf-8"
             )
         )

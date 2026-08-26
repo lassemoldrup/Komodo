@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import tarfile
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Iterator
+
+
+EVIDENCE_ROOT_ENV = "BLACKBOX_YUGABYTEDB_EVIDENCE_ROOT"
 
 
 def digest(path: Path) -> str:
@@ -15,6 +19,15 @@ def digest(path: Path) -> str:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(message)
+
+
+def configured_evidence_root(argument: Path | None = None) -> Path:
+    raw = str(argument) if argument is not None else os.environ.get(EVIDENCE_ROOT_ENV, "")
+    require(bool(raw), f"{EVIDENCE_ROOT_ENV} or --evidence-root is required")
+    root = Path(raw)
+    require(root.is_absolute(), f"evidence root must be absolute: {root}")
+    require(root.is_dir(), f"evidence root is missing: {root}")
+    return root
 
 
 @contextmanager
