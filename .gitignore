@@ -1,8 +1,33 @@
 .env
 *.log
-# Connector-contract captures are generated local evidence bundles. Small
-# canonical fixtures already tracked by Git remain tracked.
-connector-contract/yugabytedb_ysql/fixtures/
+
+# Connector capability/correctness captures are generated artifact bundles.
+# Small reviewable golden fixtures belong under protocol/ or monitor/tests/.
+connector-contract/*/evidence/
+connector-contract/*/fixtures/
+
+# Local CMake/Ninja and test outputs. Canonical builds use /tmp or the external
+# artifact volume, but these rules protect accidental in-tree builds.
+/build/
+/monitor/build/
+/monitor/build-*/
+/cmake-build-*/
+/Testing/
+/compile_commands.json
+/.ninja_deps
+/.ninja_log
+
+# Python test/tool caches and coverage output.
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editor and interrupted-write temporaries.
+*.tmp
+*.swp
+*~
 .DS_Store
 __pycache__/
 *.py[cod]
