@@ -63,6 +63,11 @@ def load_matrix(path: Path, *, allow_existing_output: bool = False) -> dict[str,
     require(document.get("kind") == "registered_evaluation_matrix", "matrix kind differs")
     backends = registry(ROOT / "protocol" / "backends", "backend")
     benchmarks = registry(ROOT / "protocol" / "adapters", "benchmark")
+    single_repetition_pilot = document.get("single_repetition_pilot", False)
+    require(
+        isinstance(single_repetition_pilot, bool),
+        "single_repetition_pilot is not boolean",
+    )
     cells = document.get("cells")
     require(isinstance(cells, list) and cells, "matrix has no cells")
     ids: set[str] = set()
@@ -75,7 +80,14 @@ def load_matrix(path: Path, *, allow_existing_output: bool = False) -> dict[str,
         ids.add(cell["id"])
         require(cell["backend"] in backends, f"unregistered backend: {cell['backend']}")
         require(cell["benchmark"] in benchmarks, f"unregistered benchmark: {cell['benchmark']}")
-        require(type(cell.get("repetitions")) is int and cell["repetitions"] >= 3, "cell needs at least three repetitions")
+        minimum_repetitions = 1 if single_repetition_pilot else 3
+        require(
+            type(cell.get("repetitions")) is int
+            and cell["repetitions"] >= minimum_repetitions,
+            "pilot cell needs at least one repetition"
+            if single_repetition_pilot
+            else "formal cell needs at least three repetitions",
+        )
         for field in ("archive", "config", "expected_sessions", "database_container", "connector_container"):
             require(isinstance(cell.get(field), str) and cell[field], f"cell {field} is missing")
         require(isinstance(cell.get("archive_sha256"), str) and SHA256.fullmatch(cell["archive_sha256"]), "archive checksum is invalid")
@@ -171,6 +183,39 @@ def command(cell: dict[str, Any], output: Path, repetition: int = 1) -> list[str
         result.extend(("--parameter", f"{name}={value}"))
     result.extend(cell.get("runner_arguments", []))
     return result
+
+
+def verify_existing_repetition(
+    cell: dict[str, Any], output: Path, repetition: int
+) -> None:
+    subprocess.run(
+        ["sha256sum", "--check", "SHA256SUMS"],
+        cwd=output,
+        check=True,
+        capture_output=True,
+    )
+    existing = json.loads((output / "result.json").read_text(encoding="utf-8"))
+    require(existing.get("accepted") is True, f"existing repetition is not accepted: {output}")
+    for field in ("backend", "benchmark", "mode", "workload", "capture_profile"):
+        require(
+            existing.get(field) == cell[field],
+            f"existing repetition {field} differs: {output}",
+        )
+    require(
+        existing.get("repetition") == repetition,
+        f"existing repetition number differs: {output}",
+    )
+
+    parameter_path = output / "workload-parameters.txt"
+    require(parameter_path.is_file(), f"existing workload parameters are missing: {output}")
+    actual_parameters = parameter_path.read_text(encoding="utf-8").splitlines()
+    expected_parameters = [
+        f"{name}={value}" for name, value in sorted(cell.get("parameters", {}).items())
+    ]
+    require(
+        actual_parameters == expected_parameters,
+        f"existing workload parameters differ: {output}",
+    )
 
 
 def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
@@ -370,19 +415,7 @@ def main() -> int:
                     and (output / "result.json").is_file()
                     and (output / "SHA256SUMS").is_file()
                 ):
-                    subprocess.run(
-                        ["sha256sum", "--check", "SHA256SUMS"],
-                        cwd=output,
-                        check=True,
-                        capture_output=True,
-                    )
-                    existing = json.loads(
-                        (output / "result.json").read_text(encoding="utf-8")
-                    )
-                    require(
-                        existing.get("accepted") is True,
-                        f"existing repetition is not accepted: {output}",
-                    )
+                    verify_existing_repetition(cell, output, repetition)
                     continue
                 jobs.append(command(cell, output, repetition))
         scheduled.append((matrix_path, matrix, jobs))

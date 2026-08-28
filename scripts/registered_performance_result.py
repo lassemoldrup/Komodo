@@ -12,6 +12,8 @@ from typing import Any
 
 
 STREAM_ID = re.compile(r"(0|[1-9][0-9]*)-(0|[1-9][0-9]*)\Z")
+PARAMETER_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,95}\Z")
+OPERATIONS_PER_TRANSACTION = "BENCHBASE_MEASUREMENT_OPERATIONS_PER_TRANSACTION"
 
 
 def require(condition: bool, message: str) -> None:
@@ -21,6 +23,29 @@ def require(condition: bool, message: str) -> None:
 
 def load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def workload_parameters(path: Path) -> dict[str, str]:
+    parameters: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name, separator, value = line.partition("=")
+        require(
+            bool(separator)
+            and PARAMETER_NAME.fullmatch(name) is not None
+            and bool(value)
+            and name not in parameters,
+            f"malformed or duplicate workload parameter: {line!r}",
+        )
+        parameters[name] = value
+    return parameters
+
+
+def declared_operations_per_transaction(parameters: dict[str, str]) -> int | None:
+    raw = parameters.get(OPERATIONS_PER_TRANSACTION)
+    if raw is None:
+        return None
+    require(re.fullmatch(r"[1-9][0-9]*", raw) is not None, "operations per transaction is invalid")
+    return int(raw)
 
 
 def only(directory: Path, pattern: str) -> Path:
@@ -215,7 +240,11 @@ def main() -> int:
     parser.add_argument("--backend", required=True)
     parser.add_argument("--benchmark", required=True)
     parser.add_argument("--mode", required=True)
-    parser.add_argument("--execution-profile", required=True, choices=("direct_benchbase", "coordinated_e2e"))
+    parser.add_argument(
+        "--execution-profile",
+        required=True,
+        choices=("direct_benchbase", "coordinated_cdc_only", "coordinated_e2e"),
+    )
     parser.add_argument("--workload", required=True)
     parser.add_argument("--capture-profile", required=True)
     parser.add_argument("--repetition", required=True, type=int)
@@ -254,6 +283,8 @@ def main() -> int:
     }
     latency = summary.get("Latency Distribution")
     require(isinstance(latency, dict), "BenchBase latency distribution is missing")
+    parameters = workload_parameters(args.artifact_dir / "workload-parameters.txt")
+    operations_per_transaction = declared_operations_per_transaction(parameters)
     result: dict[str, Any] = {
         "kind": "registered_performance_cell_result",
         "backend": args.backend,
@@ -272,7 +303,13 @@ def main() -> int:
         "client_p95_latency_microseconds": number(latency.get("95th Percentile Latency (microseconds)"), "p95 latency"),
         "outcome_totals": counters,
         "transaction_types": types,
+        "workload_parameters": parameters,
     }
+    if operations_per_transaction is not None:
+        result["client_operations_per_transaction"] = operations_per_transaction
+        result["client_logical_operations_per_second"] = (
+            result["client_logical_transactions_per_second"] * operations_per_transaction
+        )
     bootstrap = load(args.artifact_dir / "bootstrap-manifest.json")
     loader_validation = load(args.artifact_dir / "loader-validation.json")
     require(
@@ -306,12 +343,25 @@ def main() -> int:
     require(counters["ambiguous_attempts"] == 0, "ambiguous attempts are nonzero")
     require(counters["logical_transactions_started"] > 0, "no measured logical transactions")
 
-    if args.execution_profile == "direct_benchbase":
+    if args.execution_profile in {"direct_benchbase", "coordinated_cdc_only"}:
         marker = load(args.artifact_dir / "marker-storage.json")
         require(marker.get("row_count") == 0, "uninstrumented workload wrote marker rows")
+        outcome = "UNINSTRUMENTED"
+        if args.execution_profile == "coordinated_cdc_only":
+            evidence = load(args.artifact_dir / "cdc-only-evidence.json")
+            require(
+                evidence.get("kind") == "cdc_only_evidence"
+                and evidence.get("client_instrumentation") is False
+                and evidence.get("monitor_started") is False
+                and evidence.get("load_fence_seen") is True
+                and evidence.get("end_fence_seen") is True
+                and integer(evidence.get("cdc_entries"), "CDC-only stream length") > 0,
+                "CDC-only evidence is incomplete",
+            )
+            outcome = "CDC_ONLY"
         result.update(
             {
-                "outcome": "UNINSTRUMENTED",
+                "outcome": outcome,
                 "evidence_reconciled": None,
                 "joined_transactions": None,
                 "unmatched_client_records": None,

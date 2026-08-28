@@ -394,6 +394,16 @@ values. Each matrix selects either `direct_benchbase` or `coordinated_e2e` as
 its execution profile. This keeps the formal performance path independent of
 database and benchmark names.
 
+YCSB performance cells expose Zipfian theta, operations per transaction, and
+session count as `BENCHBASE_MEASUREMENT_ZIPFIAN_THETA`,
+`BENCHBASE_MEASUREMENT_OPERATIONS_PER_TRANSACTION`, and
+`BENCHBASE_MEASUREMENT_TERMINALS`. A transaction executes exactly the declared
+number of operations, selecting each operation independently from the current
+YCSB weights, then writes one audited marker and commits once. The defaults are
+`0.99`, `1`, and `4`, respectively. Raw results retain both transaction
+throughput and `client_logical_operations_per_second`, where the latter is the
+transaction rate multiplied by the declared operations per transaction.
+
 Backlog and head-of-line measurements remain in the reports as diagnostic
 telemetry. Acceptance requires terminal queues and unmatched evidence to be
 zero, the end-to-verdict tail to stay within `--drain-limit-seconds`, and
@@ -405,6 +415,16 @@ formal performance invocation verifies their checksum and admitted terminal
 status, but it does not rerun the correctness suite. Baseline and E2E cells are
 separate matrix entries, so the matrix can select either one or both without a
 hard-coded mode roster.
+
+The registered cell runner also supports `coordinated_cdc_only` for component
+isolation. It removes the BenchBase `<blackbox>` block, creates the
+backend-owned publication/slot, starts Debezium and Redis, and never starts the
+monitor. Loader and end fences must appear in the CDC stream before the trial
+is accepted, so bootstrap backlog is outside the measured workload. The
+profile produces no correctness verdict; it measures the client-side effect of
+database logical replication plus Debezium only. The paired YugabyteDB TPC-C
+experiment is declared by
+`experiments/yugabytedb_tpcc_cdc_only_performance_matrix.json`.
 
 The matrix supplies loader batch size through
 `BENCHBASE_MEASUREMENT_BATCH_SIZE`; the admitted matrices use 128. The selection

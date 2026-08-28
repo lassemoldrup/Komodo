@@ -23,6 +23,69 @@ def load_module():
 
 
 class RegisteredEvaluationMatrixTest(unittest.TestCase):
+    def test_single_repetition_requires_explicit_pilot_declaration(self) -> None:
+        module = load_module()
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('document.get("single_repetition_pilot", False)', source)
+        self.assertIn("formal cell needs at least three repetitions", source)
+        self.assertIn("pilot cell needs at least one repetition", source)
+
+    def test_ycsb_cells_declare_all_tunable_workload_parameters(self) -> None:
+        for name in (
+            "mariadb_three_benchmark_performance_matrix.json",
+            "oracle_three_benchmark_performance_matrix.json",
+            "yugabytedb_three_benchmark_performance_matrix.json",
+        ):
+            matrix = json.loads((ROOT / "experiments" / name).read_text(encoding="utf-8"))
+            ycsb_cells = [cell for cell in matrix["cells"] if cell["benchmark"] == "ycsb"]
+            self.assertEqual(len(ycsb_cells), 2)
+            for cell in ycsb_cells:
+                parameters = cell["parameters"]
+                self.assertEqual(parameters["BENCHBASE_MEASUREMENT_ZIPFIAN_THETA"], 0.99)
+                self.assertEqual(
+                    parameters["BENCHBASE_MEASUREMENT_OPERATIONS_PER_TRANSACTION"], 1
+                )
+                self.assertEqual(parameters["BENCHBASE_MEASUREMENT_TERMINALS"], 4)
+                self.assertIn(
+                    "client_logical_operations_per_second", cell["summary_metrics"]
+                )
+
+    def test_resume_rejects_workload_parameter_drift(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            cell = {
+                "backend": "synthetic_backend",
+                "benchmark": "synthetic_benchmark",
+                "mode": "synthetic_mode",
+                "workload": "synthetic_workload",
+                "capture_profile": "synthetic_profile",
+                "parameters": {"BENCHBASE_MEASUREMENT_TERMINALS": 4},
+            }
+            result = {
+                **{field: cell[field] for field in (
+                    "backend", "benchmark", "mode", "workload", "capture_profile"
+                )},
+                "repetition": 1,
+                "accepted": True,
+            }
+            (output / "result.json").write_text(json.dumps(result), encoding="utf-8")
+            (output / "workload-parameters.txt").write_text(
+                "BENCHBASE_MEASUREMENT_TERMINALS=2\n", encoding="utf-8"
+            )
+            with (output / "SHA256SUMS").open("w", encoding="utf-8") as checksums:
+                for name in ("result.json", "workload-parameters.txt"):
+                    subprocess.run(
+                        ["sha256sum", name],
+                        cwd=output,
+                        check=True,
+                        text=True,
+                        stdout=checksums,
+                    )
+
+            with self.assertRaisesRegex(ValueError, "workload parameters differ"):
+                module.verify_existing_repetition(cell, output, 1)
+
     def test_cli_accepts_multiple_external_matrices(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -56,6 +56,8 @@
         "BENCHBASE_MEASUREMENT_RANDOM_SEED": 20260825,
         "BENCHBASE_MEASUREMENT_SCALE_FACTOR": 10,
         "BENCHBASE_MEASUREMENT_FIELD_SIZE": 32,
+        "BENCHBASE_MEASUREMENT_ZIPFIAN_THETA": 0.99,
+        "BENCHBASE_MEASUREMENT_OPERATIONS_PER_TRANSACTION": 1,
         "BENCHBASE_MEASUREMENT_TERMINALS": 4,
         "BENCHBASE_MEASUREMENT_WARMUP_SECONDS": 10,
         "BENCHBASE_MEASUREMENT_DURATION_SECONDS": 120,
@@ -64,13 +66,14 @@
       },
       "summary_metrics": [
         "client_logical_transactions_per_second",
+        "client_logical_operations_per_second",
         "client_successful_transactions_per_second",
         "client_physical_attempts_per_second",
         "client_average_latency_microseconds",
         "client_p95_latency_microseconds"
       ],
       "archive": "/home/yifan/code/db-monitoring/benchbase/target/benchbase-postgres.tgz",
-      "archive_sha256": "8d39e56c14478a845cbc4614e0d0a3915b03e5440318082bb0e6d026f872e916",
+      "archive_sha256": "b17af86991b59452a81c079f7d2e53bfb5850351ba01c9e1212dfa7ddf76be84",
       "config": "config/yugabytedb/blackbox_ycsb_performance_config.xml",
       "expected_sessions": "ycsb/worker/1,ycsb/worker/2,ycsb/worker/3,ycsb/worker/4",
       "monitor_bin": "/media/newhd/yifan/db-monitoring-builds/oracle-multibench/build/monitor-release/blackbox_run_monitor",
@@ -114,6 +117,8 @@
         "BENCHBASE_MEASUREMENT_RANDOM_SEED": 20260825,
         "BENCHBASE_MEASUREMENT_SCALE_FACTOR": 10,
         "BENCHBASE_MEASUREMENT_FIELD_SIZE": 32,
+        "BENCHBASE_MEASUREMENT_ZIPFIAN_THETA": 0.99,
+        "BENCHBASE_MEASUREMENT_OPERATIONS_PER_TRANSACTION": 1,
         "BENCHBASE_MEASUREMENT_TERMINALS": 4,
         "BENCHBASE_MEASUREMENT_WARMUP_SECONDS": 10,
         "BENCHBASE_MEASUREMENT_DURATION_SECONDS": 120,
@@ -122,6 +127,7 @@
       },
       "summary_metrics": [
         "client_logical_transactions_per_second",
+        "client_logical_operations_per_second",
         "client_successful_transactions_per_second",
         "client_physical_attempts_per_second",
         "client_average_latency_microseconds",
@@ -135,7 +141,7 @@
         "resource_high_water_max_percent"
       ],
       "archive": "/home/yifan/code/db-monitoring/benchbase/target/benchbase-postgres.tgz",
-      "archive_sha256": "8d39e56c14478a845cbc4614e0d0a3915b03e5440318082bb0e6d026f872e916",
+      "archive_sha256": "b17af86991b59452a81c079f7d2e53bfb5850351ba01c9e1212dfa7ddf76be84",
       "config": "config/yugabytedb/blackbox_ycsb_performance_config.xml",
       "expected_sessions": "ycsb/worker/1,ycsb/worker/2,ycsb/worker/3,ycsb/worker/4",
       "monitor_bin": "/media/newhd/yifan/db-monitoring-builds/oracle-multibench/build/monitor-release/blackbox_run_monitor",
@@ -198,7 +204,7 @@
         "client_p95_latency_microseconds"
       ],
       "archive": "/home/yifan/code/db-monitoring/benchbase/target/benchbase-postgres.tgz",
-      "archive_sha256": "8d39e56c14478a845cbc4614e0d0a3915b03e5440318082bb0e6d026f872e916",
+      "archive_sha256": "b17af86991b59452a81c079f7d2e53bfb5850351ba01c9e1212dfa7ddf76be84",
       "config": "config/yugabytedb/blackbox_tpcc_config.xml",
       "expected_sessions": "tpcc/worker/1,tpcc/worker/2,tpcc/worker/3,tpcc/worker/4",
       "monitor_bin": "/media/newhd/yifan/db-monitoring-builds/oracle-multibench/build/monitor-release/blackbox_run_monitor",
@@ -268,7 +274,7 @@
         "resource_high_water_max_percent"
       ],
       "archive": "/home/yifan/code/db-monitoring/benchbase/target/benchbase-postgres.tgz",
-      "archive_sha256": "8d39e56c14478a845cbc4614e0d0a3915b03e5440318082bb0e6d026f872e916",
+      "archive_sha256": "b17af86991b59452a81c079f7d2e53bfb5850351ba01c9e1212dfa7ddf76be84",
       "config": "config/yugabytedb/blackbox_tpcc_config.xml",
       "expected_sessions": "tpcc/worker/1,tpcc/worker/2,tpcc/worker/3,tpcc/worker/4",
       "monitor_bin": "/media/newhd/yifan/db-monitoring-builds/oracle-multibench/build/monitor-release/blackbox_run_monitor",
@@ -325,7 +331,7 @@
         "client_p95_latency_microseconds"
       ],
       "archive": "/home/yifan/code/db-monitoring/benchbase/target/benchbase-postgres.tgz",
-      "archive_sha256": "8d39e56c14478a845cbc4614e0d0a3915b03e5440318082bb0e6d026f872e916",
+      "archive_sha256": "b17af86991b59452a81c079f7d2e53bfb5850351ba01c9e1212dfa7ddf76be84",
       "config": "config/yugabytedb/blackbox_smallbank_performance_config.xml",
       "expected_sessions": "smallbank/worker/1,smallbank/worker/2,smallbank/worker/3,smallbank/worker/4",
       "monitor_bin": "/media/newhd/yifan/db-monitoring-builds/oracle-multibench/build/monitor-release/blackbox_run_monitor",
@@ -389,7 +395,7 @@
         "resource_high_water_max_percent"
       ],
       "archive": "/home/yifan/code/db-monitoring/benchbase/target/benchbase-postgres.tgz",
-      "archive_sha256": "8d39e56c14478a845cbc4614e0d0a3915b03e5440318082bb0e6d026f872e916",
+      "archive_sha256": "b17af86991b59452a81c079f7d2e53bfb5850351ba01c9e1212dfa7ddf76be84",
       "config": "config/yugabytedb/blackbox_smallbank_performance_config.xml",
       "expected_sessions": "smallbank/worker/1,smallbank/worker/2,smallbank/worker/3,smallbank/worker/4",
       "monitor_bin": "/media/newhd/yifan/db-monitoring-builds/oracle-multibench/build/monitor-release/blackbox_run_monitor",

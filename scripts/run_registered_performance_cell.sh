@@ -27,6 +27,8 @@ DRAIN_LIMIT=120
 RESOURCE_INTERVAL=1
 REDIS_MAXMEMORY=8589934592
 MONITOR_BOOTSTRAP_STATE_BYTES=268435456
+MONITOR_PENDING_CLIENT_RECORDS=1000000
+MONITOR_PENDING_CLIENT_BYTES=268435456
 MONITOR_RETAINED_IDENTITY_BYTES=2147483648
 MONITOR_CHECKER_STATE_BYTES=536870912
 HIGH_WATER_THRESHOLD=70
@@ -61,6 +63,8 @@ while (( $# > 0 )); do
     --resource-interval-seconds) RESOURCE_INTERVAL=$2; shift 2 ;;
     --redis-maxmemory-bytes) REDIS_MAXMEMORY=$2; shift 2 ;;
     --monitor-bootstrap-state-bytes) MONITOR_BOOTSTRAP_STATE_BYTES=$2; shift 2 ;;
+    --monitor-pending-client-records) MONITOR_PENDING_CLIENT_RECORDS=$2; shift 2 ;;
+    --monitor-pending-client-bytes) MONITOR_PENDING_CLIENT_BYTES=$2; shift 2 ;;
     --monitor-retained-identity-bytes) MONITOR_RETAINED_IDENTITY_BYTES=$2; shift 2 ;;
     --monitor-checker-state-bytes) MONITOR_CHECKER_STATE_BYTES=$2; shift 2 ;;
     --high-water-threshold-percent) HIGH_WATER_THRESHOLD=$2; shift 2 ;;
@@ -77,8 +81,10 @@ for name in BACKEND BENCHMARK MODE WORKLOAD CAPTURE_PROFILE EXECUTION_PROFILE; d
     exit 2
   }
 done
-[[ $EXECUTION_PROFILE == direct_benchbase || $EXECUTION_PROFILE == coordinated_e2e ]]
-for value in "$REPETITION" "$LOADER_TIMEOUT" "$WORKLOAD_TIMEOUT" "$STACK_TIMEOUT" "$STATUS_TIMEOUT" "$DRAIN_LIMIT" "$REDIS_MAXMEMORY" "$MONITOR_BOOTSTRAP_STATE_BYTES" "$MONITOR_RETAINED_IDENTITY_BYTES" "$MONITOR_CHECKER_STATE_BYTES"; do
+[[ $EXECUTION_PROFILE == direct_benchbase ||
+   $EXECUTION_PROFILE == coordinated_cdc_only ||
+   $EXECUTION_PROFILE == coordinated_e2e ]]
+for value in "$REPETITION" "$LOADER_TIMEOUT" "$WORKLOAD_TIMEOUT" "$STACK_TIMEOUT" "$STATUS_TIMEOUT" "$DRAIN_LIMIT" "$REDIS_MAXMEMORY" "$MONITOR_BOOTSTRAP_STATE_BYTES" "$MONITOR_PENDING_CLIENT_RECORDS" "$MONITOR_PENDING_CLIENT_BYTES" "$MONITOR_RETAINED_IDENTITY_BYTES" "$MONITOR_CHECKER_STATE_BYTES"; do
   [[ $value =~ ^[1-9][0-9]*$ ]] || { printf 'positive integer parameter is invalid\n' >&2; exit 2; }
 done
 [[ $RESOURCE_INTERVAL =~ ^[0-9]+([.][0-9]+)?$ ]]
@@ -105,6 +111,11 @@ for parameter in "${PARAMETERS[@]}"; do
   export "${parameter?}"
 done
 
+export BLACKBOX_BACKEND="$BACKEND" BLACKBOX_BENCHMARK="$BENCHMARK"
+export BLACKBOX_CAPTURE_PROFILE="$CAPTURE_PROFILE"
+# shellcheck source=scripts/blackbox_lifecycle.sh disable=SC1091
+. "$ROOT/scripts/blackbox_lifecycle.sh"
+
 DIST_PARENT=$(mktemp -d /tmp/registered-performance-cell.XXXXXX)
 cleanup() {
   local status=$?
@@ -122,7 +133,7 @@ DIST=${roots[0]}
 SOURCE_CONFIG="$DIST/$CONFIG"
 [[ -f $SOURCE_CONFIG ]] || { printf 'declared BenchBase config is missing\n' >&2; exit 2; }
 CONFIG_PATH=$SOURCE_CONFIG
-if [[ $EXECUTION_PROFILE == direct_benchbase ]]; then
+if [[ $EXECUTION_PROFILE != coordinated_e2e ]]; then
   CONFIG_PATH="$OUTPUT/benchbase-uninstrumented.xml"
   python3 - "$SOURCE_CONFIG" "$CONFIG_PATH" <<'PY'
 import sys
@@ -176,8 +187,17 @@ MEASURED_ARGS=(
   --process-label benchbase
   --container "$BACKEND=$DATABASE_CONTAINER"
 )
-if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
+if [[ $EXECUTION_PROFILE != direct_benchbase ]]; then
   MEASURED_ARGS+=(--container redis=cdc-redis --container "debezium=$CONNECTOR_CONTAINER")
+fi
+if declare -F blackbox_backend_performance_telemetry_sampler >/dev/null; then
+  BACKEND_SAMPLER=$(blackbox_backend_performance_telemetry_sampler)
+  if [[ -n $BACKEND_SAMPLER ]]; then
+    MEASURED_ARGS+=(
+      --backend-sampler "$BACKEND_SAMPLER"
+      --backend-output "$OUTPUT/backend-telemetry.json"
+    )
+  fi
 fi
 MEASURED_ARGS+=(-- java -Xms1g -Xmx1g -XX:+AlwaysPreTouch -XX:+UseG1GC -jar benchbase.jar
   -b "$BENCHMARK" -c "$CONFIG_PATH" --create=false --load=false --execute=true
@@ -201,7 +221,7 @@ capture_full_streams() {
 }
 
 capture_containers() {
-  if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
+  if [[ $EXECUTION_PROFILE != direct_benchbase ]]; then
     docker logs "$CONNECTOR_CONTAINER" >"$OUTPUT/connector.log" 2>&1 || true
     docker inspect "$CONNECTOR_CONTAINER" "$DATABASE_CONTAINER" cdc-redis \
       >"$OUTPUT/container-inspect.json" 2>/dev/null || true
@@ -209,6 +229,76 @@ capture_containers() {
     docker inspect "$DATABASE_CONTAINER" >"$OUTPUT/container-inspect.json" 2>/dev/null || true
   fi
   docker logs "$DATABASE_CONTAINER" >"$OUTPUT/database.log" 2>&1 || true
+}
+
+wait_for_connector_progress() {
+  local deadline=$(( $(date +%s) + STACK_TIMEOUT )) progress_status state
+  while (( $(date +%s) <= deadline )); do
+    progress_status=0
+    blackbox_backend_wait_for_connector_progress || progress_status=$?
+    if (( progress_status == 0 )); then
+      return 0
+    fi
+    if (( progress_status == 2 )); then
+      printf 'backend reported terminal connector-progress failure\n' >&2
+      return 1
+    fi
+    state=$(docker inspect --format '{{.State.Status}}' "$CONNECTOR_CONTAINER" 2>/dev/null || true)
+    if [[ $state == exited || $state == dead ]]; then
+      printf 'connector entered terminal state: %s\n' "$state" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  printf 'connector did not reach streaming progress\n' >&2
+  return 1
+}
+
+cdc_fence_seen() {
+  local phase=$1 nonce=$2
+  python3 /dev/fd/3 "$BLACKBOX_ACTIVE_RUN_ID" "$phase" "$nonce" \
+    3<<'PY' < <(redis-cli -h host.docker.internal --json XREVRANGE cdc + - COUNT 64)
+import json
+import sys
+
+run_id, phase, nonce = sys.argv[1:]
+try:
+    entries = json.load(sys.stdin)
+except json.JSONDecodeError:
+    raise SystemExit(1)
+for entry in entries:
+    fields = entry[1] if isinstance(entry, list) and len(entry) == 2 else []
+    for index in range(1, len(fields), 2):
+        try:
+            document = json.loads(fields[index])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        after = document.get("after") if isinstance(document, dict) else None
+        if not isinstance(after, dict):
+            continue
+        values = {str(key).casefold(): value for key, value in after.items()}
+        if (
+            str(values.get("run_id")) == run_id
+            and str(values.get("phase")) == phase
+            and str(values.get("nonce")) == nonce
+        ):
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+commit_and_wait_for_cdc_fence() {
+  local phase=$1 nonce=$2 deadline
+  blackbox_backend_commit_fence "$BLACKBOX_ACTIVE_RUN_ID" "$phase" "$nonce"
+  deadline=$(( $(date +%s) + STATUS_TIMEOUT ))
+  while (( $(date +%s) <= deadline )); do
+    if cdc_fence_seen "$phase" "$nonce"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  printf 'CDC did not deliver %s fence before timeout\n' "$phase" >&2
+  return 1
 }
 
 teardown_stack() {
@@ -274,6 +364,8 @@ if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
   BLACKBOX_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY" \
   BLACKBOX_EXPECTED_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY" \
   BLACKBOX_MONITOR_MAX_BOOTSTRAP_STATE_BYTES="$MONITOR_BOOTSTRAP_STATE_BYTES" \
+  BLACKBOX_MONITOR_MAX_PENDING_CLIENT_RECORDS="$MONITOR_PENDING_CLIENT_RECORDS" \
+  BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$MONITOR_PENDING_CLIENT_BYTES" \
   BLACKBOX_MONITOR_MAX_RETAINED_IDENTITY_BYTES="$MONITOR_RETAINED_IDENTITY_BYTES" \
   BLACKBOX_MONITOR_MAX_CHECKER_STATE_BYTES="$MONITOR_CHECKER_STATE_BYTES" \
     timeout --foreground --signal=TERM --kill-after=60 \
@@ -291,26 +383,32 @@ if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
     exit "$CELL_STATUS"
   }
 else
-  export BLACKBOX_BACKEND="$BACKEND" BLACKBOX_BENCHMARK="$BENCHMARK"
   export BLACKBOX_ACTIVE_RUN_ID
   BLACKBOX_ACTIVE_RUN_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
   printf '%s\n' "$BLACKBOX_ACTIVE_RUN_ID" >"$OUTPUT/run-id.txt"
   export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$LOADER_DECLARATION"
   export BLACKBOX_LOADER_BATCH_SIZE="${BENCHBASE_MEASUREMENT_BATCH_SIZE:?}"
   export BLACKBOX_STACK_TIMEOUT_SECONDS="$STACK_TIMEOUT"
-  # shellcheck source=scripts/blackbox_lifecycle.sh
-  . "$ROOT/scripts/blackbox_lifecycle.sh"
+  export BLACKBOX_REDIS_MAXMEMORY_BYTES="$REDIS_MAXMEMORY"
   blackbox_acquire_live_stack_lock
   BLACKBOX_ADAPTER_CONTRACT=$(blackbox_adapter_contract)
   BLACKBOX_BACKEND_CONTRACT=$(blackbox_backend_contract)
   export BLACKBOX_ADAPTER_CONTRACT BLACKBOX_BACKEND_CONTRACT
   blackbox_backend_prepare_run
   blackbox_backend_teardown >"$OUTPUT/pre-teardown.log" 2>&1
-  blackbox_backend_start_uninstrumented_database >"$OUTPUT/stack.log" 2>&1
+  if [[ $EXECUTION_PROFILE == coordinated_cdc_only ]]; then
+    blackbox_backend_start_database_schema >"$OUTPUT/stack.log" 2>&1
+  else
+    blackbox_backend_start_uninstrumented_database >"$OUTPUT/stack.log" 2>&1
+  fi
   STACK_MAY_BE_RUNNING=1
   wait_for_database_container
   blackbox_backend_verify_session_isolation
-  if declare -F blackbox_backend_verify_uninstrumented_schema >/dev/null; then
+  if [[ $EXECUTION_PROFILE == coordinated_cdc_only ]]; then
+    blackbox_backend_verify_schema
+    blackbox_backend_start_connector >"$OUTPUT/connector-start.log" 2>&1
+    wait_for_connector_progress
+  elif declare -F blackbox_backend_verify_uninstrumented_schema >/dev/null; then
     blackbox_backend_verify_uninstrumented_schema
   else
     blackbox_backend_verify_schema
@@ -322,10 +420,22 @@ else
   blackbox_build_bootstrap_manifest "$OUTPUT/bootstrap-scan.txt" >"$OUTPUT/bootstrap-manifest.json"
   write_marker_storage
   jq -e '.row_count == 0' "$OUTPUT/marker-storage.json" >/dev/null
+  if [[ $EXECUTION_PROFILE == coordinated_cdc_only ]]; then
+    commit_and_wait_for_cdc_fence LOAD_FINISHED 1
+  fi
   timeout --foreground --signal=TERM --kill-after=30 "$WORKLOAD_TIMEOUT" \
     bash -lc "$WORKLOAD_COMMAND" >"$OUTPUT/workload.log" 2>&1
   write_marker_storage
   jq -e '.row_count == 0' "$OUTPUT/marker-storage.json" >/dev/null
+  if [[ $EXECUTION_PROFILE == coordinated_cdc_only ]]; then
+    commit_and_wait_for_cdc_fence END_FENCE 2
+    capture_full_streams
+    cdc_entries=$(redis-cli -h host.docker.internal --raw XLEN cdc)
+    jq -n --argjson cdc_entries "$cdc_entries" \
+      '{kind:"cdc_only_evidence",client_instrumentation:false,monitor_started:false,
+        load_fence_seen:true,end_fence_seen:true,cdc_entries:$cdc_entries}' \
+      >"$OUTPUT/cdc-only-evidence.json"
+  fi
   capture_containers
 fi
 
