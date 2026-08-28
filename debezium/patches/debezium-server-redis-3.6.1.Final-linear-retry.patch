@@ -1,0 +1,86 @@
+diff --git a/debezium-server-redis/src/main/java/io/debezium/server/redis/RedisStreamChangeConsumer.java b/debezium-server-redis/src/main/java/io/debezium/server/redis/RedisStreamChangeConsumer.java
+index b988b78..9342f7b 100644
+--- a/debezium-server-redis/src/main/java/io/debezium/server/redis/RedisStreamChangeConsumer.java
++++ b/debezium-server-redis/src/main/java/io/debezium/server/redis/RedisStreamChangeConsumer.java
+@@ -16,7 +16,6 @@
+ import java.util.Locale;
+ import java.util.Map;
+ import java.util.function.Function;
+-import java.util.stream.Collectors;
+ import java.util.stream.IntStream;
+ import java.util.stream.Stream;
+ 
+@@ -168,9 +167,9 @@ public void handleBatch(List<ChangeEvent<Object, Object>> records,
+         batches(records, config.getBatchSize()).forEach(batch -> {
+             boolean completedSuccessfully = false;
+ 
+-            // Clone the batch and remove the records that have been successfully processed.
+-            // Move to the next batch once this list is empty.
+-            List<ChangeEvent<Object, Object>> clonedBatch = batch.stream().collect(Collectors.toList());
++            // Keep only records that still need to be written. Successful records are
++            // removed by constructing the next retry batch in response order.
++            List<ChangeEvent<Object, Object>> clonedBatch = new ArrayList<>(batch);
+ 
+             // As long as we failed to execute the current batch to the stream, we should
+             // retry if the reason
+@@ -192,24 +191,23 @@ public void handleBatch(List<ChangeEvent<Object, Object>> records,
+                         LOGGER.debug("Preparing a Redis Pipeline of {} records", clonedBatch.size());
+ 
+                         List<SimpleEntry<String, Map<String, String>>> recordsMap = new ArrayList<>(clonedBatch.size());
+-                        List<ChangeEvent<Object, Object>> processedRecords = new ArrayList<ChangeEvent<Object, Object>>();
++                        List<ChangeEvent<Object, Object>> redisRecords = new ArrayList<>(clonedBatch.size());
+                         for (ChangeEvent<Object, Object> record : clonedBatch) {
+                             String destination = streamNameMapper.map(record.destination());
+ 
+                             // Check if this is a heartbeat message that should be skipped
+                             if (config.isSkipHeartbeatMessages() && destination.startsWith(heartbeatPrefix)) {
+-                                // Mark as processed and track for removal from clonedBatch
++                                // Heartbeats are complete without a Redis write.
+                                 committer.markProcessed(record);
+-                                processedRecords.add(record);
+                                 continue;
+                             }
+ 
+                             Map<String, String> recordMap = recordMapFunction.apply(record);
+                             recordsMap.add(new SimpleEntry<>(destination, recordMap));
++                            redisRecords.add(record);
+                         }
+ 
+-                        clonedBatch.removeAll(processedRecords);
+-                        processedRecords.clear();
++                        clonedBatch = redisRecords;
+ 
+                         if (clonedBatch.size() == 0) {
+                             completedSuccessfully = true;
+@@ -229,8 +227,10 @@ public void handleBatch(List<ChangeEvent<Object, Object>> records,
+                         List<String> responses = client.xadd(recordsMap);
+                         int index = 0;
+                         int totalOOMResponses = 0;
++                        List<ChangeEvent<Object, Object>> retryBatch = new ArrayList<>();
+ 
+                         for (String message : responses) {
++                            ChangeEvent<Object, Object> currentRecord = clonedBatch.get(index);
+                             // When Redis reaches its max memory limitation, an OOM error message will be
+                             // retrieved.
+                             // In this case, we will retry execute the failed commands, assuming some memory
+@@ -238,18 +238,17 @@ public void handleBatch(List<ChangeEvent<Object, Object>> records,
+                             // of evicting elements from the stream by the target DB.
+                             if (message.contains("OOM command not allowed when used memory > 'maxmemory'")) {
+                                 totalOOMResponses++;
++                                retryBatch.add(currentRecord);
+                             }
+                             else {
+                                 // Mark the record as processed
+-                                ChangeEvent<Object, Object> currentRecord = clonedBatch.get(index);
+                                 committer.markProcessed(currentRecord);
+-                                processedRecords.add(currentRecord);
+                             }
+ 
+                             index++;
+                         }
+ 
+-                        clonedBatch.removeAll(processedRecords);
++                        clonedBatch = retryBatch;
+ 
+                         if (totalOOMResponses > 0) {
+                             LOGGER.info("Redis sink currently full, will retry ({} command(s) will be retried)",
