@@ -1,19 +1,17 @@
 #include "blackbox/client_txn.h"
 
-#include "strict_json.h"
-
 #include <openssl/evp.h>
+#include <simdjson.h>
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <initializer_list>
 #include <limits>
 #include <memory>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -22,9 +20,8 @@
 namespace blackbox {
 namespace {
 
-using Json = nlohmann::json;
-
 constexpr std::uint64_t max_json_integer = 9007199254740991ULL;
+constexpr std::size_t max_client_json_depth = 8U;
 constexpr std::array<char, 26> read_digest_domain = {
     'd', 'b', '-', 'm', 'o', 'n', 'i', 't', 'o', 'r', 'i', 'n', 'g',
     '/', 'r', 'e', 'a', 'd', '-', 'd', 'i', 'g', 'e', 's', 't', '\0'};
@@ -33,77 +30,59 @@ constexpr std::array<char, 26> read_digest_domain = {
   throw MonitorError(MonitorErrorCode::ClientRecordMalformed, message);
 }
 
-void requireObject(const Json &value, const std::string_view label) {
-  if (!value.is_object()) {
-    malformed(std::string(label) + " is not an object");
-  }
-}
-
-void requireExactKeys(const Json &object,
-                      const std::initializer_list<std::string_view> expected,
-                      const std::string_view label) {
-  requireObject(object, label);
-  std::set<std::string, std::less<>> remaining;
-  for (const auto key : expected) {
-    remaining.emplace(key);
-  }
-  for (const auto &[key, unused] : object.items()) {
-    (void)unused;
-    if (remaining.erase(key) == 0U) {
-      malformed(std::string(label) + " contains unexpected field " + key);
-    }
-  }
-  if (!remaining.empty()) {
-    malformed(std::string(label) + " is missing field " + *remaining.begin());
-  }
-}
-
-[[nodiscard]] const Json &member(const Json &object, const std::string &name,
-                                 const std::string_view label) {
-  requireObject(object, label);
-  const auto found = object.find(name);
-  if (found == object.end()) {
-    malformed(std::string(label) + " is missing field " + name);
-  }
-  return *found;
-}
-
-[[nodiscard]] std::string stringValue(const Json &value,
-                                      const std::string_view label) {
-  if (!value.is_string()) {
+[[nodiscard]] std::string
+stringValue(simdjson::ondemand::value value, const std::string_view label) {
+  try {
+    return std::string(std::string_view(value.get_string()));
+  } catch (const simdjson::simdjson_error &) {
     malformed(std::string(label) + " is not a string");
   }
-  return value.get<std::string>();
 }
 
-[[nodiscard]] std::uint64_t uintValue(const Json &value,
-                                      const std::string_view label,
-                                      const std::uint64_t maximum,
-                                      const bool positive) {
-  std::uint64_t result = 0;
-  if (value.is_number_unsigned()) {
-    result = value.get<std::uint64_t>();
-  } else if (value.is_number_integer()) {
-    const auto signed_value = value.get<std::int64_t>();
-    if (signed_value < 0) {
-      malformed(std::string(label) + " is negative");
-    }
-    result = static_cast<std::uint64_t>(signed_value);
-  } else if (value.is_number_float()) {
-    const auto floating_value = value.get<double>();
-    if (!std::isfinite(floating_value) || floating_value < 0.0 ||
-        std::trunc(floating_value) != floating_value ||
-        floating_value > static_cast<double>(maximum)) {
-      malformed(std::string(label) + " is not a supported integer");
-    }
-    result = static_cast<std::uint64_t>(floating_value);
-  } else {
-    malformed(std::string(label) + " is not an integer");
+[[nodiscard]] std::uint64_t
+uintValue(simdjson::ondemand::value value, const std::string_view label,
+          const std::uint64_t maximum, const bool positive) {
+  auto token = value.raw_json_token();
+  while (!token.empty() &&
+         (token.front() == ' ' || token.front() == '\t' ||
+          token.front() == '\n' || token.front() == '\r')) {
+    token.remove_prefix(1U);
   }
+  while (!token.empty() &&
+         (token.back() == ' ' || token.back() == '\t' ||
+          token.back() == '\n' || token.back() == '\r')) {
+    token.remove_suffix(1U);
+  }
+  double numeric = 0.0;
+  const auto parsed = std::from_chars(token.data(), token.data() + token.size(),
+                                      numeric, std::chars_format::general);
+  if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() ||
+      !std::isfinite(numeric) || numeric < 0.0 ||
+      std::trunc(numeric) != numeric ||
+      numeric > static_cast<double>(maximum)) {
+    malformed(std::string(label) + " is not a supported integer");
+  }
+  const auto result = static_cast<std::uint64_t>(numeric);
   if ((positive && result == 0U) || result > maximum) {
     malformed(std::string(label) + " is outside its supported range");
   }
   return result;
+}
+
+void markField(std::uint32_t &seen, const std::uint32_t bit,
+               const std::string_view key, const std::string_view label) {
+  if ((seen & bit) != 0U) {
+    malformed(std::string(label) + " contains duplicated field " +
+              std::string(key));
+  }
+  seen |= bit;
+}
+
+void requireFields(const std::uint32_t seen, const std::uint32_t expected,
+                   const std::string_view label) {
+  if (seen != expected) {
+    malformed(std::string(label) + " is missing a required field");
+  }
 }
 
 [[nodiscard]] bool isLowerUuid(const std::string_view value) {
@@ -148,6 +127,7 @@ void requireExactKeys(const Json &object,
 // Check every numeric lexeme before DOM conversion; ClientTxn has no
 // non-integer numeric fields.
 void validateIntegralNumberLexemes(const std::string_view input) {
+  std::size_t depth = 0U;
   for (std::size_t cursor = 0; cursor < input.size();) {
     if (input[cursor] == '"') {
       ++cursor;
@@ -161,6 +141,22 @@ void validateIntegralNumberLexemes(const std::string_view input) {
           ++cursor;
         }
       }
+      continue;
+    }
+    if (input[cursor] == '{' || input[cursor] == '[') {
+      ++depth;
+      if (depth > max_client_json_depth) {
+        throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                           "ClientTxn JSON exceeds its depth limit");
+      }
+      ++cursor;
+      continue;
+    }
+    if (input[cursor] == '}' || input[cursor] == ']') {
+      if (depth != 0U) {
+        --depth;
+      }
+      ++cursor;
       continue;
     }
     if (input[cursor] != '-' &&
@@ -519,27 +515,235 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
   }
   try {
     validateIntegralNumberLexemes(payload);
-    const auto max_events = 128U + limits_.max_reads * 32U;
-    const Json record = detail::parseStrictJson(
-        payload, detail::StrictJsonLimits{
-                     .max_depth = 8U,
-                     .max_events = max_events,
-                     .max_string_bytes = limits_.max_payload_bytes,
-                     .max_object_members = 16U,
-                 });
-    requireExactKeys(record,
-                     {"kind", "run_id", "session_id", "session_seq",
-                      "logical_txn_id", "attempt_id", "txn_type",
-                      "correlation_kind", "correlation_id", "read_count",
-                      "read_digest", "reads"},
-                     "ClientTxn");
+    thread_local simdjson::ondemand::parser parser;
+    const simdjson::padded_string padded(payload);
+    simdjson::ondemand::document document = parser.iterate(padded);
+    simdjson::ondemand::object object = document.get_object();
 
-    if (stringValue(member(record, "kind", "ClientTxn"), "ClientTxn.kind") !=
-        "client_txn") {
+    constexpr std::uint32_t kind_bit = 1U << 0U;
+    constexpr std::uint32_t run_id_bit = 1U << 1U;
+    constexpr std::uint32_t session_id_bit = 1U << 2U;
+    constexpr std::uint32_t session_seq_bit = 1U << 3U;
+    constexpr std::uint32_t logical_txn_id_bit = 1U << 4U;
+    constexpr std::uint32_t attempt_id_bit = 1U << 5U;
+    constexpr std::uint32_t txn_type_bit = 1U << 6U;
+    constexpr std::uint32_t correlation_kind_bit = 1U << 7U;
+    constexpr std::uint32_t correlation_id_bit = 1U << 8U;
+    constexpr std::uint32_t read_count_bit = 1U << 9U;
+    constexpr std::uint32_t read_digest_bit = 1U << 10U;
+    constexpr std::uint32_t reads_bit = 1U << 11U;
+    constexpr std::uint32_t all_fields = (1U << 12U) - 1U;
+
+    std::uint32_t seen = 0U;
+    std::string kind;
+    std::string run_id;
+    std::string session_id;
+    std::uint64_t session_seq = 0U;
+    std::string logical_txn_id;
+    std::string attempt_id;
+    std::string txn_type;
+    std::string correlation_kind;
+    std::string correlation_run;
+    std::string correlation_session;
+    std::uint64_t txn_id = 0U;
+    std::uint64_t read_count = 0U;
+    std::string read_digest;
+    std::vector<ClientRead> reads;
+    std::size_t decoded_bytes = 0U;
+
+    for (auto field : object) {
+      const std::string_view key = field.unescaped_key();
+      simdjson::ondemand::value value = field.value();
+      if (key == "kind") {
+        markField(seen, kind_bit, key, "ClientTxn");
+        kind = stringValue(value, "ClientTxn.kind");
+      } else if (key == "run_id") {
+        markField(seen, run_id_bit, key, "ClientTxn");
+        run_id = stringValue(value, "ClientTxn.run_id");
+      } else if (key == "session_id") {
+        markField(seen, session_id_bit, key, "ClientTxn");
+        session_id = stringValue(value, "ClientTxn.session_id");
+      } else if (key == "session_seq") {
+        markField(seen, session_seq_bit, key, "ClientTxn");
+        session_seq =
+            uintValue(value, "ClientTxn.session_seq", max_json_integer, true);
+      } else if (key == "logical_txn_id") {
+        markField(seen, logical_txn_id_bit, key, "ClientTxn");
+        logical_txn_id = stringValue(value, "ClientTxn.logical_txn_id");
+      } else if (key == "attempt_id") {
+        markField(seen, attempt_id_bit, key, "ClientTxn");
+        attempt_id = stringValue(value, "ClientTxn.attempt_id");
+      } else if (key == "txn_type") {
+        markField(seen, txn_type_bit, key, "ClientTxn");
+        txn_type = stringValue(value, "ClientTxn.txn_type");
+      } else if (key == "correlation_kind") {
+        markField(seen, correlation_kind_bit, key, "ClientTxn");
+        correlation_kind =
+            stringValue(value, "ClientTxn.correlation_kind");
+      } else if (key == "correlation_id") {
+        markField(seen, correlation_id_bit, key, "ClientTxn");
+        simdjson::ondemand::object correlation = value.get_object();
+        constexpr std::uint32_t correlation_run_bit = 1U << 0U;
+        constexpr std::uint32_t correlation_session_bit = 1U << 1U;
+        constexpr std::uint32_t correlation_txn_bit = 1U << 2U;
+        constexpr std::uint32_t correlation_fields = (1U << 3U) - 1U;
+        std::uint32_t correlation_seen = 0U;
+        for (auto correlation_field : correlation) {
+          const std::string_view correlation_key =
+              correlation_field.unescaped_key();
+          simdjson::ondemand::value correlation_value =
+              correlation_field.value();
+          if (correlation_key == "run_id") {
+            markField(correlation_seen, correlation_run_bit, correlation_key,
+                      "ClientTxn.correlation_id");
+            correlation_run = stringValue(
+                correlation_value, "ClientTxn.correlation_id.run_id");
+          } else if (correlation_key == "session_id") {
+            markField(correlation_seen, correlation_session_bit,
+                      correlation_key, "ClientTxn.correlation_id");
+            correlation_session = stringValue(
+                correlation_value, "ClientTxn.correlation_id.session_id");
+          } else if (correlation_key == "txn_id") {
+            markField(correlation_seen, correlation_txn_bit, correlation_key,
+                      "ClientTxn.correlation_id");
+            txn_id = uintValue(correlation_value,
+                               "ClientTxn.correlation_id.txn_id",
+                               max_json_integer, true);
+          } else {
+            malformed("ClientTxn.correlation_id contains unexpected field " +
+                      std::string(correlation_key));
+          }
+        }
+        requireFields(correlation_seen, correlation_fields,
+                      "ClientTxn.correlation_id");
+      } else if (key == "read_count") {
+        markField(seen, read_count_bit, key, "ClientTxn");
+        read_count = uintValue(value, "ClientTxn.read_count",
+                               std::numeric_limits<std::uint32_t>::max(),
+                               false);
+      } else if (key == "read_digest") {
+        markField(seen, read_digest_bit, key, "ClientTxn");
+        read_digest = stringValue(value, "ClientTxn.read_digest");
+      } else if (key == "reads") {
+        markField(seen, reads_bit, key, "ClientTxn");
+        simdjson::ondemand::array read_array = value.get_array();
+        for (auto read_value : read_array) {
+          if (reads.size() >= limits_.max_reads) {
+            throw MonitorError(
+                MonitorErrorCode::ResourceExhausted,
+                "ClientTxn read count exceeds its configured limit");
+          }
+          simdjson::ondemand::object read_object = read_value.get_object();
+          constexpr std::uint32_t event_seq_bit = 1U << 0U;
+          constexpr std::uint32_t key_bytes_bit = 1U << 1U;
+          constexpr std::uint32_t value_state_bit = 1U << 2U;
+          constexpr std::uint32_t value_bytes_bit = 1U << 3U;
+          constexpr std::uint32_t source_bit = 1U << 4U;
+          constexpr std::uint32_t absent_fields =
+              event_seq_bit | key_bytes_bit | value_state_bit | source_bit;
+          constexpr std::uint32_t present_fields =
+              absent_fields | value_bytes_bit;
+          std::uint32_t read_seen = 0U;
+          std::uint64_t event_seq = 0U;
+          std::optional<CanonicalBytes> decoded_key;
+          std::optional<CanonicalBytes> decoded_value;
+          std::string state_text;
+          std::string source_text;
+
+          for (auto read_field : read_object) {
+            const std::string_view read_key = read_field.unescaped_key();
+            simdjson::ondemand::value field_value = read_field.value();
+            if (read_key == "event_seq") {
+              markField(read_seen, event_seq_bit, read_key, "ClientTxn read");
+              event_seq = uintValue(
+                  field_value, "ClientTxn read.event_seq",
+                  std::numeric_limits<std::uint32_t>::max(), false);
+            } else if (read_key == "key_bytes_base64") {
+              markField(read_seen, key_bytes_bit, read_key, "ClientTxn read");
+              decoded_key = decodeBase64(
+                  stringValue(field_value,
+                              "ClientTxn read.key_bytes_base64"),
+                  "ClientTxn read key", limits_.max_key_bytes);
+            } else if (read_key == "value_state") {
+              markField(read_seen, value_state_bit, read_key,
+                        "ClientTxn read");
+              state_text =
+                  stringValue(field_value, "ClientTxn read.value_state");
+            } else if (read_key == "value_bytes_base64") {
+              markField(read_seen, value_bytes_bit, read_key,
+                        "ClientTxn read");
+              decoded_value = decodeBase64(
+                  stringValue(field_value,
+                              "ClientTxn read.value_bytes_base64"),
+                  "ClientTxn read value", limits_.max_value_bytes);
+            } else if (read_key == "source") {
+              markField(read_seen, source_bit, read_key, "ClientTxn read");
+              source_text =
+                  stringValue(field_value, "ClientTxn read.source");
+            } else {
+              malformed("ClientTxn read contains unexpected field " +
+                        std::string(read_key));
+            }
+          }
+
+          const auto expected_fields = state_text == "present"
+                                           ? present_fields
+                                           : absent_fields;
+          if (state_text != "present" && state_text != "absent") {
+            malformed("ClientTxn read.value_state is invalid");
+          }
+          requireFields(read_seen, expected_fields, "ClientTxn read");
+          if (event_seq != reads.size()) {
+            malformed("ClientTxn read event_seq is not zero-based and dense");
+          }
+          if (!decoded_key.has_value() || decoded_key->empty()) {
+            malformed("ClientTxn read key is empty");
+          }
+          const auto value_size = decoded_value.has_value()
+                                      ? decoded_value->size()
+                                      : 0U;
+          if (decoded_key->size() > limits_.max_decoded_bytes ||
+              value_size > limits_.max_decoded_bytes - decoded_key->size() ||
+              decoded_bytes > limits_.max_decoded_bytes -
+                                  decoded_key->size() - value_size) {
+            throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                               "ClientTxn decoded reads exceed their byte "
+                               "limit");
+          }
+          decoded_bytes += decoded_key->size() + value_size;
+          benchmark_adapter_->validateClientRead(
+              *decoded_key,
+              decoded_value.has_value()
+                  ? std::optional<std::span<const std::byte>>{*decoded_value}
+                  : std::nullopt);
+
+          ClientReadSource source;
+          if (source_text == "snapshot") {
+            source = ClientReadSource::Snapshot;
+          } else if (source_text == "local") {
+            source = ClientReadSource::Local;
+          } else {
+            throw MonitorError(MonitorErrorCode::UnsupportedReadSource,
+                               "ClientTxn read source is unsupported");
+          }
+          reads.push_back(ClientRead{
+              .event_seq = static_cast<std::uint32_t>(event_seq),
+              .key = std::move(*decoded_key),
+              .state = state_text == "present" ? ClientValueState::Present
+                                                : ClientValueState::Absent,
+              .value = std::move(decoded_value),
+              .source = source,
+          });
+        }
+      } else {
+        malformed("ClientTxn contains unexpected field " + std::string(key));
+      }
+    }
+    requireFields(seen, all_fields, "ClientTxn");
+
+    if (kind != "client_txn") {
       malformed("ClientTxn.kind is not client_txn");
     }
-    const auto run_id =
-        stringValue(member(record, "run_id", "ClientTxn"), "ClientTxn.run_id");
     if (!isLowerUuid(run_id)) {
       malformed("ClientTxn.run_id is not a lowercase UUID");
     }
@@ -547,8 +751,6 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
       throw MonitorError(MonitorErrorCode::RunIdMismatch,
                          "ClientTxn belongs to a different run_id");
     }
-    const auto session_id = stringValue(
-        member(record, "session_id", "ClientTxn"), "ClientTxn.session_id");
     if (!isSessionId(session_id)) {
       malformed("ClientTxn.session_id is invalid");
     }
@@ -556,19 +758,9 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
       throw MonitorError(MonitorErrorCode::SessionUnknown,
                          "ClientTxn names a session absent from the roster");
     }
-    const auto session_seq =
-        uintValue(member(record, "session_seq", "ClientTxn"),
-                  "ClientTxn.session_seq", max_json_integer, true);
-    const auto logical_txn_id =
-        stringValue(member(record, "logical_txn_id", "ClientTxn"),
-                    "ClientTxn.logical_txn_id");
-    const auto attempt_id = stringValue(
-        member(record, "attempt_id", "ClientTxn"), "ClientTxn.attempt_id");
     if (!isLowerUuid(logical_txn_id) || !isLowerUuid(attempt_id)) {
       malformed("ClientTxn logical/attempt identity is not a lowercase UUID");
     }
-    const auto txn_type = stringValue(member(record, "txn_type", "ClientTxn"),
-                                      "ClientTxn.txn_type");
     if (!isProtocolName(txn_type)) {
       malformed("ClientTxn.txn_type is not a bounded protocol name");
     }
@@ -577,23 +769,9 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
                          "ClientTxn transaction type is not owned by the "
                          "selected benchmark adapter");
     }
-    if (stringValue(member(record, "correlation_kind", "ClientTxn"),
-                    "ClientTxn.correlation_kind") != "session_txn") {
+    if (correlation_kind != "session_txn") {
       malformed("ClientTxn.correlation_kind is not session_txn");
     }
-
-    const auto &correlation = record.at("correlation_id");
-    requireExactKeys(correlation, {"run_id", "session_id", "txn_id"},
-                     "ClientTxn.correlation_id");
-    const auto correlation_run =
-        stringValue(member(correlation, "run_id", "ClientTxn.correlation_id"),
-                    "ClientTxn.correlation_id.run_id");
-    const auto correlation_session = stringValue(
-        member(correlation, "session_id", "ClientTxn.correlation_id"),
-        "ClientTxn.correlation_id.session_id");
-    const auto txn_id =
-        uintValue(member(correlation, "txn_id", "ClientTxn.correlation_id"),
-                  "ClientTxn.correlation_id.txn_id", max_json_integer, true);
     if (!isLowerUuid(correlation_run) || !isSessionId(correlation_session)) {
       malformed("ClientTxn.correlation_id contains an invalid identity");
     }
@@ -608,103 +786,10 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
           "ClientTxn marker txn_id is behind its logical session_seq");
     }
 
-    const auto read_count = uintValue(
-        member(record, "read_count", "ClientTxn"), "ClientTxn.read_count",
-        std::numeric_limits<std::uint32_t>::max(), false);
-    const auto &read_array = record.at("reads");
-    if (!read_array.is_array()) {
-      malformed("ClientTxn.reads is not an array");
-    }
-    if (read_array.size() != read_count) {
+    if (reads.size() != read_count) {
       throw MonitorError(MonitorErrorCode::ClientReadCountMismatch,
                          "ClientTxn.read_count differs from reads length");
     }
-    if (read_array.size() > limits_.max_reads) {
-      throw MonitorError(MonitorErrorCode::ResourceExhausted,
-                         "ClientTxn read count exceeds its configured limit");
-    }
-
-    std::vector<ClientRead> reads;
-    reads.reserve(read_array.size());
-    std::size_t decoded_bytes = 0;
-    for (std::size_t index = 0; index < read_array.size(); ++index) {
-      const auto &read = read_array[index];
-      requireObject(read, "ClientTxn read");
-      const auto state_text =
-          stringValue(member(read, "value_state", "ClientTxn read"),
-                      "ClientTxn read.value_state");
-      if (state_text == "present") {
-        requireExactKeys(read,
-                         {"event_seq", "key_bytes_base64", "value_state",
-                          "value_bytes_base64", "source"},
-                         "ClientTxn present read");
-      } else if (state_text == "absent") {
-        requireExactKeys(
-            read, {"event_seq", "key_bytes_base64", "value_state", "source"},
-            "ClientTxn absent read");
-      } else {
-        malformed("ClientTxn read.value_state is invalid");
-      }
-      const auto event_seq =
-          uintValue(member(read, "event_seq", "ClientTxn read"),
-                    "ClientTxn read.event_seq",
-                    std::numeric_limits<std::uint32_t>::max(), false);
-      if (event_seq != index) {
-        malformed("ClientTxn read event_seq is not zero-based and dense");
-      }
-      if (decoded_bytes > limits_.max_decoded_bytes) {
-        throw MonitorError(MonitorErrorCode::ResourceExhausted,
-                           "ClientTxn decoded reads exceed their byte limit");
-      }
-      const auto remaining_before_key =
-          limits_.max_decoded_bytes - decoded_bytes;
-      auto key = decodeBase64(
-          stringValue(member(read, "key_bytes_base64", "ClientTxn read"),
-                      "ClientTxn read.key_bytes_base64"),
-          "ClientTxn read key",
-          std::min(limits_.max_key_bytes, remaining_before_key));
-      if (key.empty()) {
-        malformed("ClientTxn read key is empty");
-      }
-      decoded_bytes += key.size();
-      std::optional<CanonicalBytes> value;
-      if (state_text == "present") {
-        const auto remaining_before_value =
-            limits_.max_decoded_bytes - decoded_bytes;
-        value = decodeBase64(
-            stringValue(member(read, "value_bytes_base64", "ClientTxn read"),
-                        "ClientTxn read.value_bytes_base64"),
-            "ClientTxn read value",
-            std::min(limits_.max_value_bytes, remaining_before_value));
-        decoded_bytes += value->size();
-      }
-      benchmark_adapter_->validateClientRead(
-          key, value.has_value()
-                   ? std::optional<std::span<const std::byte>>{*value}
-                   : std::nullopt);
-      const auto source_text = stringValue(
-          member(read, "source", "ClientTxn read"), "ClientTxn read.source");
-      ClientReadSource source;
-      if (source_text == "snapshot") {
-        source = ClientReadSource::Snapshot;
-      } else if (source_text == "local") {
-        source = ClientReadSource::Local;
-      } else {
-        throw MonitorError(MonitorErrorCode::UnsupportedReadSource,
-                           "ClientTxn read source is unsupported");
-      }
-      reads.push_back(ClientRead{
-          .event_seq = static_cast<std::uint32_t>(event_seq),
-          .key = std::move(key),
-          .state = state_text == "present" ? ClientValueState::Present
-                                           : ClientValueState::Absent,
-          .value = std::move(value),
-          .source = source,
-      });
-    }
-
-    const auto read_digest = stringValue(
-        member(record, "read_digest", "ClientTxn"), "ClientTxn.read_digest");
     if (!isSha256(read_digest)) {
       malformed("ClientTxn.read_digest is not lowercase SHA-256 hex");
     }
@@ -737,17 +822,16 @@ ClientTxn ClientTxnParser::parse(const std::string_view payload) const {
   } catch (const std::length_error &) {
     throw MonitorError(MonitorErrorCode::ResourceExhausted,
                        "container limit failed while parsing ClientTxn");
-  } catch (const detail::StrictJsonLimitError &error) {
-    throw MonitorError(MonitorErrorCode::ResourceExhausted,
-                       std::string("ClientTxn JSON exceeds its limits: ") +
-                           error.what());
-  } catch (const detail::StrictJsonError &error) {
+  } catch (const simdjson::simdjson_error &error) {
+    const auto code = error.error();
+    if (code == simdjson::MEMALLOC || code == simdjson::CAPACITY ||
+        code == simdjson::DEPTH_ERROR) {
+      throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                         std::string("ClientTxn JSON exceeds its limits: ") +
+                             error.what());
+    }
     throw MonitorError(MonitorErrorCode::ClientRecordMalformed,
                        std::string("invalid or ambiguous ClientTxn JSON: ") +
-                           error.what());
-  } catch (const nlohmann::json::exception &error) {
-    throw MonitorError(MonitorErrorCode::ClientRecordMalformed,
-                       std::string("failed to decode ClientTxn JSON: ") +
                            error.what());
   }
 }

@@ -111,6 +111,11 @@ class BackendCdcDecoder {
 public:
   virtual ~BackendCdcDecoder() = default;
 
+  // Backends may decode their pinned wire envelope directly. The default
+  // keeps the DOM path for adapters that have not specialized it.
+  [[nodiscard]] virtual BackendCdcRecord
+  decodeRaw(std::string_view key_json, std::string_view envelope_json) const;
+
   [[nodiscard]] virtual BackendCdcRecord
   decode(const nlohmann::json &key, const nlohmann::json &envelope) const = 0;
 };

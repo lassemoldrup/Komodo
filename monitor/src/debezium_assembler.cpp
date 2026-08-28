@@ -217,14 +217,16 @@ public:
              "one CDC record exceeds the configured assembly byte limit");
       }
       validateStreamOrder(record);
-      auto key = detail::parseStrictJson(record.key_json);
-      auto envelope = detail::parseStrictJson(record.envelope_json);
-      const auto decoded = cdc_decoder_->decode(key, envelope);
+      const auto decoded =
+          cdc_decoder_->decodeRaw(record.key_json, record.envelope_json);
       std::optional<CdcTransaction> completed;
       switch (decoded.kind) {
-      case BackendCdcRecordKind::StartupSchema:
+      case BackendCdcRecordKind::StartupSchema: {
+        auto key = detail::parseStrictJson(record.key_json);
+        auto envelope = detail::parseStrictJson(record.envelope_json);
         acceptStartupSchemaRecord(key, envelope);
         break;
+      }
       case BackendCdcRecordKind::Begin:
       case BackendCdcRecordKind::End:
         completed = acceptTransactionMetadata(record, decoded);

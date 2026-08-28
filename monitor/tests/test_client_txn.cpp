@@ -225,6 +225,15 @@ void testMalformedStructure() {
   compact.insert(event_position, "\"event_seq\":0,");
   expectError(client_parser, compact, MonitorErrorCode::ClientRecordMalformed);
 
+  compact = Json::parse(payload).dump();
+  const auto escaped_kind_position = compact.find("\"kind\":\"client_txn\"");
+  BLACKBOX_REQUIRE(escaped_kind_position != std::string::npos);
+  compact.replace(escaped_kind_position, std::string_view("\"kind\"").size(),
+                  "\"\\u006bind\"");
+  BLACKBOX_CHECK(client_parser.parse(compact).txn_type == "ycsb_read");
+  compact.insert(escaped_kind_position, "\"kind\":\"client_txn\",");
+  expectError(client_parser, compact, MonitorErrorCode::ClientRecordMalformed);
+
   auto record = Json::parse(payload);
   record["extra"] = true;
   expectError(client_parser, record.dump(),

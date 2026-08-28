@@ -5,6 +5,7 @@
 #include "strict_json.h"
 
 #include <openssl/evp.h>
+#include <simdjson.h>
 
 #include <algorithm>
 #include <array>
@@ -329,6 +330,17 @@ translateFailures(const std::string_view label,
     throw MonitorError(MonitorErrorCode::ClientRecordMalformed,
                        "invalid or ambiguous " + std::string(label) +
                            " JSON: " + error.what());
+  } catch (const simdjson::simdjson_error &error) {
+    const auto code = error.error();
+    if (code == simdjson::MEMALLOC || code == simdjson::CAPACITY ||
+        code == simdjson::DEPTH_ERROR) {
+      throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                         std::string(label) +
+                             " JSON exceeds its limits: " + error.what());
+    }
+    throw MonitorError(MonitorErrorCode::ClientRecordMalformed,
+                       "invalid or ambiguous " + std::string(label) +
+                           " JSON: " + error.what());
   } catch (const nlohmann::json::exception &error) {
     throw MonitorError(MonitorErrorCode::ClientRecordMalformed,
                        "failed to decode " + std::string(label) +
@@ -353,6 +365,105 @@ translateFailures(const std::string_view label,
                    .max_string_bytes = limits.max_payload_bytes,
                    .max_object_members = 16U,
                });
+}
+
+void requireSimdEventCapacity(std::size_t &events,
+                              const ProtocolRecordParserLimits &limits) {
+  if (events >= limits.max_payload_bytes + 1U) {
+    throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                       "protocol record JSON exceeds its event limit");
+  }
+  ++events;
+}
+
+void validateSimdValue(simdjson::ondemand::value value,
+                       const ProtocolRecordParserLimits &limits,
+                       std::size_t depth, std::size_t &events);
+
+void validateSimdObject(simdjson::ondemand::object object,
+                        const ProtocolRecordParserLimits &limits,
+                        const std::size_t depth, std::size_t &events,
+                        std::optional<std::string> *kind) {
+  if (depth > 8U) {
+    throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                       "protocol record JSON exceeds its depth limit");
+  }
+  requireSimdEventCapacity(events, limits);
+  std::vector<std::string> keys;
+  keys.reserve(16U);
+  for (auto field : object) {
+    requireSimdEventCapacity(events, limits);
+    const std::string_view key_view = field.unescaped_key();
+    if (key_view.size() > limits.max_payload_bytes) {
+      throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                         "protocol record JSON string exceeds its limit");
+    }
+    if (keys.size() >= 16U) {
+      throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                         "protocol record JSON object exceeds its member "
+                         "limit");
+    }
+    if (std::find(keys.begin(), keys.end(), key_view) != keys.end()) {
+      malformed("protocol record JSON contains duplicated field " +
+                std::string(key_view));
+    }
+    keys.emplace_back(key_view);
+    simdjson::ondemand::value field_value = field.value();
+    if (kind != nullptr && key_view == "kind") {
+      *kind = std::string(std::string_view(field_value.get_string()));
+    } else {
+      validateSimdValue(field_value, limits, depth, events);
+    }
+  }
+}
+
+void validateSimdArray(simdjson::ondemand::array array,
+                       const ProtocolRecordParserLimits &limits,
+                       const std::size_t depth, std::size_t &events) {
+  if (depth > 8U) {
+    throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                       "protocol record JSON exceeds its depth limit");
+  }
+  requireSimdEventCapacity(events, limits);
+  for (auto element : array) {
+    simdjson::ondemand::value element_value = std::move(element);
+    validateSimdValue(element_value, limits, depth, events);
+  }
+}
+
+void validateSimdValue(simdjson::ondemand::value value,
+                       const ProtocolRecordParserLimits &limits,
+                       const std::size_t depth, std::size_t &events) {
+  requireSimdEventCapacity(events, limits);
+  switch (simdjson::ondemand::json_type(value.type())) {
+  case simdjson::ondemand::json_type::object:
+    validateSimdObject(value.get_object(), limits, depth + 1U, events, nullptr);
+    return;
+  case simdjson::ondemand::json_type::array:
+    validateSimdArray(value.get_array(), limits, depth + 1U, events);
+    return;
+  case simdjson::ondemand::json_type::number: {
+    simdjson::ondemand::number number = value.get_number();
+    (void)number;
+    return;
+  }
+  case simdjson::ondemand::json_type::string: {
+    simdjson::ondemand::raw_json_string string = value.get_raw_json_string();
+    (void)string;
+    return;
+  }
+  case simdjson::ondemand::json_type::boolean: {
+    const bool boolean = value.get_bool();
+    (void)boolean;
+    return;
+  }
+  case simdjson::ondemand::json_type::null:
+    if (!value.is_null()) {
+      malformed("protocol record JSON null value is malformed");
+    }
+    return;
+  }
+  malformed("protocol record JSON has an invalid value type");
 }
 
 [[nodiscard]] std::string validatedUuid(const Json &value,
@@ -639,26 +750,41 @@ ProtocolRecordParser::ProtocolRecordParser(
 ProtocolRecordKind
 ProtocolRecordParser::kind(const std::string_view payload) const {
   return translateFailures("protocol record", [&] {
-    const Json record = parseDocument(payload, limits_);
-    requireObject(record, "protocol record");
-    const auto value = stringValue(member(record, "kind", "protocol record"),
-                                   "protocol record.kind");
-    if (value == "run_manifest") {
+    if (payload.empty()) {
+      malformed("protocol record payload is empty");
+    }
+    if (payload.size() > limits_.max_payload_bytes) {
+      throw MonitorError(MonitorErrorCode::ResourceExhausted,
+                         "protocol record payload exceeds its byte limit");
+    }
+
+    validateIntegralNumberLexemes(payload);
+    thread_local simdjson::ondemand::parser parser;
+    const simdjson::padded_string padded(payload);
+    simdjson::ondemand::document document = parser.iterate(padded);
+    simdjson::ondemand::object object = document.get_object();
+    std::optional<std::string> kind;
+    std::size_t events = 0U;
+    validateSimdObject(object, limits_, 1U, events, &kind);
+    if (!kind.has_value()) {
+      malformed("protocol record is missing field kind");
+    }
+    if (*kind == "run_manifest") {
       return ProtocolRecordKind::RunManifest;
     }
-    if (value == "schema_attestation") {
+    if (*kind == "schema_attestation") {
       return ProtocolRecordKind::SchemaAttestation;
     }
-    if (value == "bootstrap_manifest") {
+    if (*kind == "bootstrap_manifest") {
       return ProtocolRecordKind::BootstrapManifest;
     }
-    if (value == "client_txn") {
+    if (*kind == "client_txn") {
       return ProtocolRecordKind::ClientTxn;
     }
-    if (value == "session_done") {
+    if (*kind == "session_done") {
       return ProtocolRecordKind::SessionDone;
     }
-    if (value == "run_failed") {
+    if (*kind == "run_failed") {
       return ProtocolRecordKind::RunFailed;
     }
     malformed("protocol record.kind is unknown");

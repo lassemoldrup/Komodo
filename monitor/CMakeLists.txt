@@ -26,6 +26,7 @@ add_subdirectory("${BLACKBOX_CO_CHECKER_ROOT}/online"
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(HIREDIS REQUIRED IMPORTED_TARGET hiredis=1.2.0)
 find_package(nlohmann_json 3.11.3 EXACT CONFIG REQUIRED)
+find_package(simdjson 3.6.4 EXACT CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 add_library(blackbox_monitor
@@ -62,6 +63,7 @@ target_link_libraries(blackbox_monitor
   PUBLIC
     PkgConfig::HIREDIS
     nlohmann_json::nlohmann_json
+    simdjson::simdjson
     co_checker_online
   PRIVATE
     OpenSSL::Crypto

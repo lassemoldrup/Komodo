@@ -376,6 +376,11 @@ void testFailureAndDiscriminatorValidation() {
         std::string("{\"kind\":\"run_manifest\",") + manifest.substr(1U);
     expectError([&] { (void)parser.kind(duplicate); },
                 MonitorErrorCode::ClientRecordMalformed);
+    const auto escaped_duplicate =
+        std::string("{\"\\u006bind\":\"run_manifest\",") +
+        manifest.substr(1U);
+    expectError([&] { (void)parser.kind(escaped_duplicate); },
+                MonitorErrorCode::ClientRecordMalformed);
   }
   {
     expectError([&] { (void)parser.kind("[]"); },

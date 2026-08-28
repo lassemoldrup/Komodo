@@ -2,7 +2,10 @@
 
 #include "blackbox/monitor_error.h"
 
+#include "strict_json.h"
+
 #include <nlohmann/json.hpp>
+#include <simdjson.h>
 
 #include <algorithm>
 #include <array>
@@ -614,6 +617,221 @@ public:
   [[nodiscard]] bool complete() const noexcept override { return true; }
 };
 
+struct RawCdcParserState {
+  simdjson::ondemand::parser parser;
+  std::string input;
+};
+
+[[nodiscard]] RawCdcParserState &rawCdcParserState() {
+  thread_local RawCdcParserState state;
+  return state;
+}
+
+[[noreturn]] void rawCdcMalformed(const std::string &message) {
+  throw BackendCdcDecodeError(CdcErrorCode::CdcRecordMalformed, message);
+}
+
+[[nodiscard]] std::string_view rawCdcText(simdjson::ondemand::value value,
+                                          const std::string_view label,
+                                          const std::size_t maximum = 512U) {
+  const auto text = std::string_view(value.get_string());
+  if (text.empty() || text.size() > maximum) {
+    rawCdcMalformed(std::string(label) + " is empty or oversized");
+  }
+  return text;
+}
+
+[[nodiscard]] std::string rawCdcString(simdjson::ondemand::value value,
+                                       const std::string_view label,
+                                       const std::size_t maximum = 512U) {
+  return std::string(rawCdcText(value, label, maximum));
+}
+
+[[nodiscard]] std::uint64_t rawCdcUint(simdjson::ondemand::value value,
+                                       const std::string_view label) {
+  auto token = value.raw_json_token();
+  while (!token.empty() && (token.front() == ' ' || token.front() == '\t' ||
+                            token.front() == '\n' || token.front() == '\r')) {
+    token.remove_prefix(1U);
+  }
+  while (!token.empty() && (token.back() == ' ' || token.back() == '\t' ||
+                            token.back() == '\n' || token.back() == '\r')) {
+    token.remove_suffix(1U);
+  }
+  std::uint64_t result = 0;
+  const auto parsed =
+      std::from_chars(token.data(), token.data() + token.size(), result);
+  if (token.empty() || parsed.ec != std::errc{} ||
+      parsed.ptr != token.data() + token.size()) {
+    rawCdcMalformed(std::string(label) + " is not a nonnegative integer");
+  }
+  return result;
+}
+
+[[nodiscard]] bool rawCdcIsNull(simdjson::ondemand::value value) {
+  return value.type().value() == simdjson::ondemand::json_type::null;
+}
+
+void rawCdcRequireNull(simdjson::ondemand::value value,
+                       const std::string_view label) {
+  if (!rawCdcIsNull(value)) {
+    rawCdcMalformed(std::string(label) + " is not null");
+  }
+}
+
+void rawCdcRequireNullableString(simdjson::ondemand::value value,
+                                 const std::string_view label) {
+  const auto type = value.type().value();
+  if (type == simdjson::ondemand::json_type::null) {
+    return;
+  }
+  if (type != simdjson::ondemand::json_type::string) {
+    rawCdcMalformed(std::string(label) + " is neither null nor a string");
+  }
+  (void)value.get_string();
+}
+
+void rawCdcRequireNullableInteger(simdjson::ondemand::value value,
+                                  const std::string_view label) {
+  if (!rawCdcIsNull(value)) {
+    (void)rawCdcUint(value, label);
+  }
+}
+
+[[nodiscard]] bool rawCdcSnapshotIsFalse(simdjson::ondemand::value value) {
+  const auto type = value.type().value();
+  if (type == simdjson::ondemand::json_type::boolean) {
+    return !value.get_bool();
+  }
+  return type == simdjson::ondemand::json_type::string &&
+         std::string_view(value.get_string()) == "false";
+}
+
+void rawCdcMarkField(std::uint32_t &seen, const std::uint32_t bit,
+                     const std::string_view key, const std::string_view label) {
+  if ((seen & bit) != 0U) {
+    rawCdcMalformed(std::string(label) + " contains duplicated field " +
+                    std::string(key));
+  }
+  seen |= bit;
+}
+
+void rawCdcRequireFields(const std::uint32_t seen, const std::uint32_t required,
+                         const std::uint32_t allowed,
+                         const std::string_view label) {
+  if ((seen & required) != required) {
+    rawCdcMalformed(std::string(label) + " is missing a required field");
+  }
+  if ((seen & ~allowed) != 0U) {
+    rawCdcMalformed(std::string(label) + " contains an unexpected field");
+  }
+}
+
+[[nodiscard]] Json rawCdcMaterialize(simdjson::ondemand::value value) {
+  switch (value.type().value()) {
+  case simdjson::ondemand::json_type::array: {
+    Json result = Json::array();
+    for (auto element : value.get_array()) {
+      result.push_back(rawCdcMaterialize(element.value()));
+    }
+    return result;
+  }
+  case simdjson::ondemand::json_type::object: {
+    Json result = Json::object();
+    for (auto field : value.get_object()) {
+      const auto key = std::string(std::string_view(field.unescaped_key()));
+      if (result.contains(key)) {
+        rawCdcMalformed("raw CDC row object contains duplicated field " + key);
+      }
+      result[key] = rawCdcMaterialize(field.value());
+    }
+    return result;
+  }
+  case simdjson::ondemand::json_type::number: {
+    const auto number = value.get_number().value();
+    switch (number.get_number_type()) {
+    case simdjson::ondemand::number_type::signed_integer:
+      return number.get_int64();
+    case simdjson::ondemand::number_type::unsigned_integer:
+      return number.get_uint64();
+    case simdjson::ondemand::number_type::floating_point_number:
+      return number.get_double();
+    }
+    break;
+  }
+  case simdjson::ondemand::json_type::string:
+    return std::string(std::string_view(value.get_string()));
+  case simdjson::ondemand::json_type::boolean:
+    return value.get_bool().value();
+  case simdjson::ondemand::json_type::null:
+    return nullptr;
+  }
+  rawCdcMalformed("raw CDC row value has an unsupported JSON type");
+}
+
+void rawCdcConsume(simdjson::ondemand::value value) {
+  switch (value.type().value()) {
+  case simdjson::ondemand::json_type::array:
+    for (auto element : value.get_array()) {
+      rawCdcConsume(element.value());
+    }
+    return;
+  case simdjson::ondemand::json_type::object: {
+    std::unordered_set<std::string> names;
+    for (auto field : value.get_object()) {
+      auto name = std::string(std::string_view(field.unescaped_key()));
+      if (!names.insert(name).second) {
+        rawCdcMalformed("raw CDC object contains duplicated field " + name);
+      }
+      rawCdcConsume(field.value());
+    }
+    return;
+  }
+  case simdjson::ondemand::json_type::number:
+    (void)value.get_number().value();
+    return;
+  case simdjson::ondemand::json_type::string:
+    (void)value.get_string();
+    return;
+  case simdjson::ondemand::json_type::boolean:
+    (void)value.get_bool();
+    return;
+  case simdjson::ondemand::json_type::null:
+    return;
+  }
+  rawCdcMalformed("raw CDC value has an unsupported JSON type");
+}
+
+enum class RawMariaDbEnvelopeKind {
+  StartupSchema,
+  Metadata,
+  Row,
+};
+
+[[nodiscard]] RawMariaDbEnvelopeKind
+classifyRawMariaDbEnvelope(const std::string_view envelope_json) {
+  auto &state = rawCdcParserState();
+  state.input.assign(envelope_json);
+  auto document = state.parser.iterate(state.input);
+  bool status = false;
+  bool operation = false;
+  bool ddl = false;
+  for (auto field : document.get_object()) {
+    const auto name = std::string_view(field.unescaped_key());
+    status = status || name == "status";
+    operation = operation || name == "op";
+    ddl = ddl || name == "ddl";
+  }
+  if (status != operation) {
+    return status ? RawMariaDbEnvelopeKind::Metadata
+                  : RawMariaDbEnvelopeKind::Row;
+  }
+  if (!status && ddl) {
+    return RawMariaDbEnvelopeKind::StartupSchema;
+  }
+  rawCdcMalformed("raw CDC record is not one pinned envelope kind");
+}
+
 class PinnedEnvelopeDecoder final : public BackendCdcDecoder {
 public:
   enum class Profile {
@@ -691,6 +909,37 @@ public:
                   "raw CDC record is not one pinned envelope kind");
     }
     return metadata ? decodeMetadata(key, envelope) : decodeRow(key, envelope);
+  }
+
+  [[nodiscard]] BackendCdcRecord
+  decodeRaw(const std::string_view key_json,
+            const std::string_view envelope_json) const override {
+    if (profile_ != Profile::MariaDb) {
+      return BackendCdcDecoder::decodeRaw(key_json, envelope_json);
+    }
+    try {
+      switch (classifyRawMariaDbEnvelope(envelope_json)) {
+      case RawMariaDbEnvelopeKind::StartupSchema: {
+        BackendCdcRecord result;
+        result.kind = BackendCdcRecordKind::StartupSchema;
+        return result;
+      }
+      case RawMariaDbEnvelopeKind::Metadata:
+        return decodeRawMariaDbMetadata(key_json, envelope_json);
+      case RawMariaDbEnvelopeKind::Row:
+        return decodeRawMariaDbRow(key_json, envelope_json);
+      }
+    } catch (const BackendCdcDecodeError &) {
+      throw;
+    } catch (const std::bad_alloc &) {
+      throw;
+    } catch (const simdjson::simdjson_error &error) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  std::string("invalid or ambiguous CDC JSON: ") +
+                      error.what());
+    }
+    decodeError(CdcErrorCode::CdcRecordMalformed,
+                "raw CDC record is not one pinned envelope kind");
   }
 
 private:
@@ -840,6 +1089,392 @@ private:
                   "raw CDC data collection is outside the configured roster");
     }
     return *found;
+  }
+
+  [[nodiscard]] static std::string
+  decodeRawMariaDbMetadataKey(const std::string_view key_json) {
+    auto &state = rawCdcParserState();
+    state.input.assign(key_json);
+    auto document = state.parser.iterate(state.input);
+    std::uint32_t seen = 0U;
+    std::string id;
+    for (auto field : document.get_object()) {
+      const auto name = std::string_view(field.unescaped_key());
+      if (name != "id") {
+        rawCdcMalformed("transaction metadata key contains unexpected field " +
+                        std::string(name));
+      }
+      rawCdcMarkField(seen, 1U, name, "transaction metadata key");
+      id = rawCdcString(field.value(), "transaction metadata key.id");
+    }
+    rawCdcRequireFields(seen, 1U, 1U, "transaction metadata key");
+    return id;
+  }
+
+  [[nodiscard]] BackendCdcDataCollectionCount
+  decodeRawMariaDbDataCollection(simdjson::ondemand::value value) const {
+    constexpr std::uint32_t collection_bit = 1U << 0U;
+    constexpr std::uint32_t count_bit = 1U << 1U;
+    constexpr std::uint32_t expected = collection_bit | count_bit;
+    std::uint32_t seen = 0U;
+    std::string identity;
+    std::uint64_t count = 0U;
+    for (auto field : value.get_object()) {
+      const auto name = std::string_view(field.unescaped_key());
+      if (name == "data_collection") {
+        rawCdcMarkField(seen, collection_bit, name, "END data collection");
+        identity = rawCdcString(field.value(), "END data_collection");
+      } else if (name == "event_count") {
+        rawCdcMarkField(seen, count_bit, name, "END data collection");
+        count = rawCdcUint(field.value(), "END data_collection.event_count");
+      } else {
+        rawCdcMalformed("END data collection contains unexpected field " +
+                        std::string(name));
+      }
+    }
+    rawCdcRequireFields(seen, expected, expected, "END data collection");
+    return BackendCdcDataCollectionCount{
+        .canonical_table = canonicalDataCollection(identity),
+        .event_count = count,
+    };
+  }
+
+  [[nodiscard]] BackendCdcRecord
+  decodeRawMariaDbMetadata(const std::string_view key_json,
+                           const std::string_view envelope_json) const {
+    const auto key_id = decodeRawMariaDbMetadataKey(key_json);
+
+    constexpr std::uint32_t status_bit = 1U << 0U;
+    constexpr std::uint32_t id_bit = 1U << 1U;
+    constexpr std::uint32_t count_bit = 1U << 2U;
+    constexpr std::uint32_t collections_bit = 1U << 3U;
+    constexpr std::uint32_t timestamp_bit = 1U << 4U;
+    constexpr std::uint32_t expected =
+        status_bit | id_bit | count_bit | collections_bit | timestamp_bit;
+    std::uint32_t seen = 0U;
+    std::string status;
+    std::string envelope_id;
+    std::optional<std::uint64_t> event_count;
+    bool event_count_is_null = false;
+    bool collections_are_null = false;
+    std::vector<BackendCdcDataCollectionCount> collections;
+
+    auto &state = rawCdcParserState();
+    state.input.assign(envelope_json);
+    auto document = state.parser.iterate(state.input);
+    for (auto field : document.get_object()) {
+      const auto name = std::string_view(field.unescaped_key());
+      if (name == "status") {
+        rawCdcMarkField(seen, status_bit, name,
+                        "transaction metadata envelope");
+        status =
+            rawCdcString(field.value(), "transaction metadata status", 16U);
+      } else if (name == "id") {
+        rawCdcMarkField(seen, id_bit, name, "transaction metadata envelope");
+        envelope_id =
+            rawCdcString(field.value(), "transaction metadata envelope.id");
+      } else if (name == "event_count") {
+        rawCdcMarkField(seen, count_bit, name, "transaction metadata envelope");
+        auto value = field.value().value();
+        event_count_is_null = rawCdcIsNull(value);
+        if (!event_count_is_null) {
+          event_count = rawCdcUint(value, "END.event_count");
+        }
+      } else if (name == "data_collections") {
+        rawCdcMarkField(seen, collections_bit, name,
+                        "transaction metadata envelope");
+        auto value = field.value().value();
+        collections_are_null = rawCdcIsNull(value);
+        if (!collections_are_null) {
+          if (value.type().value() != simdjson::ondemand::json_type::array) {
+            throw BackendCdcDecodeError(CdcErrorCode::CdcEventCountMismatch,
+                                        "END data_collections is not an array");
+          }
+          for (auto collection : value.get_array()) {
+            collections.push_back(
+                decodeRawMariaDbDataCollection(collection.value()));
+          }
+        }
+      } else if (name == "ts_ms") {
+        rawCdcMarkField(seen, timestamp_bit, name,
+                        "transaction metadata envelope");
+        (void)rawCdcUint(field.value(), "transaction metadata ts_ms");
+      } else {
+        rawCdcMalformed(
+            "transaction metadata envelope contains unexpected field " +
+            std::string(name));
+      }
+    }
+    rawCdcRequireFields(seen, expected, expected,
+                        "transaction metadata envelope");
+    if (key_id != envelope_id) {
+      decodeError(CdcErrorCode::CdcTransactionIdMismatch,
+                  "transaction metadata key and envelope IDs disagree");
+    }
+
+    BackendCdcRecord result;
+    result.diagnostic_connector_id = std::move(envelope_id);
+    if (status == "BEGIN") {
+      if (!event_count_is_null || !collections_are_null) {
+        decodeError(CdcErrorCode::CdcRecordMalformed,
+                    "BEGIN counts are not null");
+      }
+      result.kind = BackendCdcRecordKind::Begin;
+      return result;
+    }
+    if (status != "END") {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "transaction metadata status is unsupported");
+    }
+    if (!event_count.has_value() || collections_are_null) {
+      decodeError(CdcErrorCode::CdcRecordMalformed, "END counts are null");
+    }
+    result.kind = BackendCdcRecordKind::End;
+    result.event_count = event_count;
+    result.data_collections = std::move(collections);
+    return result;
+  }
+
+  [[nodiscard]] std::string
+  decodeRawMariaDbSource(simdjson::ondemand::value value) const {
+    constexpr std::uint32_t version_bit = 1U << 0U;
+    constexpr std::uint32_t connector_bit = 1U << 1U;
+    constexpr std::uint32_t name_bit = 1U << 2U;
+    constexpr std::uint32_t timestamp_ms_bit = 1U << 3U;
+    constexpr std::uint32_t snapshot_bit = 1U << 4U;
+    constexpr std::uint32_t database_bit = 1U << 5U;
+    constexpr std::uint32_t sequence_bit = 1U << 6U;
+    constexpr std::uint32_t timestamp_us_bit = 1U << 7U;
+    constexpr std::uint32_t timestamp_ns_bit = 1U << 8U;
+    constexpr std::uint32_t table_bit = 1U << 9U;
+    constexpr std::uint32_t server_id_bit = 1U << 10U;
+    constexpr std::uint32_t gtid_bit = 1U << 11U;
+    constexpr std::uint32_t file_bit = 1U << 12U;
+    constexpr std::uint32_t position_bit = 1U << 13U;
+    constexpr std::uint32_t row_bit = 1U << 14U;
+    constexpr std::uint32_t thread_bit = 1U << 15U;
+    constexpr std::uint32_t query_bit = 1U << 16U;
+    constexpr std::uint32_t expected = (1U << 17U) - 1U;
+    std::uint32_t seen = 0U;
+    std::string table;
+    bool snapshot_is_false = false;
+    bool identity_matches = true;
+
+    for (auto field : value.get_object()) {
+      const auto name = std::string_view(field.unescaped_key());
+      if (name == "version") {
+        rawCdcMarkField(seen, version_bit, name, "MariaDB source metadata");
+        identity_matches =
+            identity_matches &&
+            rawCdcText(field.value(), "source.version") == connector_version_;
+      } else if (name == "connector") {
+        rawCdcMarkField(seen, connector_bit, name, "MariaDB source metadata");
+        identity_matches =
+            identity_matches &&
+            rawCdcText(field.value(), "source.connector") == "mariadb";
+      } else if (name == "name") {
+        rawCdcMarkField(seen, name_bit, name, "MariaDB source metadata");
+        identity_matches =
+            identity_matches &&
+            rawCdcText(field.value(), "source.name", 256U) == source_id_;
+      } else if (name == "ts_ms") {
+        rawCdcMarkField(seen, timestamp_ms_bit, name,
+                        "MariaDB source metadata");
+        (void)rawCdcUint(field.value(), "source.ts_ms");
+      } else if (name == "snapshot") {
+        rawCdcMarkField(seen, snapshot_bit, name, "MariaDB source metadata");
+        snapshot_is_false = rawCdcSnapshotIsFalse(field.value());
+      } else if (name == "db") {
+        rawCdcMarkField(seen, database_bit, name, "MariaDB source metadata");
+        identity_matches =
+            identity_matches &&
+            rawCdcText(field.value(), "source.db", 64U) == "benchbase";
+      } else if (name == "sequence") {
+        rawCdcMarkField(seen, sequence_bit, name, "MariaDB source metadata");
+        rawCdcRequireNull(field.value(), "MariaDB source.sequence");
+      } else if (name == "ts_us") {
+        rawCdcMarkField(seen, timestamp_us_bit, name,
+                        "MariaDB source metadata");
+        (void)rawCdcUint(field.value(), "source.ts_us");
+      } else if (name == "ts_ns") {
+        rawCdcMarkField(seen, timestamp_ns_bit, name,
+                        "MariaDB source metadata");
+        (void)rawCdcUint(field.value(), "source.ts_ns");
+      } else if (name == "table") {
+        rawCdcMarkField(seen, table_bit, name, "MariaDB source metadata");
+        table = rawCdcString(field.value(), "source.table", 64U);
+      } else if (name == "server_id") {
+        rawCdcMarkField(seen, server_id_bit, name, "MariaDB source metadata");
+        (void)rawCdcUint(field.value(), "source.server_id");
+      } else if (name == "gtid") {
+        rawCdcMarkField(seen, gtid_bit, name, "MariaDB source metadata");
+        rawCdcRequireNullableString(field.value(), "source.gtid");
+      } else if (name == "file") {
+        rawCdcMarkField(seen, file_bit, name, "MariaDB source metadata");
+        (void)rawCdcText(field.value(), "source.file");
+      } else if (name == "pos") {
+        rawCdcMarkField(seen, position_bit, name, "MariaDB source metadata");
+        (void)rawCdcUint(field.value(), "source.pos");
+      } else if (name == "row") {
+        rawCdcMarkField(seen, row_bit, name, "MariaDB source metadata");
+        (void)rawCdcUint(field.value(), "source.row");
+      } else if (name == "thread") {
+        rawCdcMarkField(seen, thread_bit, name, "MariaDB source metadata");
+        rawCdcRequireNullableInteger(field.value(), "source.thread");
+      } else if (name == "query") {
+        rawCdcMarkField(seen, query_bit, name, "MariaDB source metadata");
+        rawCdcRequireNullableString(field.value(), "source.query");
+      } else {
+        rawCdcMalformed("MariaDB source metadata contains unexpected field " +
+                        std::string(name));
+      }
+    }
+    rawCdcRequireFields(seen, expected, expected, "MariaDB source metadata");
+    if (!identity_matches) {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "raw CDC source/version identity is unsupported");
+    }
+    if (!snapshot_is_false) {
+      decodeError(CdcErrorCode::ExternalWriterObserved,
+                  "snapshot row is outside the captured live run");
+    }
+    return canonicalTableFromLeaf(table);
+  }
+
+  struct RawMariaDbTransaction {
+    std::string id;
+    std::uint64_t total_order = 0U;
+    std::uint64_t data_collection_order = 0U;
+  };
+
+  [[nodiscard]] static RawMariaDbTransaction
+  decodeRawMariaDbTransaction(simdjson::ondemand::value value) {
+    constexpr std::uint32_t id_bit = 1U << 0U;
+    constexpr std::uint32_t total_bit = 1U << 1U;
+    constexpr std::uint32_t collection_bit = 1U << 2U;
+    constexpr std::uint32_t expected = id_bit | total_bit | collection_bit;
+    std::uint32_t seen = 0U;
+    RawMariaDbTransaction result;
+    for (auto field : value.get_object()) {
+      const auto name = std::string_view(field.unescaped_key());
+      if (name == "id") {
+        rawCdcMarkField(seen, id_bit, name, "row transaction metadata");
+        result.id = rawCdcString(field.value(), "row transaction.id");
+      } else if (name == "total_order") {
+        rawCdcMarkField(seen, total_bit, name, "row transaction metadata");
+        result.total_order =
+            rawCdcUint(field.value(), "row transaction.total_order");
+      } else if (name == "data_collection_order") {
+        rawCdcMarkField(seen, collection_bit, name, "row transaction metadata");
+        result.data_collection_order =
+            rawCdcUint(field.value(), "row transaction.data_collection_order");
+      } else {
+        rawCdcMalformed("row transaction metadata contains unexpected field " +
+                        std::string(name));
+      }
+    }
+    rawCdcRequireFields(seen, expected, expected, "row transaction metadata");
+    return result;
+  }
+
+  [[nodiscard]] static Json
+  decodeRawMariaDbRowKey(const std::string_view key_json) {
+    auto &state = rawCdcParserState();
+    state.input.assign(key_json);
+    auto document = state.parser.iterate(state.input);
+    auto key = rawCdcMaterialize(document.get_value());
+    if (!key.is_object()) {
+      rawCdcMalformed("row key is not an object");
+    }
+    if (key.empty()) {
+      throw BackendCdcDecodeError(CdcErrorCode::PrimaryKeyImageIncomplete,
+                                  "row key is empty");
+    }
+    return key;
+  }
+
+  [[nodiscard]] BackendCdcRecord
+  decodeRawMariaDbRow(const std::string_view key_json,
+                      const std::string_view envelope_json) const {
+    auto key = decodeRawMariaDbRowKey(key_json);
+
+    constexpr std::uint32_t after_bit = 1U << 0U;
+    constexpr std::uint32_t source_bit = 1U << 1U;
+    constexpr std::uint32_t transaction_bit = 1U << 2U;
+    constexpr std::uint32_t operation_bit = 1U << 3U;
+    constexpr std::uint32_t timestamp_ms_bit = 1U << 4U;
+    constexpr std::uint32_t timestamp_us_bit = 1U << 5U;
+    constexpr std::uint32_t timestamp_ns_bit = 1U << 6U;
+    constexpr std::uint32_t before_bit = 1U << 7U;
+    constexpr std::uint32_t required =
+        after_bit | source_bit | transaction_bit | operation_bit |
+        timestamp_ms_bit | timestamp_us_bit | timestamp_ns_bit;
+    constexpr std::uint32_t allowed = required | before_bit;
+    std::uint32_t seen = 0U;
+    Json after;
+    std::string canonical_table;
+    RawMariaDbTransaction transaction;
+    std::string operation;
+
+    auto &state = rawCdcParserState();
+    state.input.assign(envelope_json);
+    auto document = state.parser.iterate(state.input);
+    for (auto field : document.get_object()) {
+      const auto name = std::string_view(field.unescaped_key());
+      if (name == "after") {
+        rawCdcMarkField(seen, after_bit, name, "MariaDB row envelope");
+        after = rawCdcMaterialize(field.value());
+        if (!after.is_null() && !after.is_object()) {
+          rawCdcMalformed("row final image has an unsupported type");
+        }
+      } else if (name == "before") {
+        rawCdcMarkField(seen, before_bit, name, "MariaDB row envelope");
+        auto value = field.value().value();
+        const auto type = value.type().value();
+        if (type != simdjson::ondemand::json_type::null &&
+            type != simdjson::ondemand::json_type::object) {
+          rawCdcMalformed("row before image has an unsupported type");
+        }
+        rawCdcConsume(value);
+      } else if (name == "source") {
+        rawCdcMarkField(seen, source_bit, name, "MariaDB row envelope");
+        canonical_table = decodeRawMariaDbSource(field.value());
+      } else if (name == "transaction") {
+        rawCdcMarkField(seen, transaction_bit, name, "MariaDB row envelope");
+        transaction = decodeRawMariaDbTransaction(field.value());
+      } else if (name == "op") {
+        rawCdcMarkField(seen, operation_bit, name, "MariaDB row envelope");
+        operation = rawCdcString(field.value(), "row operation", 1U);
+      } else if (name == "ts_ms") {
+        rawCdcMarkField(seen, timestamp_ms_bit, name, "MariaDB row envelope");
+        (void)rawCdcUint(field.value(), "row envelope.ts_ms");
+      } else if (name == "ts_us") {
+        rawCdcMarkField(seen, timestamp_us_bit, name, "MariaDB row envelope");
+        (void)rawCdcUint(field.value(), "row envelope.ts_us");
+      } else if (name == "ts_ns") {
+        rawCdcMarkField(seen, timestamp_ns_bit, name, "MariaDB row envelope");
+        (void)rawCdcUint(field.value(), "row envelope.ts_ns");
+      } else {
+        rawCdcMalformed("MariaDB row envelope contains unexpected field " +
+                        std::string(name));
+      }
+    }
+    rawCdcRequireFields(seen, required, allowed, "MariaDB row envelope");
+    if (operation != "c" && operation != "u" && operation != "d") {
+      decodeError(CdcErrorCode::CdcRecordMalformed,
+                  "row operation is unsupported");
+    }
+
+    BackendCdcRecord result;
+    result.kind = BackendCdcRecordKind::Row;
+    result.diagnostic_connector_id = std::move(transaction.id);
+    result.canonical_table = std::move(canonical_table);
+    result.operation = std::move(operation);
+    result.key = std::move(key);
+    result.after = std::move(after);
+    result.total_order = transaction.total_order;
+    result.data_collection_order = transaction.data_collection_order;
+    return result;
   }
 
   [[nodiscard]] BackendCdcRecord decodeMetadata(const Json &key,
@@ -1331,8 +1966,7 @@ constexpr auto oracle_fact_contract = std::to_array<BackendFactRule>({
     {"supplemental_log_data_min", BackendFactValueRule::Exact, "YES"},
     {"online_redo_log_groups", BackendFactValueRule::Exact, "6"},
     {"online_redo_large_groups", BackendFactValueRule::Exact, "4"},
-    {"online_redo_large_group_bytes", BackendFactValueRule::Exact,
-     "536870912"},
+    {"online_redo_large_group_bytes", BackendFactValueRule::Exact, "536870912"},
     {"table_supplemental_logging", BackendFactValueRule::Exact, "ALL_COLUMNS"},
     {"log_mining_strategy", BackendFactValueRule::Exact, "online_catalog"},
     {"log_mining_batch_size_default", BackendFactValueRule::Exact, "20000"},
@@ -1591,6 +2225,14 @@ const std::array<const BackendAdapter *, 3> registered_adapters = {
 };
 
 } // namespace
+
+BackendCdcRecord
+BackendCdcDecoder::decodeRaw(const std::string_view key_json,
+                             const std::string_view envelope_json) const {
+  auto key = detail::parseStrictJson(key_json);
+  auto envelope = detail::parseStrictJson(envelope_json);
+  return decode(key, envelope);
+}
 
 void BackendAdapter::validateSchemaAttestation(
     const SchemaAttestation &attestation,
