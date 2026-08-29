@@ -64,6 +64,7 @@ DRIVER
 cp "$TEST_ROOT/drivers/template.sh" "$TEST_ROOT/drivers/mariadb.sh"
 cp "$TEST_ROOT/drivers/template.sh" "$TEST_ROOT/drivers/yugabytedb_ysql.sh"
 cp "$TEST_ROOT/drivers/template.sh" "$TEST_ROOT/drivers/oracle.sh"
+cp "$TEST_ROOT/drivers/template.sh" "$TEST_ROOT/drivers/oceanbase_mysql.sh"
 
 run_backend() {
   local backend=$1 source_id=$2 example=$3 output=$4
@@ -117,9 +118,13 @@ run_backend yugabytedb_ysql yugabytedb-ysql-main \
 run_backend oracle oracle-main \
   "$ROOT/protocol/examples/backends/oracle-schema-attestation.json" \
   "$TEST_ROOT/oracle.events"
+run_backend oceanbase_mysql oceanbase-mysql-main \
+  "$ROOT/protocol/examples/backends/oceanbase-mysql-schema-attestation.json" \
+  "$TEST_ROOT/oceanbase.events"
 
 diff -u "$TEST_ROOT/mariadb.events" "$TEST_ROOT/yugabyte.events"
 diff -u "$TEST_ROOT/mariadb.events" "$TEST_ROOT/oracle.events"
+diff -u "$TEST_ROOT/mariadb.events" "$TEST_ROOT/oceanbase.events"
 
 export ROOT
 MOCK_FAILURE_EXAMPLE="$ROOT/protocol/examples/schema-attestation-startup.json"

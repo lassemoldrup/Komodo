@@ -95,8 +95,9 @@ void checkRegistry() {
   BLACKBOX_CHECK(
       blackbox::toString(MonitorErrorCode::SessionContractMismatch) ==
       "SESSION_CONTRACT_MISMATCH");
-  BLACKBOX_CHECK(BackendAdapterRegistry::adapters().size() == 3U);
+  BLACKBOX_CHECK(BackendAdapterRegistry::adapters().size() == 4U);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("mariadb") != nullptr);
+  BLACKBOX_CHECK(BackendAdapterRegistry::find("oceanbase_mysql") != nullptr);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("yugabytedb_ysql") != nullptr);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("oracle") != nullptr);
   BLACKBOX_CHECK(BackendAdapterRegistry::find("unknown") == nullptr);
@@ -279,6 +280,7 @@ void checkSyntheticCatalogSelectionAndFailurePropagation() {
 
 int runBackendAdapterTests() {
   checkSharedContract("mariadb");
+  checkSharedContract("oceanbase_mysql");
   checkSharedContract("yugabytedb_ysql");
   checkSharedContract("oracle");
   checkRegistry();

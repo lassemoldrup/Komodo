@@ -1,0 +1,14 @@
+FROM db-monitoring/oceanbase-obbinlog-contract:4.4.2.1-obbinlog4.3.6.4
+
+RUN rpm -ivh --replacefiles /app/obbinlog-ce.rpm \
+    && rm -f /app/obbinlog-ce.rpm
+
+COPY source/initialize-before-binlog.sh /app/initialize-before-binlog.sh
+
+RUN chmod 0555 /app/initialize-before-binlog.sh \
+    && sed -i 's#rpm_files=$(ls /app/obbinlog-\*.rpm 2> /dev/null)#rpm_files=$(ls /app/obbinlog-*.rpm 2> /dev/null || true)#' \
+        /app/start_services.sh \
+    && sed -i '/# Step 16: Create Binlog for Tenant/i /app/initialize-before-binlog.sh' \
+        /app/start_services.sh
+
+LABEL db-monitoring.diagnostic="oceanbase-mysql-capability-source"

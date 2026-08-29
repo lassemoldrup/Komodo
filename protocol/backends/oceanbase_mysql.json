@@ -1,0 +1,92 @@
+{
+  "backend": "oceanbase_mysql",
+  "accepted_database_types": ["MYSQL"],
+  "physical_namespace": {
+    "database": "benchbase",
+    "schema": "benchbase",
+    "search_path": null,
+    "canonical_schema": "benchbase",
+    "identifier_case": "lower"
+  },
+  "session_contract": {
+    "declared_isolations": ["READ_COMMITTED", "REPEATABLE_READ"],
+    "configure_in_autocommit": true,
+    "configuration_statements": [
+      "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
+      "SET SESSION time_zone='+00:00'",
+      "SET SESSION ob_read_consistency='STRONG'",
+      "SET SESSION sql_mode='STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'"
+    ],
+    "required_observations": [
+      {"name": "character_set_client", "expected_value": "utf8mb4"},
+      {"name": "character_set_connection", "expected_value": "utf8mb4"},
+      {"name": "character_set_results", "expected_value": "utf8mb4"},
+      {"name": "collation_connection", "expected_value": "utf8mb4_bin"},
+      {"name": "time_zone", "expected_value": "+00:00"},
+      {"name": "sql_mode", "expected_value": "STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"},
+      {"name": "transaction_isolation", "expected_value": "REPEATABLE_READ"},
+      {"name": "ob_read_consistency", "expected_value": "STRONG"},
+      {"name": "snapshot_isolation", "expected_value": "true"}
+    ]
+  },
+  "normalized_capabilities": {
+    "transaction_framing": "contiguous_begin_rows_end",
+    "commit_order": "single_stream_completed_transaction_order",
+    "complete_final_writes": true,
+    "marker_last": true,
+    "connector_startup_schema_evidence": "not_available",
+    "char_read_semantics": "pad_to_declared_length"
+  },
+  "connector_contract": {
+    "connector_class": "io.debezium.connector.mysql.MySqlConnector",
+    "source_connector": "mysql",
+    "source_version": "3.6.1.Final",
+    "envelope_profile": "oceanbase_mysql_debezium_3_6_1",
+    "transaction_metadata": true,
+    "tasks": 1,
+    "redis_stream": "cdc"
+  },
+  "attestation_fact_contract": [
+    {"name": "database_name", "value_rule": "exact", "expected_value": "benchbase"},
+    {"name": "schema_name", "value_rule": "exact", "expected_value": "benchbase"},
+    {"name": "server_version", "value_rule": "exact", "expected_value": "4.4.2.1"},
+    {"name": "server_revision", "value_rule": "exact", "expected_value": "101000022026050611-8cf64ed50606966fd5c29f47265cf557d97ea776"},
+    {"name": "mysql_compatibility_version", "value_rule": "exact", "expected_value": "5.7.25-OceanBase_CE-v4.4.2.1"},
+    {"name": "database_character_set", "value_rule": "exact", "expected_value": "utf8mb4"},
+    {"name": "database_collation", "value_rule": "exact", "expected_value": "utf8mb4_bin"},
+    {"name": "application_table_engine", "value_rule": "exact", "expected_value": "InnoDB"},
+    {"name": "application_table_character_set", "value_rule": "exact", "expected_value": "utf8mb4"},
+    {"name": "application_table_collation", "value_rule": "exact", "expected_value": "utf8mb4_bin"},
+    {"name": "server_character_set", "value_rule": "exact", "expected_value": "utf8mb4"},
+    {"name": "server_collation", "value_rule": "exact", "expected_value": "utf8mb4_bin"},
+    {"name": "server_time_zone", "value_rule": "exact", "expected_value": "+00:00"},
+    {"name": "server_sql_mode", "value_rule": "exact", "expected_value": "STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"},
+    {"name": "server_transaction_isolation", "value_rule": "exact", "expected_value": "REPEATABLE_READ"},
+    {"name": "server_snapshot_isolation", "value_rule": "exact", "expected_value": "true"},
+    {"name": "session_transaction_isolation", "value_rule": "exact", "expected_value": "REPEATABLE_READ"},
+    {"name": "session_read_consistency", "value_rule": "exact", "expected_value": "STRONG"},
+    {"name": "session_time_zone", "value_rule": "exact", "expected_value": "+00:00"},
+    {"name": "binlog_row_image", "value_rule": "exact", "expected_value": "FULL"},
+    {"name": "binlog_format", "value_rule": "exact", "expected_value": "ROW"},
+    {"name": "gtid_mode", "value_rule": "exact", "expected_value": "ON"},
+    {"name": "binlog_checksum", "value_rule": "exact", "expected_value": "CRC32"},
+    {"name": "odp_version", "value_rule": "exact", "expected_value": "4.3.6.1"},
+    {"name": "obbinlog_version", "value_rule": "exact", "expected_value": "4.3.6.4"},
+    {"name": "binlog_instances", "value_rule": "exact", "expected_value": "1"},
+    {"name": "binlog_subscribers", "value_rule": "exact", "expected_value": "1"},
+    {"name": "failover_enabled", "value_rule": "exact", "expected_value": "false"},
+    {"name": "physical_capture_profile", "value_rule": "exact", "expected_value": "oceanbase_obbinlog_full_row_v1"},
+    {"name": "connector_class", "value_rule": "exact", "expected_value": "io.debezium.connector.mysql.MySqlConnector"},
+    {"name": "connector_source", "value_rule": "exact", "expected_value": "mysql"},
+    {"name": "connector_version", "value_rule": "exact", "expected_value": "3.6.1.Final"},
+    {"name": "connector_sha256", "value_rule": "exact", "expected_value": "db56640086983fa838aaedffd7a2fc9887932fc028dbbfef11f62fc49248d5a2"},
+    {"name": "connector_jdbc_sha256", "value_rule": "exact", "expected_value": "66df1d453789dc8cb759a7dc17f58646893bf28483f262328650f170472a6ead"},
+    {"name": "benchbase_jdbc_sha256", "value_rule": "exact", "expected_value": "783b1f07de6205548d8caae62dea4d51156fffe6056f8bae172b3475cccf6864"},
+    {"name": "connector_tasks", "value_rule": "exact", "expected_value": "1"},
+    {"name": "redis_stream", "value_rule": "exact", "expected_value": "cdc"},
+    {"name": "database_image_digest", "value_rule": "sha256"},
+    {"name": "capture_table_roster_sha256", "value_rule": "sha256"},
+    {"name": "table_definition_sha256", "value_rule": "sha256"},
+    {"name": "dedicated_privileges_sha256", "value_rule": "sha256"}
+  ]
+}

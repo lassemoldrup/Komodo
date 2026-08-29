@@ -1,0 +1,74 @@
+name: oceanbase-mysql-connector-contract
+
+services:
+  oceanbase_source:
+    image: db-monitoring/oceanbase-mysql-capability-source:4.4.2.1-obbinlog4.3.6.4
+    pull_policy: never
+    container_name: oceanbase-mysql-capability-source
+    hostname: oceanbase-mysql-capability-source
+    cap_add: [SYS_NICE]
+    ulimits:
+      nofile: 65535
+      nproc: 65535
+    environment:
+      CLUSTER_NAME: oceanbase_contract
+      TENANT_NAME: blackbox
+      PASSWORD: ${OCEANBASE_MYSQL_ROOT_PASSWORD:-OceanBaseContract_2026}
+      DATAFILE_SIZE: 5G
+      LOG_DISK_SIZE: 4G
+      BLACKBOX_OCEANBASE_MYSQL_CAPTURE_TABLES: benchbase.usertable,benchbase.checker_run_fence,benchbase.session_txn
+    volumes:
+      - ./setup:/oceanbase-mysql-contract/setup:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          test -f /tmp/oceanbase-mysql-schema-before-binlog.complete
+          && obclient -A -c -h127.0.0.1 -P2983
+          -e "SHOW BINLOG SERVER FOR TENANT \`oceanbase_contract\`.\`blackbox\`;"
+          | grep -Eq 'blackbox.*8100.*OK'
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 240s
+    networks: [oceanbase_mysql_contract]
+
+  redis:
+    image: redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+    container_name: oceanbase-mysql-capability-redis
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - "268435456"
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [oceanbase_mysql_contract]
+
+  debezium_server:
+    image: quay.io/debezium/server@sha256:11124f362db7c99096ead22237374075f42737c68487cb790e69bdc4ce2e817f
+    container_name: oceanbase-mysql-capability-debezium
+    depends_on:
+      oceanbase_source:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      OCEANBASE_MYSQL_CONNECTOR_PASSWORD: ${OCEANBASE_MYSQL_CONNECTOR_PASSWORD:-OceanBaseConnector_2026!}
+    volumes:
+      - ./application.properties:/debezium/config/application.properties:ro
+    tmpfs:
+      - /debezium/data:rw,size=64m
+    networks: [oceanbase_mysql_contract]
+
+networks:
+  oceanbase_mysql_contract:
+    name: oceanbase-mysql-capability

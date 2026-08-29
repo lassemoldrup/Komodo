@@ -33,6 +33,7 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
     def test_ycsb_cells_declare_all_tunable_workload_parameters(self) -> None:
         for name in (
             "mariadb_three_benchmark_performance_matrix.json",
+            "oceanbase_mysql_three_benchmark_performance_matrix.json",
             "oracle_three_benchmark_performance_matrix.json",
             "yugabytedb_three_benchmark_performance_matrix.json",
         ):
@@ -266,6 +267,7 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
             "mariadb",
             "yugabytedb_ysql",
             "oracle",
+            "oceanbase_mysql",
             "smallbank",
             "Amalgamate",
             "SendPayment",

@@ -25,6 +25,9 @@ class BackendSqlRendererTest(unittest.TestCase):
             TOOLS / "backend_sql_renderers"
         )
         self.ycsb = json.loads((ROOT / "protocol/adapters/ycsb.json").read_text())
+        self.smallbank = json.loads(
+            (ROOT / "protocol/adapters/smallbank.json").read_text()
+        )
         self.tpcc = json.loads((ROOT / "protocol/adapters/tpcc.json").read_text())
 
     def test_registered_backends_render_same_logical_ycsb_plan(self) -> None:
@@ -35,16 +38,36 @@ class BackendSqlRendererTest(unittest.TestCase):
         yugabyte = self.registry.require("yugabytedb_ysql").bootstrap_queries(
             self.ycsb, plan
         )[0]["sql"]
+        oceanbase = self.registry.require("oceanbase_mysql").bootstrap_queries(
+            self.ycsb, plan
+        )[0]["sql"]
         self.assertIn("TO_BASE64", mariadb)
         self.assertIn("convert_to", yugabyte)
         self.assertIn("replace(replace(encode", yugabyte)
         self.assertIn('FROM "benchbase"."usertable"', yugabyte)
         self.assertNotIn("TO_BASE64", yugabyte)
+        self.assertEqual(mariadb, oceanbase)
         logical_source = (
             TOOLS / "bootstrap_adapters" / "ycsb.py"
         ).read_text(encoding="utf-8")
         self.assertNotIn("TO_BASE64", logical_source)
         self.assertNotIn("`", logical_source)
+
+    def test_oceanbase_emits_contract_ordered_json_text(self) -> None:
+        from bootstrap_adapters.smallbank import SmallBankBootstrapAdapter
+
+        plan = SmallBankBootstrapAdapter().build_queries(self.smallbank)
+        queries = self.registry.require("oceanbase_mysql").bootstrap_queries(
+            self.smallbank, plan
+        )
+        self.assertEqual(len(queries), 3)
+        for query in queries:
+            self.assertIn("CONCAT('{\"table\":'", query["sql"])
+            self.assertIn("',\"row\":'", query["sql"])
+            self.assertNotIn("JSON_OBJECT", query["sql"])
+        accounts = queries[0]["sql"]
+        self.assertLess(accounts.index("{\"custid\":"), accounts.index(",\"name\":"))
+        self.assertIn("JSON_QUOTE(`name`)", accounts)
 
     def test_yugabyte_loader_and_tpcc_scan_have_no_mysql_syntax(self) -> None:
         from bootstrap_adapters.tpcc import TpccBootstrapAdapter

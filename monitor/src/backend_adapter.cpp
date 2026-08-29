@@ -836,6 +836,7 @@ class PinnedEnvelopeDecoder final : public BackendCdcDecoder {
 public:
   enum class Profile {
     MariaDb,
+    OceanBaseMysql,
     YugabytePgoutput,
     OracleLogMiner,
   };
@@ -1538,13 +1539,13 @@ private:
   }
 
   [[nodiscard]] std::string validateSource(const Json &source) const {
-    if (profile_ == Profile::MariaDb) {
+    if (profile_ == Profile::MariaDb || profile_ == Profile::OceanBaseMysql) {
       requireExactKeys(source,
                        {"version", "connector", "name", "ts_ms", "snapshot",
                         "db", "sequence", "ts_us", "ts_ns", "table",
                         "server_id", "gtid", "file", "pos", "row", "thread",
                         "query"},
-                       "MariaDB source metadata");
+                       "MySQL-compatible source metadata");
     } else if (profile_ == Profile::YugabytePgoutput) {
       requireExactKeys(source,
                        {"version", "connector", "name", "ts_ms", "snapshot",
@@ -1572,10 +1573,11 @@ private:
         stringValue(member(source, "db", "source"), "source.db", 64U);
     const auto expected_database =
         profile_ == Profile::OracleLogMiner ? "FREEPDB1" : "benchbase";
-    const auto expected_connector = profile_ == Profile::MariaDb ? "mariadb"
-                                    : profile_ == Profile::OracleLogMiner
-                                        ? "oracle"
-                                        : "postgresql";
+    const auto expected_connector =
+        profile_ == Profile::MariaDb          ? "mariadb"
+        : profile_ == Profile::OceanBaseMysql ? "mysql"
+        : profile_ == Profile::OracleLogMiner ? "oracle"
+                                              : "postgresql";
     if (version != connector_version_ || source_name != source_id_ ||
         database != expected_database || connector != expected_connector) {
       decodeError(CdcErrorCode::CdcRecordMalformed,
@@ -1588,7 +1590,7 @@ private:
     (void)uintValue(member(source, "ts_ms", "source"), "source.ts_ms");
     const auto table =
         stringValue(member(source, "table", "source"), "source.table", 64U);
-    if (profile_ == Profile::MariaDb) {
+    if (profile_ == Profile::MariaDb || profile_ == Profile::OceanBaseMysql) {
       if (!member(source, "sequence", "source").is_null()) {
         decodeError(CdcErrorCode::CdcRecordMalformed,
                     "MariaDB source.sequence is unexpectedly present");
@@ -1904,6 +1906,62 @@ constexpr auto mariadb_fact_contract = std::to_array<BackendFactRule>({
     {"dedicated_privileges_sha256", BackendFactValueRule::Sha256, {}},
 });
 
+constexpr auto oceanbase_mysql_fact_contract = std::to_array<BackendFactRule>({
+    {"database_name", BackendFactValueRule::Exact, "benchbase"},
+    {"schema_name", BackendFactValueRule::Exact, "benchbase"},
+    {"server_version", BackendFactValueRule::Exact, "4.4.2.1"},
+    {"server_revision", BackendFactValueRule::Exact,
+     "101000022026050611-8cf64ed50606966fd5c29f47265cf557d97ea776"},
+    {"mysql_compatibility_version", BackendFactValueRule::Exact,
+     "5.7.25-OceanBase_CE-v4.4.2.1"},
+    {"database_character_set", BackendFactValueRule::Exact, "utf8mb4"},
+    {"database_collation", BackendFactValueRule::Exact, "utf8mb4_bin"},
+    {"application_table_engine", BackendFactValueRule::Exact, "InnoDB"},
+    {"application_table_character_set", BackendFactValueRule::Exact,
+     "utf8mb4"},
+    {"application_table_collation", BackendFactValueRule::Exact,
+     "utf8mb4_bin"},
+    {"server_character_set", BackendFactValueRule::Exact, "utf8mb4"},
+    {"server_collation", BackendFactValueRule::Exact, "utf8mb4_bin"},
+    {"server_time_zone", BackendFactValueRule::Exact, "+00:00"},
+    {"server_sql_mode", BackendFactValueRule::Exact,
+     "STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"},
+    {"server_transaction_isolation", BackendFactValueRule::Exact,
+     "REPEATABLE_READ"},
+    {"server_snapshot_isolation", BackendFactValueRule::Exact, "true"},
+    {"session_transaction_isolation", BackendFactValueRule::Exact,
+     "REPEATABLE_READ"},
+    {"session_read_consistency", BackendFactValueRule::Exact, "STRONG"},
+    {"session_time_zone", BackendFactValueRule::Exact, "+00:00"},
+    {"binlog_row_image", BackendFactValueRule::Exact, "FULL"},
+    {"binlog_format", BackendFactValueRule::Exact, "ROW"},
+    {"gtid_mode", BackendFactValueRule::Exact, "ON"},
+    {"binlog_checksum", BackendFactValueRule::Exact, "CRC32"},
+    {"odp_version", BackendFactValueRule::Exact, "4.3.6.1"},
+    {"obbinlog_version", BackendFactValueRule::Exact, "4.3.6.4"},
+    {"binlog_instances", BackendFactValueRule::Exact, "1"},
+    {"binlog_subscribers", BackendFactValueRule::Exact, "1"},
+    {"failover_enabled", BackendFactValueRule::Exact, "false"},
+    {"physical_capture_profile", BackendFactValueRule::Exact,
+     "oceanbase_obbinlog_full_row_v1"},
+    {"connector_class", BackendFactValueRule::Exact,
+     "io.debezium.connector.mysql.MySqlConnector"},
+    {"connector_source", BackendFactValueRule::Exact, "mysql"},
+    {"connector_version", BackendFactValueRule::Exact, "3.6.1.Final"},
+    {"connector_sha256", BackendFactValueRule::Exact,
+     "db56640086983fa838aaedffd7a2fc9887932fc028dbbfef11f62fc49248d5a2"},
+    {"connector_jdbc_sha256", BackendFactValueRule::Exact,
+     "66df1d453789dc8cb759a7dc17f58646893bf28483f262328650f170472a6ead"},
+    {"benchbase_jdbc_sha256", BackendFactValueRule::Exact,
+     "783b1f07de6205548d8caae62dea4d51156fffe6056f8bae172b3475cccf6864"},
+    {"connector_tasks", BackendFactValueRule::Exact, "1"},
+    {"redis_stream", BackendFactValueRule::Exact, "cdc"},
+    {"database_image_digest", BackendFactValueRule::Sha256, {}},
+    {"capture_table_roster_sha256", BackendFactValueRule::Sha256, {}},
+    {"table_definition_sha256", BackendFactValueRule::Sha256, {}},
+    {"dedicated_privileges_sha256", BackendFactValueRule::Sha256, {}},
+});
+
 constexpr auto yugabyte_fact_contract = std::to_array<BackendFactRule>({
     {"database_name", BackendFactValueRule::Exact, "benchbase"},
     {"schema_name", BackendFactValueRule::Exact, "benchbase"},
@@ -2081,7 +2139,8 @@ public:
         .character_set = "UTF8",
         .collation = "C",
         .time_zone = "UTC",
-        .sql_mode = {},
+        .sql_mode =
+            "STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION",
         .transaction_isolation = "REPEATABLE_READ",
         .snapshot_isolation = true,
     };
@@ -2096,7 +2155,8 @@ public:
         .character_set_results = "UTF8",
         .collation_connection = "C",
         .time_zone = "UTC",
-        .sql_mode = {},
+        .sql_mode =
+            "STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION",
         .transaction_isolation = "REPEATABLE_READ",
         .snapshot_isolation = true,
     };
@@ -2137,6 +2197,81 @@ public:
   createCdcDecoder(BackendCdcDecoderConfig config) const override {
     return std::make_unique<PinnedEnvelopeDecoder>(
         std::move(config), PinnedEnvelopeDecoder::Profile::YugabytePgoutput);
+  }
+};
+
+class OceanBaseMysqlBackendAdapter final : public BackendAdapter {
+public:
+  [[nodiscard]] std::string_view name() const noexcept override {
+    return "oceanbase_mysql";
+  }
+
+  [[nodiscard]] std::string_view connectorVersion() const noexcept override {
+    return "3.6.1.Final";
+  }
+
+  [[nodiscard]] BackendServerDefaults serverDefaults() const noexcept override {
+    return BackendServerDefaults{
+        .character_set = "utf8mb4",
+        .collation = "utf8mb4_bin",
+        .time_zone = "+00:00",
+        .sql_mode = {},
+        .transaction_isolation = "REPEATABLE_READ",
+        .snapshot_isolation = true,
+    };
+  }
+
+  [[nodiscard]] BackendSessionRequirements
+  sessionRequirements() const noexcept override {
+    return BackendSessionRequirements{
+        .set_names = "SET NAMES utf8mb4 COLLATE utf8mb4_bin",
+        .character_set_client = "utf8mb4",
+        .character_set_connection = "utf8mb4",
+        .character_set_results = "utf8mb4",
+        .collation_connection = "utf8mb4_bin",
+        .time_zone = "+00:00",
+        .sql_mode = {},
+        .transaction_isolation = "REPEATABLE_READ",
+        .snapshot_isolation = true,
+    };
+  }
+
+  [[nodiscard]] BackendDatabaseDefaults
+  databaseDefaults() const noexcept override {
+    return BackendDatabaseDefaults{.character_set = "utf8mb4",
+                                   .collation = "utf8mb4_bin"};
+  }
+
+  [[nodiscard]] ApplicationTableRequirements
+  applicationTableRequirements() const noexcept override {
+    return ApplicationTableRequirements{
+        .engine = "InnoDB",
+        .character_set = "utf8mb4",
+        .collation = "utf8mb4_bin",
+        .char_read_semantics = "pad_to_declared_length",
+    };
+  }
+
+  [[nodiscard]] BackendNormalizedCapabilities
+  normalizedCapabilities() const noexcept override {
+    return BackendNormalizedCapabilities{.connector_startup_schema_evidence =
+                                             false};
+  }
+
+  [[nodiscard]] std::span<const BackendFactRule>
+  attestationFactContract() const noexcept override {
+    return oceanbase_mysql_fact_contract;
+  }
+
+  [[nodiscard]] std::unique_ptr<CdcStartupSchemaDecoder>
+  createCdcStartupSchemaDecoder(CdcStartupSchemaConfig) const override {
+    return std::make_unique<CatalogOnlyStartupSchemaDecoder>();
+  }
+
+  [[nodiscard]] std::unique_ptr<BackendCdcDecoder>
+  createCdcDecoder(BackendCdcDecoderConfig config) const override {
+    return std::make_unique<PinnedEnvelopeDecoder>(
+        std::move(config), PinnedEnvelopeDecoder::Profile::OceanBaseMysql);
   }
 };
 
@@ -2216,10 +2351,12 @@ public:
 };
 
 const MariaDbBackendAdapter mariadb_adapter;
+const OceanBaseMysqlBackendAdapter oceanbase_mysql_adapter;
 const YugabyteYsqlBackendAdapter yugabyte_ysql_adapter;
 const OracleBackendAdapter oracle_adapter;
-const std::array<const BackendAdapter *, 3> registered_adapters = {
+const std::array<const BackendAdapter *, 4> registered_adapters = {
     &mariadb_adapter,
+    &oceanbase_mysql_adapter,
     &yugabyte_ysql_adapter,
     &oracle_adapter,
 };

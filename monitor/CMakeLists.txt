@@ -242,6 +242,14 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   set_tests_properties(blackbox_oracle_smallbank_fixture_checksum PROPERTIES
     PASS_REGULAR_EXPRESSION "59234a0dd2c115dde046ad3531160de5f8d094532403e9dbc947fced25e23f00"
   )
+  add_test(
+    NAME blackbox_oceanbase_mysql_ycsb_fixture_checksum
+    COMMAND ${CMAKE_COMMAND} -E sha256sum
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/oceanbase_mysql_debezium_3_6_1_ycsb.json
+  )
+  set_tests_properties(blackbox_oceanbase_mysql_ycsb_fixture_checksum PROPERTIES
+    PASS_REGULAR_EXPRESSION "3b0b9ac4f24c047e20530b6f9fddcb0875762872b435889e5e9e10c47f0b870c"
+  )
   set_tests_properties(blackbox_yugabytedb_lifecycle_fixture_checksum PROPERTIES
     PASS_REGULAR_EXPRESSION "afd4da9f220ca46cd6a358bea7c4620773c272efccfaea5fe1bbcaae270b5735"
   )
@@ -340,5 +348,16 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
   )
   set_tests_properties(blackbox_oracle_smallbank_codec_replay PROPERTIES
     PASS_REGULAR_EXPRESSION "\"completed_transactions\": 2"
+  )
+  add_test(
+    NAME blackbox_oceanbase_mysql_ycsb_codec_replay
+    COMMAND blackbox_cdc_codec_replay
+      --input ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/oceanbase_mysql_debezium_3_6_1_ycsb.json
+      --backend oceanbase_mysql
+      --benchmark ycsb
+      --backend-source-id oceanbase_mysql_main
+  )
+  set_tests_properties(blackbox_oceanbase_mysql_ycsb_codec_replay PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"completed_transactions\": 1"
   )
 endif()

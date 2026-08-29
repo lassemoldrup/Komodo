@@ -1,0 +1,101 @@
+{
+  "contract": "oceanbase_mysql_official_obbinlog_to_stock_debezium_to_redis",
+  "recorded_at_utc": "2026-08-29T10:40:00Z",
+  "platform": "linux/amd64",
+  "artifacts": {
+    "oceanbase": {
+      "edition": "Community Edition",
+      "version": "4.4.2.1",
+      "revision": "101000022026050611-8cf64ed50606966fd5c29f47265cf557d97ea776",
+      "candidate_image": "oceanbase/oceanbase-ce:4.4.2.1-101000022026050611",
+      "candidate_image_amd64_manifest_digest": "sha256:46eefcf1275beae76947aac8f96c47efb745f6902d584de3c26465e4a9f113ae",
+      "rpm": "oceanbase-ce-4.4.2.1-101000022026050611.el8.x86_64.rpm",
+      "rpm_bytes": 171931432,
+      "rpm_sha256": "e97de7f4ff12bac8017467167eb6f5a110dbb82751755d98a243e637f6eecc6d",
+      "libs_rpm": "oceanbase-ce-libs-4.4.2.1-101000022026050611.el8.x86_64.rpm",
+      "libs_rpm_bytes": 10656,
+      "libs_rpm_sha256": "bd52999c7120c2c36220a870382f823385321c35267c0b89ab3420e26c353b07",
+      "observer_binary_sha256": "cb0e6271e2f4ba7349ec7ce0a41c49d97bbe472f0c31c543f5a9e0eed8ed3e87"
+    },
+    "odp": {
+      "version": "4.3.6.1",
+      "revision": "1-local-1e5ef0a0a5c1ebdfd6c877cbbb2fbc778744ced0",
+      "rpm": "obproxy-ce-4.3.6.1-2.el8.x86_64.rpm",
+      "rpm_bytes": 30642388,
+      "rpm_sha256": "b1225e4a90ce75aceeb7b2ddb95e4d681fba490a65572f40694bfa8348315752",
+      "binary_sha256": "e9327120febd87dd423d60a1ee5e887c1fd3610e7a4c8d36f116a653c87cd495"
+    },
+    "obbinlog": {
+      "version": "4.3.6.4",
+      "revision": "a945ea7d06b06b8e346548680727e4e8da1259c9",
+      "rpm": "obbinlog-ce-4.3.6.4-100000292026060410.el8.x86_64.rpm",
+      "rpm_bytes": 1029359508,
+      "rpm_sha256": "ecab5d0a83d6d28d1d61783557f8b5529af02ba6fcf8a8700cf0a02f20022b74",
+      "logproxy_binary_sha256": "cf1880aeeeeb72a0f811506fd7589192c3c1dffcc882cf96bd21f8484299dd28",
+      "binlog_instance_binary_sha256": "c3458baffe804814a5ee8007a1f7d7f35929a91d525a0f0b7b1522fbf9d1eede"
+    },
+    "diagnostic_source_sidecar": {
+      "image": "db-monitoring/oceanbase-obbinlog-contract:4.4.2.1-obbinlog4.3.6.4",
+      "local_image_id": "sha256:26eef9c42eeab6f49ae9035aa9cb75317f42839e03ef46ee667293fbf7336661",
+      "startup_script_sha256": "7160cb2265e7599ae213f95545d25b44d2dd776d14b3597b326bd0fe1edef6f2",
+      "build_configuration_script_sha256": "39d0e79f23aa71d793bc76afcfab3506d4e06ed973303593943acfed3bc628ca"
+    },
+    "capability_source_image": {
+      "image": "db-monitoring/oceanbase-mysql-capability-source:4.4.2.1-obbinlog4.3.6.4",
+      "local_image_id": "sha256:0a46bf5d1cd19bf74ed8f1da746cd140971ddb28b03a2ecf8cd6f159e01ade0a",
+      "rebuilt_at_utc": "2026-08-29T16:24:14Z",
+      "dockerfile_sha256": "0c08c24731fa475f027d3666dc4ea7b77a04bf3cd4b19d399472349d27247efc",
+      "pre_binlog_initializer_sha256": "9d1583ad5858e773150e86986aeaffcefbe935e5dd898950fd19d8251e8a3493"
+    },
+    "debezium_server": {
+      "version": "3.6.1.Final",
+      "image": "quay.io/debezium/server@sha256:11124f362db7c99096ead22237374075f42737c68487cb790e69bdc4ce2e817f",
+      "manifest_digest": "sha256:11124f362db7c99096ead22237374075f42737c68487cb790e69bdc4ce2e817f",
+      "local_image_id": "sha256:8592a8cefd33e94221cce3ba1b0681c1747fc1f6b694271983c2a4d3bd1043ee",
+      "mysql_connector_jar": "debezium-connector-mysql-3.6.1.Final.jar",
+      "mysql_connector_jar_sha256": "db56640086983fa838aaedffd7a2fc9887932fc028dbbfef11f62fc49248d5a2",
+      "mysql_binlog_client_jar": "mysql-binlog-connector-java-0.41.0.jar",
+      "mysql_binlog_client_jar_sha256": "a4bd7e9e24269fdfbbdfcd692f100878dc2539b5f331276c7700fdde44341364",
+      "mysql_jdbc_jar": "mysql-connector-j-9.6.0.jar",
+      "mysql_jdbc_jar_sha256": "66df1d453789dc8cb759a7dc17f58646893bf28483f262328650f170472a6ead",
+      "redis_sink_jar": "debezium-server-redis-3.6.1.Final.jar",
+      "redis_sink_jar_sha256": "4dc44fd87e4cb80aef3b0066af9bd78623e8c83ea7de0bc8123bb8c413f06786",
+      "java_runtime": "OpenJDK 21.0.12.1+1-LTS"
+    },
+    "oceanbase_connector_j": {
+      "coordinates": "com.oceanbase:oceanbase-client:2.4.18",
+      "bytes": 1174658,
+      "sha256": "783b1f07de6205548d8caae62dea4d51156fffe6056f8bae172b3475cccf6864",
+      "used_by_contract_stack": false
+    },
+    "redis": {
+      "version": "7.4.10",
+      "image": "redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
+      "manifest_digest": "sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf",
+      "local_image_id": "sha256:2a51817f79255c8b69f86a974459c2e0359aff81417d80158f2b9e541e6f4b33"
+    }
+  },
+  "source_profile": {
+    "cluster": "oceanbase_contract",
+    "tenant": "blackbox",
+    "compatibility_mode": "MYSQL",
+    "business_database": "benchbase",
+    "odp_connector_port": 2883,
+    "binlog_management_port": 2983,
+    "binlog_instance_port": 8100,
+    "binlog_instances": 1,
+    "binlog_subscribers": 1,
+    "failover": false
+  },
+  "connector_profile": {
+    "connector_class": "io.debezium.connector.mysql.MySqlConnector",
+    "tasks": 1,
+    "database_endpoint": "odp:2883",
+    "database_user": "blackbox_connector@blackbox",
+    "snapshot_mode": "no_data",
+    "snapshot_locking_mode": "none",
+    "ignore_gtid_on_recovery": true,
+    "transaction_metadata": true,
+    "redis_stream": "cdc"
+  }
+}
