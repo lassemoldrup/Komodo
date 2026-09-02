@@ -32,6 +32,8 @@ MONITOR_PENDING_CLIENT_BYTES=268435456
 MONITOR_RETAINED_IDENTITY_BYTES=2147483648
 MONITOR_CHECKER_STATE_BYTES=536870912
 HIGH_WATER_THRESHOLD=70
+EVIDENCE_RETENTION=compact
+RETAINED_EVIDENCE=compact
 HEADLINE_TRANSACTION_TYPE=
 HEADLINE_RATE_LABEL=
 PARAMETERS=()
@@ -68,6 +70,7 @@ while (( $# > 0 )); do
     --monitor-retained-identity-bytes) MONITOR_RETAINED_IDENTITY_BYTES=$2; shift 2 ;;
     --monitor-checker-state-bytes) MONITOR_CHECKER_STATE_BYTES=$2; shift 2 ;;
     --high-water-threshold-percent) HIGH_WATER_THRESHOLD=$2; shift 2 ;;
+    --evidence-retention) EVIDENCE_RETENTION=$2; shift 2 ;;
     --headline-transaction-type) HEADLINE_TRANSACTION_TYPE=$2; shift 2 ;;
     --headline-rate-label) HEADLINE_RATE_LABEL=$2; shift 2 ;;
     *) printf 'unknown registered performance-cell argument: %s\n' "$1" >&2; exit 2 ;;
@@ -89,6 +92,10 @@ for value in "$REPETITION" "$LOADER_TIMEOUT" "$WORKLOAD_TIMEOUT" "$STACK_TIMEOUT
 done
 [[ $RESOURCE_INTERVAL =~ ^[0-9]+([.][0-9]+)?$ ]]
 [[ $HIGH_WATER_THRESHOLD =~ ^[0-9]+([.][0-9]+)?$ ]]
+[[ $EVIDENCE_RETENTION == compact || $EVIDENCE_RETENTION == full ]] || {
+  printf 'evidence retention must be compact or full\n' >&2
+  exit 2
+}
 [[ -f $ARCHIVE ]] || { printf 'build artifact is missing\n' >&2; exit 2; }
 [[ -x $MONITOR_BIN && -f $ROOT/protocol/backends/$BACKEND.json &&
    -f $ROOT/protocol/adapters/$BENCHMARK.json ]] || {
@@ -145,8 +152,15 @@ tree = ET.parse(source)
 root = tree.getroot()
 blackbox = root.find("blackbox")
 if blackbox is None:
-    raise SystemExit("source configuration has no blackbox element to remove")
-root.remove(blackbox)
+    raise SystemExit("source configuration has no blackbox element to disable")
+mode = blackbox.find("mode")
+if mode is None:
+    raise SystemExit("source configuration has no blackbox mode element")
+mode.text = "disabled"
+retained = {"mode", "backend", "declaredIsolation", "benchmark"}
+for child in list(blackbox):
+    if child.tag not in retained:
+        blackbox.remove(child)
 tree.write(output, encoding="utf-8", xml_declaration=True)
 PY
 fi
@@ -208,16 +222,91 @@ printf '%s\n' "$LOADER_COMMAND" >"$OUTPUT/loader-command.txt"
 printf '%s\n' "$WORKLOAD_COMMAND" >"$OUTPUT/workload-command.txt"
 printf '%s\n' "${PARAMETERS[@]}" >"$OUTPUT/workload-parameters.txt"
 
+capture_status_and_redis_info() {
+  [[ -f $OUTPUT/run-id.txt ]] || return 0
+  local run_id
+  run_id=$(tr -d '[:space:]' <"$OUTPUT/run-id.txt")
+  redis-cli -h host.docker.internal --json XRANGE "blackbox:status:$run_id" - + \
+    >"$OUTPUT/status-stream.json"
+  redis-cli -h host.docker.internal --raw INFO all >"$OUTPUT/redis-info-after.txt"
+}
+
 capture_full_streams() {
   [[ -f $OUTPUT/run-id.txt ]] || return 0
   local run_id
   run_id=$(tr -d '[:space:]' <"$OUTPUT/run-id.txt")
-  redis-cli -h host.docker.internal --json XRANGE cdc - + >"$OUTPUT/cdc-stream.json" || true
+  redis-cli -h host.docker.internal --json XRANGE cdc - + >"$OUTPUT/cdc-stream.json"
   redis-cli -h host.docker.internal --json XRANGE "blackbox:client:$run_id" - + \
-    >"$OUTPUT/client-stream.json" || true
-  redis-cli -h host.docker.internal --json XRANGE "blackbox:status:$run_id" - + \
-    >"$OUTPUT/status-stream.json" || true
-  redis-cli -h host.docker.internal --raw INFO all >"$OUTPUT/redis-info-after.txt" || true
+    >"$OUTPUT/client-stream.json"
+  capture_status_and_redis_info
+  RETAINED_EVIDENCE=full
+  jq -n --arg requested "$EVIDENCE_RETENTION" \
+    '{kind:"performance_evidence_retention",requested:$requested,retained:"full",
+      full_streams_retained:true}' >"$OUTPUT/evidence-retention.json"
+}
+
+capture_compact_streams() {
+  [[ -f $OUTPUT/run-id.txt ]] || return 1
+  local run_id boundaries load_finished_id end_fence_id final_status_id
+  run_id=$(tr -d '[:space:]' <"$OUTPUT/run-id.txt")
+  capture_status_and_redis_info
+  boundaries=$(jq -er --arg run_id "$run_id" '
+    [.[]
+      | select(.[1][0] == "payload")
+      | {stream_id: .[0], status: (.[1][1] | fromjson)}
+      | select(.status.run_id == $run_id and .status.lifecycle_state == "FINAL")]
+    | if length == 1 then
+        [.[0].status.reconciliation.load_finished_cdc_stream_id,
+         .[0].status.reconciliation.end_fence_cdc_stream_id,
+         .[0].stream_id] | @tsv
+      else error("run-scoped FINAL status count differs") end
+  ' "$OUTPUT/status-stream.json")
+  IFS=$'\t' read -r load_finished_id end_fence_id final_status_id <<<"$boundaries"
+  for stream_id in "$load_finished_id" "$end_fence_id" "$final_status_id"; do
+    [[ $stream_id =~ ^(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$ && $stream_id != 0-0 ]] ||
+      return 1
+  done
+  jq -s '.[0] + .[1]' \
+    <(redis-cli -h host.docker.internal --json XRANGE cdc \
+      "$load_finished_id" "$load_finished_id") \
+    <(redis-cli -h host.docker.internal --json XRANGE cdc \
+      "$end_fence_id" "$end_fence_id") \
+    >"$OUTPUT/cdc-boundary-entries.json"
+  jq -e --arg load "$load_finished_id" --arg end "$end_fence_id" '
+    length == 2 and .[0][0] == $load and .[1][0] == $end
+  ' "$OUTPUT/cdc-boundary-entries.json" >/dev/null
+  redis-cli -h host.docker.internal --json XINFO STREAM cdc \
+    >"$OUTPUT/cdc-stream-info.json"
+  redis-cli -h host.docker.internal --json \
+    XINFO STREAM "blackbox:client:$run_id" >"$OUTPUT/client-stream-info.json"
+  jq -n --arg requested "$EVIDENCE_RETENTION" \
+    --arg load_finished_cdc_stream_id "$load_finished_id" \
+    --arg end_fence_cdc_stream_id "$end_fence_id" \
+    --arg final_status_stream_id "$final_status_id" \
+    '{kind:"performance_evidence_retention",requested:$requested,retained:"compact",
+      full_streams_retained:false,
+      load_finished_cdc_stream_id:$load_finished_cdc_stream_id,
+      end_fence_cdc_stream_id:$end_fence_cdc_stream_id,
+      final_status_stream_id:$final_status_stream_id}' \
+    >"$OUTPUT/evidence-retention.json"
+  RETAINED_EVIDENCE=compact
+}
+
+capture_success_evidence() {
+  if [[ $EVIDENCE_RETENTION == compact ]] && capture_compact_streams; then
+    return 0
+  fi
+  capture_full_streams
+}
+
+compress_full_streams() {
+  [[ $RETAINED_EVIDENCE == full ]] || return 0
+  local stream
+  for stream in cdc-stream.json client-stream.json; do
+    if [[ -f $OUTPUT/$stream ]]; then
+      gzip --fast "$OUTPUT/$stream"
+    fi
+  done
 }
 
 capture_containers() {
@@ -374,9 +463,17 @@ if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
   CELL_STATUS=$?
   set -e
   printf '%s\n' "$CELL_STATUS" >"$OUTPUT/e2e-exit-status.txt"
-  capture_full_streams
+  if (( CELL_STATUS == 0 )); then
+    if ! capture_success_evidence; then
+      CELL_STATUS=1
+      printf '%s\n' "$CELL_STATUS" >"$OUTPUT/e2e-exit-status.txt"
+    fi
+  else
+    capture_full_streams || true
+  fi
   capture_containers
   (( CELL_STATUS == 0 )) || {
+    compress_full_streams || true
     teardown_stack
     STACK_MAY_BE_RUNNING=0
     write_checksums "$OUTPUT"
@@ -439,6 +536,14 @@ else
   capture_containers
 fi
 
+if [[ ! -f $OUTPUT/evidence-retention.json ]]; then
+  RETAINED_EVIDENCE=compact
+  jq -n --arg requested "$EVIDENCE_RETENTION" \
+    '{kind:"performance_evidence_retention",requested:$requested,
+      retained:"compact",full_streams_retained:false}' \
+    >"$OUTPUT/evidence-retention.json"
+fi
+
 result_args=(
   --artifact-dir "$OUTPUT" --backend "$BACKEND" --benchmark "$BENCHMARK"
   --mode "$MODE" --execution-profile "$EXECUTION_PROFILE" --workload "$WORKLOAD"
@@ -450,14 +555,45 @@ if [[ -n $HEADLINE_TRANSACTION_TYPE ]]; then
   result_args+=(--headline-transaction-type "$HEADLINE_TRANSACTION_TYPE"
     --headline-rate-label "$HEADLINE_RATE_LABEL")
 fi
-python3 "$ROOT/scripts/registered_performance_result.py" "${result_args[@]}"
-for stream in cdc-stream.json client-stream.json; do
-  if [[ -f $OUTPUT/$stream ]]; then
-    gzip --fast "$OUTPUT/$stream"
+run_result_reporter() {
+  python3 "$ROOT/scripts/registered_performance_result.py" \
+    "${result_args[@]}" --evidence-retention "$RETAINED_EVIDENCE"
+}
+
+result_status=0
+set +e
+run_result_reporter
+result_status=$?
+if (( result_status == 0 )); then
+  jq -e '.accepted == true' "$OUTPUT/result.json" >/dev/null
+  result_status=$?
+fi
+set -e
+if (( result_status != 0 )) &&
+   [[ $EXECUTION_PROFILE == coordinated_e2e && $RETAINED_EVIDENCE == compact ]]; then
+  if capture_full_streams; then
+    result_status=0
+    set +e
+    run_result_reporter
+    result_status=$?
+    if (( result_status == 0 )); then
+      jq -e '.accepted == true' "$OUTPUT/result.json" >/dev/null
+      result_status=$?
+    fi
+    set -e
+  else
+    result_status=1
   fi
-done
+fi
+if (( result_status != 0 )); then
+  compress_full_streams || true
+  teardown_stack
+  STACK_MAY_BE_RUNNING=0
+  write_checksums "$OUTPUT"
+  exit "$result_status"
+fi
+compress_full_streams
 sha256sum "$ARCHIVE" "$MONITOR_BIN" >"$OUTPUT/build-artifact-checksums.txt"
 teardown_stack
 STACK_MAY_BE_RUNNING=0
 write_checksums "$OUTPUT"
-jq -e '.accepted == true' "$OUTPUT/result.json" >/dev/null

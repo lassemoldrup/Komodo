@@ -72,7 +72,12 @@ def integer(value: Any, label: str) -> int:
 def stream_key(stream_id: str) -> tuple[int, int]:
     match = STREAM_ID.fullmatch(stream_id)
     require(match is not None, f"invalid Redis stream ID: {stream_id!r}")
-    return int(match.group(1)), int(match.group(2))
+    result = int(match.group(1)), int(match.group(2))
+    require(
+        result[0] <= 0xFFFFFFFFFFFFFFFF and result[1] <= 0xFFFFFFFFFFFFFFFF,
+        f"Redis stream ID exceeds uint64: {stream_id!r}",
+    )
+    return result
 
 
 def stream_ms(stream_id: str) -> int:
@@ -98,80 +103,48 @@ def payload(entry: Any, label: str) -> dict[str, Any]:
     return document
 
 
-def folded(document: dict[str, Any]) -> dict[str, Any]:
-    return {str(key).casefold(): value for key, value in document.items()}
+def cdc_entry(entry: Any) -> tuple[str, str, str]:
+    require(
+        isinstance(entry, list)
+        and len(entry) == 2
+        and isinstance(entry[0], str)
+        and isinstance(entry[1], list)
+        and len(entry[1]) == 2
+        and isinstance(entry[1][0], str)
+        and isinstance(entry[1][1], str),
+        "malformed CDC XRANGE entry",
+    )
+    stream_key(entry[0])
+    return entry[0], entry[1][0], entry[1][1]
 
 
-def transaction_id(document: dict[str, Any]) -> str | None:
-    transaction = document.get("transaction")
-    if isinstance(transaction, dict) and isinstance(transaction.get("id"), str):
-        return transaction["id"]
-    source = document.get("source")
-    if isinstance(source, dict):
-        source_fields = folded(source)
-        value = source_fields.get("txid")
-        if isinstance(value, str):
-            return value
-    return None
-
-
-def transaction_family(value: str) -> str | None:
-    prefix, separator, suffix = value.rpartition(":")
-    if separator == ":" and prefix and suffix.isdigit():
-        return prefix
-    return None
-
-
-def fence_window(entries: Any, run_id: str) -> dict[str, dict[str, Any]]:
+def fence_window(
+    entries: Any, reconciliation: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
     require(isinstance(entries, list), "CDC XRANGE artifact is not an array")
-    row_transactions: dict[str, tuple[str, str]] = {}
-    end_records: list[tuple[str, str]] = []
-    for entry in entries:
-        document = payload(entry, "CDC")
-        status = document.get("status")
-        if status == "END" and isinstance(document.get("id"), str):
-            end_records.append((document["id"], entry[0]))
-            continue
-        after = document.get("after")
-        if not isinstance(after, dict):
-            continue
-        values = folded(after)
-        if values.get("run_id") != run_id or values.get("phase") not in {
-            "LOAD_FINISHED",
-            "END_FENCE",
-        }:
-            continue
-        tx_id = transaction_id(document)
-        require(tx_id is not None, "run fence row lacks a transaction identity")
-        phase = str(values["phase"])
-        require(phase not in row_transactions, f"duplicate {phase} fence row")
-        row_transactions[phase] = (tx_id, entry[0])
-    require(set(row_transactions) == {"LOAD_FINISHED", "END_FENCE"}, "component fence rows are incomplete")
+    parsed = [cdc_entry(entry) for entry in entries]
+    ids = [entry[0] for entry in parsed]
+    require(
+        all(stream_key(left) < stream_key(right) for left, right in zip(ids, ids[1:])),
+        "CDC XRANGE stream IDs are not strictly increasing",
+    )
+    completed = {
+        "LOAD_FINISHED": reconciliation.get("load_finished_cdc_stream_id"),
+        "END_FENCE": reconciliation.get("end_fence_cdc_stream_id"),
+    }
     result: dict[str, dict[str, Any]] = {}
-    for phase, (tx_id, row_id) in row_transactions.items():
-        candidates = [stream_id for identity, stream_id in end_records if identity == tx_id]
-        if not candidates:
-            family = transaction_family(tx_id)
-            candidates = [
-                stream_id
-                for identity, stream_id in end_records
-                if family is not None
-                and transaction_family(identity) == family
-                and stream_key(stream_id) > stream_key(row_id)
-            ]
-        require(len(candidates) == 1, f"{phase} transaction END is missing or ambiguous")
-        end_id = candidates[0]
-        require(stream_key(end_id) > stream_key(row_id), f"{phase} transaction END precedes its row")
+    for phase, stream_id in completed.items():
+        require(isinstance(stream_id, str) and stream_id != "0-0", f"{phase} completed CDC stream ID is missing")
+        stream_key(stream_id)
+        require(ids.count(stream_id) == 1, f"{phase} completed CDC entry is absent or duplicated")
         result[phase] = {
-            "row_stream_id": row_id,
-            "transaction_id": tx_id,
-            "transaction_end_stream_id": end_id,
-            "transaction_end_epoch_ms": stream_ms(end_id),
+            "completed_cdc_stream_id": stream_id,
+            "completed_cdc_epoch_ms": stream_ms(stream_id),
         }
     require(
-        stream_key(result["LOAD_FINISHED"]["transaction_end_stream_id"])
-        < stream_key(result["END_FENCE"]["transaction_end_stream_id"]),
-        "component fence transaction END order is invalid",
+        stream_key(result["LOAD_FINISHED"]["completed_cdc_stream_id"])
+        < stream_key(result["END_FENCE"]["completed_cdc_stream_id"]),
+        "component fence completed CDC order is invalid",
     )
     return result
 
@@ -190,31 +163,53 @@ def final_status(entries: Any, run_id: str) -> tuple[str, dict[str, Any]]:
 def cdc_window_counts(entries: Any, after_id: str, through_id: str) -> dict[str, int]:
     lower_bound = stream_key(after_id)
     through = stream_key(through_id)
+    require(lower_bound < through, "CDC transport window is not positive")
     counts = {
         "entries": 0,
+        "logical_utf8_bytes": 0,
         "rows": 0,
         "control_rows": 0,
         "transaction_begins": 0,
         "transaction_ends": 0,
     }
+    saw_after = False
+    saw_through = False
+    previous: tuple[int, int] | None = None
     for entry in entries:
-        identity = stream_key(entry[0])
+        stream_id, field, value = cdc_entry(entry)
+        identity = stream_key(stream_id)
+        require(previous is None or previous < identity, "CDC XRANGE stream IDs are not strictly increasing")
+        previous = identity
+        saw_after = saw_after or stream_id == after_id
+        saw_through = saw_through or stream_id == through_id
         if identity <= lower_bound or identity > through:
             continue
         counts["entries"] += 1
+        counts["logical_utf8_bytes"] += len(field.encode("utf-8")) + len(value.encode("utf-8"))
         document = payload(entry, "CDC")
         if document.get("status") == "BEGIN":
             counts["transaction_begins"] += 1
         elif document.get("status") == "END":
             counts["transaction_ends"] += 1
-        elif isinstance(document.get("source"), dict) and isinstance(document.get("op"), str):
+        elif isinstance(document.get("source"), dict) and isinstance(
+            document.get("op"), str
+        ):
             counts["rows"] += 1
             after_row = document.get("after")
             if isinstance(after_row, dict):
-                values = folded(after_row)
-                if isinstance(values.get("run_id"), str) and isinstance(values.get("phase"), str):
+                folded = {str(key).casefold(): value for key, value in after_row.items()}
+                if isinstance(folded.get("run_id"), str) and isinstance(
+                    folded.get("phase"), str
+                ):
                     counts["control_rows"] += 1
+    require(saw_after and saw_through, "CDC transport window boundary is absent")
     return counts
+
+
+def compact_transport_entries(assembled_transactions: int, raw_rows: int) -> int:
+    require(assembled_transactions >= 0, "assembled transaction count is negative")
+    require(raw_rows >= 0, "raw row count is negative")
+    return assembled_transactions * 2 + raw_rows + 3
 
 
 def rate(count: int, seconds: float) -> float:
@@ -250,6 +245,9 @@ def main() -> int:
     parser.add_argument("--repetition", required=True, type=int)
     parser.add_argument("--drain-limit-seconds", required=True, type=float)
     parser.add_argument("--high-water-threshold-percent", default=70.0, type=float)
+    parser.add_argument(
+        "--evidence-retention", required=True, choices=("compact", "full")
+    )
     parser.add_argument("--headline-transaction-type")
     parser.add_argument("--headline-rate-label")
     args = parser.parse_args()
@@ -285,6 +283,14 @@ def main() -> int:
     require(isinstance(latency, dict), "BenchBase latency distribution is missing")
     parameters = workload_parameters(args.artifact_dir / "workload-parameters.txt")
     operations_per_transaction = declared_operations_per_transaction(parameters)
+    retention = load(args.artifact_dir / "evidence-retention.json")
+    require(
+        retention.get("kind") == "performance_evidence_retention"
+        and retention.get("retained") == args.evidence_retention
+        and retention.get("full_streams_retained")
+        is (args.evidence_retention == "full"),
+        "evidence retention record differs",
+    )
     result: dict[str, Any] = {
         "kind": "registered_performance_cell_result",
         "backend": args.backend,
@@ -293,6 +299,7 @@ def main() -> int:
         "execution_profile": args.execution_profile,
         "workload": args.workload,
         "capture_profile": args.capture_profile,
+        "evidence_retention": args.evidence_retention,
         "repetition": args.repetition,
         "accepted": False,
         "client_measurement_window_seconds": elapsed_seconds,
@@ -372,41 +379,65 @@ def main() -> int:
     else:
         require(counters["error_transactions"] == 0, "full E2E unexpected SQL errors are nonzero")
         run_id = (args.artifact_dir / "run-id.txt").read_text(encoding="utf-8").strip()
-        cdc = load(args.artifact_dir / "cdc-stream.json")
         statuses = load(args.artifact_dir / "status-stream.json")
-        boundaries = fence_window(cdc, run_id)
         final_id, final = final_status(statuses, run_id)
-        start_id = boundaries["LOAD_FINISHED"]["transaction_end_stream_id"]
-        end_id = boundaries["END_FENCE"]["transaction_end_stream_id"]
-        start_ms = boundaries["LOAD_FINISHED"]["transaction_end_epoch_ms"]
-        end_ms = boundaries["END_FENCE"]["transaction_end_epoch_ms"]
+        reconciliation = final.get("reconciliation")
+        require(isinstance(reconciliation, dict), "FINAL status lacks reconciliation")
+        if args.evidence_retention == "full":
+            cdc = load(args.artifact_dir / "cdc-stream.json")
+            boundaries = fence_window(cdc, reconciliation)
+            window = cdc_window_counts(
+                cdc,
+                reconciliation["load_finished_cdc_stream_id"],
+                reconciliation["end_fence_cdc_stream_id"],
+            )
+        else:
+            compact_boundaries = load(
+                args.artifact_dir / "cdc-boundary-entries.json"
+            )
+            boundaries = fence_window(compact_boundaries, reconciliation)
+            window = None
+        start_id = boundaries["LOAD_FINISHED"]["completed_cdc_stream_id"]
+        end_id = boundaries["END_FENCE"]["completed_cdc_stream_id"]
+        start_ms = boundaries["LOAD_FINISHED"]["completed_cdc_epoch_ms"]
+        end_ms = boundaries["END_FENCE"]["completed_cdc_epoch_ms"]
         final_ms = stream_ms(final_id)
         component_seconds = (end_ms - start_ms) / 1000.0
         e2e_seconds = (final_ms - start_ms) / 1000.0
         drain_seconds = (final_ms - end_ms) / 1000.0
         require(component_seconds > 0 and e2e_seconds > 0 and drain_seconds >= 0, "Redis-clock intervals are invalid")
         require(drain_seconds <= args.drain_limit_seconds, "drain exceeded its configured limit")
-        window = cdc_window_counts(cdc, start_id, end_id)
         monitor = load(args.artifact_dir / "monitor-metrics.json")
         assembler = monitor.get("assembler")
         joiner = monitor.get("joiner")
         checker = monitor.get("checker")
-        reconciliation = final.get("reconciliation")
         require(all(isinstance(value, dict) for value in (assembler, joiner, checker, reconciliation)), "monitor result is incomplete")
         assembled = integer(assembler.get("completed_workload_transactions"), "assembled workload transactions")
         joined = integer(joiner.get("joined_workload_transactions"), "joined workload transactions")
         checked = integer(checker.get("workload_transactions"), "checked workload transactions")
         raw_rows = integer(assembler.get("workload_raw_row_events"), "assembler raw workload rows")
         writes = integer(assembler.get("workload_normalized_write_events"), "assembler normalized writes")
+        if window is None:
+            transport_entries = compact_transport_entries(assembled, raw_rows)
+        else:
+            transport_entries = window["entries"]
+            require(
+                raw_rows == window["rows"] - window["control_rows"],
+                "CDC and assembler raw workload rows differ",
+            )
         require(
-            raw_rows == window["rows"] - window["control_rows"],
-            "CDC and assembler raw workload rows differ",
+            assembled
+            == joined
+            == checked
+            == integer(
+                reconciliation.get("joined_workload_transactions"),
+                "reconciled transactions",
+            ),
+            "assembler/joiner/checker totals differ",
         )
-        require(joined == checked == integer(reconciliation.get("joined_workload_transactions"), "reconciled transactions"), "joined/checker totals differ")
         require(final.get("outcome") == "PASS" and reconciliation.get("evidence_reconciled") is True, "full E2E verdict is not an evidence-complete PASS")
         require(reconciliation.get("unmatched_client_records") == 0 and reconciliation.get("unmatched_workload_cdc_slots") == 0, "full E2E evidence is unmatched")
         require(joiner.get("pending_client_records") == 0 and joiner.get("pending_cdc_slots") == 0, "terminal monitor queues are nonzero")
-
         limits = monitor.get("limits")
         require(isinstance(limits, dict), "monitor limit report is missing")
         assembler_limits = limits.get("assembler")
@@ -478,6 +509,11 @@ def main() -> int:
                 "resource_high_water_threshold_percent": args.high_water_threshold_percent,
                 "redis_used_memory_peak_bytes": redis_peak,
                 "redis_used_memory_peak_percent": redis_utilization,
+                "cdc_transport_entries": transport_entries,
+                "cdc_transport_entry_count_source": (
+                    "raw_stream" if window is not None
+                    else "derived_from_validated_framing"
+                ),
                 "cdc_workload_rows": raw_rows,
                 "cdc_workload_rows_per_second": rate(raw_rows, component_seconds),
                 "monitor_assembled_transactions": assembled,
@@ -494,6 +530,10 @@ def main() -> int:
                 "accepted": True,
             }
         )
+        if window is not None:
+            result["cdc_transport_logical_utf8_bytes"] = window[
+                "logical_utf8_bytes"
+            ]
 
     (args.artifact_dir / "result.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"

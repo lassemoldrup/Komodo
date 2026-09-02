@@ -29,6 +29,8 @@
         "schema_attestation_digest",
         "bootstrap_manifest_validated",
         "end_fence_seen",
+        "load_finished_cdc_stream_id",
+        "end_fence_cdc_stream_id",
         "expected_sessions",
         "completed_sessions",
         "accepted_client_transactions",
@@ -53,6 +55,18 @@
         },
         "bootstrap_manifest_validated": { "type": "boolean" },
         "end_fence_seen": { "type": "boolean" },
+        "load_finished_cdc_stream_id": {
+          "oneOf": [
+            { "const": "" },
+            { "$ref": "common.schema.json#/$defs/redisStreamId" }
+          ]
+        },
+        "end_fence_cdc_stream_id": {
+          "oneOf": [
+            { "const": "" },
+            { "$ref": "common.schema.json#/$defs/redisStreamId" }
+          ]
+        },
         "expected_sessions": { "$ref": "common.schema.json#/$defs/uint64" },
         "completed_sessions": { "$ref": "common.schema.json#/$defs/uint64" },
         "accepted_client_transactions": { "$ref": "common.schema.json#/$defs/uint64" },
@@ -179,6 +193,18 @@
                   },
                   "bootstrap_manifest_validated": { "const": true },
                   "end_fence_seen": { "const": true },
+                  "load_finished_cdc_stream_id": {
+                    "allOf": [
+                      { "$ref": "common.schema.json#/$defs/redisStreamId" },
+                      { "not": { "const": "0-0" } }
+                    ]
+                  },
+                  "end_fence_cdc_stream_id": {
+                    "allOf": [
+                      { "$ref": "common.schema.json#/$defs/redisStreamId" },
+                      { "not": { "const": "0-0" } }
+                    ]
+                  },
                   "expected_sessions": {
                     "$ref": "common.schema.json#/$defs/positiveUint64"
                   },

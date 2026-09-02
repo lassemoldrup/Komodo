@@ -288,6 +288,8 @@ if lifecycle == "FINAL":
         "schema_attestation_digest": "0" * 64,
         "bootstrap_manifest_validated": True,
         "end_fence_seen": end_seen,
+        "load_finished_cdc_stream_id": "1-0" if end_seen else "",
+        "end_fence_cdc_stream_id": "2-0" if end_seen else "",
         "expected_sessions": 1,
         "completed_sessions": 1,
         "accepted_client_transactions": 0,

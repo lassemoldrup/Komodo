@@ -23,6 +23,22 @@ def load_module():
 
 
 class RegisteredEvaluationMatrixTest(unittest.TestCase):
+    def test_performance_runner_defaults_to_compact_success_evidence(self) -> None:
+        source = (
+            ROOT / "scripts" / "run_registered_performance_cell.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("EVIDENCE_RETENTION=compact", source)
+        self.assertIn("--evidence-retention", source)
+        self.assertIn("capture_compact_streams", source)
+        self.assertIn("capture_full_streams", source)
+        self.assertIn("result_status != 0", source)
+        self.assertIn('mode.text = "disabled"', source)
+        self.assertIn(
+            'retained = {"mode", "backend", "declaredIsolation", "benchmark"}',
+            source,
+        )
+        self.assertNotIn("root.remove(blackbox)", source)
+
     def test_single_repetition_requires_explicit_pilot_declaration(self) -> None:
         module = load_module()
         source = SCRIPT.read_text(encoding="utf-8")
@@ -105,6 +121,8 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
                                     "evidence_reconciled": True,
                                     "unmatched_client_records": 0,
                                     "unmatched_workload_cdc_slots": 0,
+                                    "load_finished_cdc_stream_id": "1-0",
+                                    "end_fence_cdc_stream_id": "2-0",
                                 },
                             }
                         ),
@@ -202,6 +220,8 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
                                     "evidence_reconciled": True,
                                     "unmatched_client_records": 0,
                                     "unmatched_workload_cdc_slots": 0,
+                                    "load_finished_cdc_stream_id": "1-0",
+                                    "end_fence_cdc_stream_id": "2-0",
                                 },
                             }
                         ),
@@ -296,6 +316,12 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
                 for repetition in range(1, 4):
                     trial = root / cell_id / f"repetition-{repetition:02d}"
                     trial.mkdir(parents=True)
+                    if cell_id == "baseline":
+                        p95 = (100, 100, 100)[repetition - 1]
+                        client_throughput = (200, 200, 200)[repetition - 1]
+                    else:
+                        p95 = (90, 100, 130)[repetition - 1]
+                        client_throughput = (180, 200, 260)[repetition - 1]
                     result = {
                         "backend": "synthetic_backend",
                         "benchmark": "synthetic_benchmark",
@@ -305,16 +331,23 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
                         "capture_profile": "synthetic_profile",
                         "outcome": "PASS",
                         "accepted": True,
-                        "client_p95_latency_microseconds": 100 + repetition,
-                        "client_logical_transactions_per_second": 200 + repetition,
+                        "client_p95_latency_microseconds": p95,
+                        "client_logical_transactions_per_second": client_throughput,
                     }
                     if execution_profile == "coordinated_e2e":
                         result.update(
                             {
-                                "e2e_end_to_verdict_seconds": 10 + repetition,
-                                "monitor_checker_transactions_per_component_second": 300
-                                + repetition,
-                                "e2e_transactions_per_second": 150 + repetition,
+                                "e2e_end_to_verdict_seconds": (10, 10, 20)[
+                                    repetition - 1
+                                ],
+                                "monitor_checker_transactions_per_component_second": (
+                                    300,
+                                    300,
+                                    330,
+                                )[repetition - 1],
+                                "e2e_transactions_per_second": (150, 150, 180)[
+                                    repetition - 1
+                                ],
                             }
                         )
                     (trial / "result.json").write_text(
@@ -335,6 +368,14 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
                 "kind": "registered_evaluation_matrix",
                 "output_root": str(root),
                 "cells": cells,
+                "comparisons": [
+                    {
+                        "id": "measured_over_baseline",
+                        "baseline_cell": "baseline",
+                        "measured_cell": "measured",
+                        "metric": "client_p95_latency_microseconds",
+                    }
+                ],
             }
             matrix_path = root / "source-matrix.json"
             matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
@@ -356,12 +397,23 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
                 ],
             )
             self.assertEqual(rows[0]["e2e_time_seconds"], "")
-            self.assertEqual(rows[0]["client_p95_latency_microseconds"], "102.0")
-            self.assertEqual(rows[1]["e2e_time_seconds"], "12.0")
+            self.assertEqual(rows[0]["client_p95_latency_microseconds"], "100.0")
+            self.assertAlmostEqual(float(rows[1]["e2e_time_seconds"]), 40 / 3)
             self.assertEqual(
-                rows[1]["monitor_throughput_transactions_per_second"], "302.0"
+                rows[1]["monitor_throughput_transactions_per_second"], "310.0"
             )
-            self.assertIn("| 102.00 | — | 202.00 | — | — |", (root / "summary.md").read_text(encoding="utf-8"))
+            markdown = (root / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("arithmetic means", markdown)
+            self.assertIn("| 100.00 | — | 200.00 | — | — |", markdown)
+            summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+            baseline_p95 = summary["cells"]["baseline"]["metrics"][
+                "client_p95_latency_microseconds"
+            ]
+            self.assertEqual(baseline_p95["mean"], 100.0)
+            self.assertNotIn("median", baseline_p95)
+            comparison = summary["comparisons"]["measured_over_baseline"]
+            self.assertAlmostEqual(comparison["mean_overhead_percent"], -20 / 3)
+            self.assertNotIn("median_overhead_percent", comparison)
 
 
 if __name__ == "__main__":

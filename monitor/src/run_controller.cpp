@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -26,6 +27,36 @@ namespace {
 using Json = nlohmann::json;
 
 constexpr std::uint64_t max_json_integer = 9007199254740991ULL;
+
+[[nodiscard]] std::optional<std::pair<std::uint64_t, std::uint64_t>>
+parseRedisStreamId(const std::string_view stream_id) noexcept {
+  const auto separator = stream_id.find('-');
+  if (separator == std::string_view::npos || separator == 0U ||
+      separator + 1U == stream_id.size() ||
+      stream_id.find('-', separator + 1U) != std::string_view::npos) {
+    return std::nullopt;
+  }
+  const auto parse_component = [](const std::string_view value)
+      -> std::optional<std::uint64_t> {
+    if (value.empty() || (value.size() > 1U && value.front() == '0')) {
+      return std::nullopt;
+    }
+    std::uint64_t parsed = 0;
+    const auto result =
+        std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} ||
+        result.ptr != value.data() + value.size()) {
+      return std::nullopt;
+    }
+    return parsed;
+  };
+  const auto milliseconds = parse_component(stream_id.substr(0U, separator));
+  const auto sequence = parse_component(stream_id.substr(separator + 1U));
+  if (!milliseconds.has_value() || !sequence.has_value()) {
+    return std::nullopt;
+  }
+  return std::pair{*milliseconds, *sequence};
+}
 
 enum class LifecycleState {
   Starting,
@@ -214,8 +245,35 @@ public:
     }
     assembled_cdc_transactions_ = transaction.cdc_seq + 1U;
     if (transaction.kind == CdcTransactionKind::RunControl &&
-        transaction.fence_phase == RunFencePhase::EndFence) {
-      end_fence_assembled_ = true;
+        transaction.fence_phase.has_value()) {
+      if (!parseRedisStreamId(transaction.end_stream_id).has_value() ||
+          transaction.end_stream_id == "0-0") {
+        invalidate(MonitorErrorCode::CdcOrderInvalid,
+                   "control transaction lacks a canonical completed CDC "
+                   "stream ID");
+        synchronize();
+        return;
+      }
+      if (*transaction.fence_phase == RunFencePhase::LoadFinished) {
+        if (!load_finished_cdc_stream_id_.empty()) {
+          invalidate(MonitorErrorCode::CdcOrderInvalid,
+                     "LOAD_FINISHED completed CDC stream ID was recorded "
+                     "more than once");
+          synchronize();
+          return;
+        }
+        load_finished_cdc_stream_id_ = transaction.end_stream_id;
+      } else if (*transaction.fence_phase == RunFencePhase::EndFence) {
+        if (!end_fence_cdc_stream_id_.empty()) {
+          invalidate(MonitorErrorCode::CdcOrderInvalid,
+                     "END_FENCE completed CDC stream ID was recorded more "
+                     "than once");
+          synchronize();
+          return;
+        }
+        end_fence_cdc_stream_id_ = transaction.end_stream_id;
+        end_fence_assembled_ = true;
+      }
     }
     if (!admission_stopped_ && !joiner_.failed()) {
       try {
@@ -431,17 +489,7 @@ private:
 
   static void requireStreamId(const std::string_view stream_id,
                               const std::string_view label) {
-    const auto separator = stream_id.find('-');
-    if (separator == std::string_view::npos || separator == 0U ||
-        separator + 1U == stream_id.size()) {
-      throw std::invalid_argument(std::string(label) + " stream ID is invalid");
-    }
-    const auto component = [](const std::string_view value) {
-      return !value.empty() && (value.size() == 1U || value.front() != '0') &&
-             value.find_first_not_of("0123456789") == std::string_view::npos;
-    };
-    if (!component(stream_id.substr(0U, separator)) ||
-        !component(stream_id.substr(separator + 1U))) {
+    if (!parseRedisStreamId(stream_id).has_value()) {
       throw std::invalid_argument(std::string(label) + " stream ID is invalid");
     }
   }
@@ -796,6 +844,14 @@ private:
             final_schema_attestation_->backend_facts &&
         startup_schema_attestation_->canonical_attestation_digest ==
             final_schema_attestation_->canonical_attestation_digest;
+    const auto load_finished_stream_id =
+        parseRedisStreamId(load_finished_cdc_stream_id_);
+    const auto end_fence_stream_id =
+        parseRedisStreamId(end_fence_cdc_stream_id_);
+    const bool completed_fence_stream_ids_valid =
+        load_finished_stream_id.has_value() &&
+        end_fence_stream_id.has_value() &&
+        *load_finished_stream_id < *end_fence_stream_id;
     bool exact = false;
     if (config_.processing_mode == ProcessingMode::Audited) {
       const auto expected_checker_transactions =
@@ -803,7 +859,8 @@ private:
           metrics.checker.bootstrap_transactions +
           metrics.checker.phase_anchor_transactions;
       exact =
-          schema_attestations_match && endFenceObserved() &&
+          schema_attestations_match && completed_fence_stream_ids_valid &&
+          endFenceObserved() &&
           metrics.end_fence_processed &&
           metrics.bootstrap_state_validated &&
           completed_sessions == expected_sessions &&
@@ -826,7 +883,8 @@ private:
           assembled_cdc_transactions_ == metrics.accepted_cdc_transactions;
     } else {
       exact =
-          schema_attestations_match && endFenceObserved() &&
+          schema_attestations_match && completed_fence_stream_ids_valid &&
+          endFenceObserved() &&
           metrics.end_fence_processed &&
           metrics.bootstrap_state_validated &&
           completed_sessions == expected_sessions &&
@@ -880,6 +938,8 @@ private:
                 : std::string{},
         .bootstrap_manifest_validated = metrics.bootstrap_state_validated,
         .end_fence_seen = endFenceObserved(),
+        .load_finished_cdc_stream_id = load_finished_cdc_stream_id_,
+        .end_fence_cdc_stream_id = end_fence_cdc_stream_id_,
         .expected_sessions = expected_sessions,
         .completed_sessions = completed_sessions,
         .accepted_client_transactions = metrics.accepted_client_transactions,
@@ -1021,6 +1081,10 @@ private:
           {"bootstrap_manifest_validated",
            reconciliation.bootstrap_manifest_validated},
           {"end_fence_seen", reconciliation.end_fence_seen},
+          {"load_finished_cdc_stream_id",
+           reconciliation.load_finished_cdc_stream_id},
+          {"end_fence_cdc_stream_id",
+           reconciliation.end_fence_cdc_stream_id},
           {"expected_sessions", reconciliation.expected_sessions},
           {"completed_sessions", reconciliation.completed_sessions},
           {"accepted_client_transactions",
@@ -1084,6 +1148,8 @@ private:
   bool bootstrap_submitted_ = false;
   bool first_violation_recorded_ = false;
   bool end_fence_assembled_ = false;
+  std::string load_finished_cdc_stream_id_;
+  std::string end_fence_cdc_stream_id_;
   bool invalid_ = false;
   bool admission_stopped_ = false;
   bool terminal_ = false;

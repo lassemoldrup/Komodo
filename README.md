@@ -539,7 +539,8 @@ final-status boundary together.
 Each output root contains the copied matrix, one checksummed directory per raw
 repetition, `raw-results.csv`, `summary.json`, the concise `summary.csv` and
 `summary.md`, and the root `SHA256SUMS`. The concise reports contain only cell
-identity plus median client p95 latency, E2E time, client throughput, monitor
+identity plus the arithmetic means across accepted repetitions of each
+per-repetition client p95 latency, E2E time, client throughput, monitor
 throughput, and E2E throughput. Baseline cells leave monitor and E2E fields
 empty. `raw-results.csv` and `summary.json` retain the complete unrounded data
 and comparison results for provenance.

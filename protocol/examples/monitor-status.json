@@ -19,6 +19,8 @@
     "schema_attestation_digest": "dd3580ca7f1c748503b494af84069f0181cd83de55075e525f65a0e3b0f26661",
     "bootstrap_manifest_validated": true,
     "end_fence_seen": true,
+    "load_finished_cdc_stream_id": "1709999999000-0",
+    "end_fence_cdc_stream_id": "1710000000000-0",
     "expected_sessions": 2,
     "completed_sessions": 2,
     "accepted_client_transactions": 2,

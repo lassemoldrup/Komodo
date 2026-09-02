@@ -585,12 +585,18 @@ void testCleanPassRequiresDoneEndAndIdle() {
   BLACKBOX_CHECK(reconciliation.bootstrap_checker_transactions == 0U);
   BLACKBOX_CHECK(reconciliation.phase_anchor_transactions == 1U);
   BLACKBOX_CHECK(reconciliation.checker_consumed_transactions == 2U);
+  BLACKBOX_CHECK(reconciliation.load_finished_cdc_stream_id == "2-2");
+  BLACKBOX_CHECK(reconciliation.end_fence_cdc_stream_id == "4-2");
   BLACKBOX_CHECK(controller.diagnostics().empty());
   const auto statuses = controller.takePendingStatuses();
   BLACKBOX_CHECK(finalStatusCount(statuses) == 1U);
   const auto final = Json::parse(statuses.back());
   BLACKBOX_CHECK(final.at("outcome") == "PASS");
   BLACKBOX_CHECK(final.at("pending_cdc_slots") == 0U);
+  BLACKBOX_CHECK(final.at("reconciliation").at("load_finished_cdc_stream_id") ==
+                 "2-2");
+  BLACKBOX_CHECK(final.at("reconciliation").at("end_fence_cdc_stream_id") ==
+                 "4-2");
   idle(controller);
   controller.forceTimeoutFinal();
   BLACKBOX_CHECK(controller.takePendingStatuses().empty());

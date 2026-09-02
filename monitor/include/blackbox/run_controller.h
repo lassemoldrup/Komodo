@@ -47,6 +47,8 @@ struct ReconciliationSummary {
   std::string schema_attestation_digest;
   bool bootstrap_manifest_validated = false;
   bool end_fence_seen = false;
+  std::string load_finished_cdc_stream_id;
+  std::string end_fence_cdc_stream_id;
   std::uint64_t expected_sessions = 0;
   std::uint64_t completed_sessions = 0;
   std::uint64_t accepted_client_transactions = 0;

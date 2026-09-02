@@ -17,6 +17,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+STREAM_ID = re.compile(r"(0|[1-9][0-9]*)-(0|[1-9][0-9]*)\Z")
 
 
 def require(condition: bool, message: str) -> None:
@@ -35,6 +36,18 @@ def registry(directory: Path, field: str) -> set[str]:
     return result
 
 
+def stream_key(value: Any) -> tuple[int, int] | None:
+    if not isinstance(value, str):
+        return None
+    match = STREAM_ID.fullmatch(value)
+    if match is None or value == "0-0":
+        return None
+    result = int(match.group(1)), int(match.group(2))
+    if result[0] > 0xFFFFFFFFFFFFFFFF or result[1] > 0xFFFFFFFFFFFFFFFF:
+        return None
+    return result
+
+
 def verified_correctness(path: Path) -> None:
     require(path.is_dir(), f"correctness artifact directory is missing: {path}")
     subprocess.run(["sha256sum", "--check", "SHA256SUMS"], cwd=path, check=True, capture_output=True)
@@ -49,12 +62,20 @@ def verified_correctness(path: Path) -> None:
     require(len(terminal) == 1, f"correctness terminal status count differs: {path}")
     final = terminal[0]
     reconciliation = final.get("reconciliation", {})
+    load_finished_id = stream_key(reconciliation.get("load_finished_cdc_stream_id"))
+    end_fence_id = stream_key(reconciliation.get("end_fence_cdc_stream_id"))
     require(
         final.get("outcome") == "PASS"
         and reconciliation.get("evidence_reconciled") is True
         and reconciliation.get("unmatched_client_records") == 0
         and reconciliation.get("unmatched_workload_cdc_slots") == 0,
         f"correctness prerequisite is not admitted: {path}",
+    )
+    require(
+        load_finished_id is not None
+        and end_fence_id is not None
+        and load_finished_id < end_fence_id,
+        f"correctness prerequisite lacks ordered completed fence IDs: {path}",
     )
 
 
@@ -250,7 +271,7 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
             ],
         ):
             values = [float(result[field]) for result in results]
-            metrics[field] = {"per_repetition": values, "median": statistics.median(values)}
+            metrics[field] = {"per_repetition": values, "mean": statistics.fmean(values)}
         summary["cells"][cell["id"]] = {
             "accepted_repetitions": len(results),
             "rejected_repetitions": 0,
@@ -284,7 +305,7 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
             "measured_cell": comparison["measured_cell"],
             "metric": comparison["metric"],
             "overhead_percent_per_repetition": overheads,
-            "median_overhead_percent": statistics.median(overheads),
+            "mean_overhead_percent": statistics.fmean(overheads),
         }
     (root / "matrix.json").write_bytes(matrix_path.read_bytes())
     (root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -325,26 +346,26 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
     for cell in matrix["cells"]:
         results = results_by_cell[cell["id"]]
 
-        def optional_median(field: str) -> float | str:
+        def optional_mean(field: str) -> float | str:
             values = [float(result[field]) for result in results if result.get(field) is not None]
-            return statistics.median(values) if values else ""
+            return statistics.fmean(values) if values else ""
 
         concise_rows.append(
             {
                 "backend": cell["backend"],
                 "benchmark": cell["benchmark"],
                 "mode": cell["mode"],
-                "client_p95_latency_microseconds": optional_median(
+                "client_p95_latency_microseconds": optional_mean(
                     "client_p95_latency_microseconds"
                 ),
-                "e2e_time_seconds": optional_median("e2e_end_to_verdict_seconds"),
-                "client_throughput_transactions_per_second": optional_median(
+                "e2e_time_seconds": optional_mean("e2e_end_to_verdict_seconds"),
+                "client_throughput_transactions_per_second": optional_mean(
                     "client_logical_transactions_per_second"
                 ),
-                "monitor_throughput_transactions_per_second": optional_median(
+                "monitor_throughput_transactions_per_second": optional_mean(
                     "monitor_checker_transactions_per_component_second"
                 ),
-                "e2e_throughput_transactions_per_second": optional_median(
+                "e2e_throughput_transactions_per_second": optional_mean(
                     "e2e_transactions_per_second"
                 ),
             }
@@ -360,7 +381,7 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
     markdown = [
         "# Performance summary",
         "",
-        "All values are medians across accepted repetitions.",
+        "All values are arithmetic means across accepted repetitions.",
         "",
         "| Backend | Benchmark | Mode | Client p95 (µs) | E2E time (s) | Client throughput (txn/s) | Monitor throughput (txn/s) | E2E throughput (txn/s) |",
         "|---|---|---|---:|---:|---:|---:|---:|",
