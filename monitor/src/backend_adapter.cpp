@@ -2022,13 +2022,13 @@ constexpr auto oracle_fact_contract = std::to_array<BackendFactRule>({
     {"archive_log_mode", BackendFactValueRule::Exact, "ARCHIVELOG"},
     {"force_logging", BackendFactValueRule::Exact, "YES"},
     {"supplemental_log_data_min", BackendFactValueRule::Exact, "YES"},
-    {"online_redo_log_groups", BackendFactValueRule::Exact, "6"},
-    {"online_redo_large_groups", BackendFactValueRule::Exact, "4"},
-    {"online_redo_large_group_bytes", BackendFactValueRule::Exact, "536870912"},
+    {"online_redo_log_groups", BackendFactValueRule::RecordOnly, {}},
+    {"online_redo_large_groups", BackendFactValueRule::RecordOnly, {}},
+    {"online_redo_large_group_bytes", BackendFactValueRule::RecordOnly, {}},
     {"table_supplemental_logging", BackendFactValueRule::Exact, "ALL_COLUMNS"},
     {"log_mining_strategy", BackendFactValueRule::Exact, "online_catalog"},
-    {"log_mining_batch_size_default", BackendFactValueRule::Exact, "20000"},
-    {"log_mining_sleep_profile", BackendFactValueRule::Exact, "0_200_1000_200"},
+    {"log_mining_batch_size_default", BackendFactValueRule::RecordOnly, {}},
+    {"log_mining_sleep_profile", BackendFactValueRule::RecordOnly, {}},
     {"physical_capture_profile", BackendFactValueRule::Exact,
      "oracle_logminer_all_columns_v1"},
     {"connector_class", BackendFactValueRule::Exact,
@@ -2480,6 +2480,8 @@ void BackendAdapter::validateSchemaAttestation(
     case BackendFactValueRule::PositiveInteger:
       valid = valid && is_positive_integer(fact.canonical_value);
       break;
+    case BackendFactValueRule::RecordOnly:
+      break; // Experimental tuning metadata, not a fixed correctness premise.
     }
     if (!valid) {
       throw MonitorError(

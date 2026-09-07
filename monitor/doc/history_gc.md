@@ -98,8 +98,9 @@ end-to-end monitor wall/CPU measurements include all of this work.
 Pruning releases history entries, their delta arrays, and value references.
 When no current snapshot entry or retained delta owns a value, its payload is
 freed and its ID slot recycled. Shared values remain alive until their last
-reference is released. Key interning, current state, and evidence identity
-tables are unchanged. An idle session can pin history until it advances or
+reference is released. Key interning and current state are unchanged. Identity
+retention follows the [prototype input contract](prototype_input_contract.md).
+An idle session can pin history until it advances or
 completes; no fixed bound on total memory is claimed. The existing resource
 limits still apply, including during bootstrap and while processing a
 transaction before its subsequent GC step.

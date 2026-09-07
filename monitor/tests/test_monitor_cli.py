@@ -486,7 +486,6 @@ def check_join_only_early_failure_artifact(executable):
             "max_events_per_transaction": 100000,
             "max_active_bytes": 268435456,
             "max_completed_transactions": 10000000,
-            "max_retained_identity_bytes": 268435456,
         }
         assert measurement["limits"]["joiner"] == {
             "max_pending_client_records": 1000000,
@@ -504,8 +503,6 @@ def check_join_only_early_failure_artifact(executable):
             "history_gc": False,
             "max_retained_state_bytes": 536870912,
             "max_events_per_transaction": 101000,
-            "max_mapped_identity_records": 10000000,
-            "max_mapped_identity_bytes": 536870912,
         }
         assert {
             "active_transactions_high_water",
@@ -561,7 +558,6 @@ def check_capacity_options(executable):
         "--max-assembler-events-per-transaction",
         "--max-assembler-active-bytes",
         "--max-assembler-completed-transactions",
-        "--max-assembler-retained-identity-bytes",
         "--max-pending-client-records",
         "--max-pending-client-bytes",
         "--max-pending-cdc-slots",
@@ -608,8 +604,6 @@ def check_capacity_options(executable):
                     "536870912",
                     "--max-assembler-completed-transactions",
                     "20000000",
-                    "--max-assembler-retained-identity-bytes",
-                    "536870912",
                     "--max-pending-client-records",
                     "2000000",
                     "--max-pending-client-bytes",
@@ -643,7 +637,6 @@ def check_capacity_options(executable):
             "max_events_per_transaction": 200000,
             "max_active_bytes": 536870912,
             "max_completed_transactions": 20000000,
-            "max_retained_identity_bytes": 536870912,
         }
         assert measurement["limits"]["joiner"] == {
             "max_pending_client_records": 2000000,
@@ -661,8 +654,6 @@ def check_capacity_options(executable):
             "history_gc": True,
             "max_retained_state_bytes": 2147483648,
             "max_events_per_transaction": 202000,
-            "max_mapped_identity_records": 20000000,
-            "max_mapped_identity_bytes": 2147483648,
         }
         assert measurement["process"]["workload_rss_sampling_enabled"] is True
         assert measurement["process"]["workload_rss_sampling_started"] is False

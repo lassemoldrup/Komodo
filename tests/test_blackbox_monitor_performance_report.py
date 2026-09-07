@@ -563,13 +563,6 @@ class MonitorPerformanceReportTest(unittest.TestCase):
                 "differs from trial metadata",
             ),
             (
-                "capacity threshold",
-                lambda value: value["assembler"].__setitem__(
-                    "active_transactions_high_water", 717
-                ),
-                "not below its capacity threshold",
-            ),
-            (
                 "active drain timer",
                 lambda value: value["joiner"].__setitem__(
                     "end_fence_drain_current_nanoseconds", 1
@@ -598,6 +591,17 @@ class MonitorPerformanceReportTest(unittest.TestCase):
                 self.mutate(trial / "monitor_metrics.json", mutate)
                 with self.assertRaisesRegex(report.MonitorReportError, message):
                     report.collect_trials(root)
+
+    def test_capacity_above_old_headroom_threshold_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_complete_roster(root)
+            for path in root.rglob("monitor_metrics.json"):
+                self.mutate(path, lambda value: value["assembler"].__setitem__(
+                    "active_transactions_high_water", 900))
+            rows, _ = report.collect_trials(root)
+            self.assertTrue(all(row["peak_capacity_utilization_percent"] > 70
+                                for row in rows))
 
     def test_history_gc_is_recorded_and_cannot_be_mixed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

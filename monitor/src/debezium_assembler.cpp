@@ -325,7 +325,7 @@ public:
   }
 
   [[nodiscard]] std::size_t retainedIdentityBytes() const noexcept {
-    return retained_identity_bytes_;
+    return 0U; // No completed-transaction identity registry.
   }
 
   [[nodiscard]] DebeziumAssemblerMetrics metrics() const noexcept {
@@ -358,12 +358,6 @@ public:
             observed_events_per_transaction_high_water_,
         .active_assembly_bytes = active_bytes_,
         .active_assembly_high_water_bytes = active_bytes_high_water_,
-        .retained_identity_records = completed_structural_ids_.size(),
-        .retained_identity_bytes = retained_identity_bytes_,
-        .retained_identity_high_water_records =
-            retained_identity_high_water_records_,
-        .retained_identity_high_water_bytes =
-            retained_identity_high_water_bytes_,
     };
   }
 
@@ -399,13 +393,6 @@ private:
     CdcErrorCode code;
     std::string message;
     std::string stream_id;
-  };
-
-  struct MarkerInsert {
-    RunScopedCorrelationId correlation_id;
-    std::string session_id;
-    std::uint64_t txn_id = 0;
-    std::string identity;
   };
 
   [[noreturn]] void fail(const CdcErrorCode code,
@@ -488,8 +475,7 @@ private:
     if (config_.max_active_transactions == 0U ||
         config_.max_events_per_transaction == 0U ||
         config_.max_active_bytes == 0U ||
-        config_.max_completed_transactions == 0U ||
-        config_.max_retained_identity_bytes == 0U) {
+        config_.max_completed_transactions == 0U) {
       throw std::invalid_argument("assembler resource limits must be positive");
     }
 
@@ -814,18 +800,6 @@ private:
         std::max(active_bytes_high_water_, active_bytes_);
   }
 
-  void reserveRetainedIdentityBytes(const std::size_t additional) {
-    if (additional > config_.max_retained_identity_bytes ||
-        retained_identity_bytes_ >
-            config_.max_retained_identity_bytes - additional) {
-      fail(CdcErrorCode::ResourceExhausted,
-           "retained CDC identity byte limit exceeded");
-    }
-    retained_identity_bytes_ += additional;
-    retained_identity_high_water_bytes_ =
-        std::max(retained_identity_high_water_bytes_, retained_identity_bytes_);
-  }
-
   [[nodiscard]] std::optional<CdcTransaction> completeTransaction(
       const std::unordered_map<std::string, ActiveTransaction>::iterator active,
       const BackendCdcRecord &end, const std::string &end_stream_id) {
@@ -864,20 +838,14 @@ private:
       fail(CdcErrorCode::ResourceExhausted,
            "completed CDC transaction limit exceeded");
     }
-    const auto structural_id = active->second.structural_id;
     const auto released_bytes = active->second.raw_bytes;
     const auto raw_row_count = active->second.rows.size();
     const auto normalized_write_count = assembled.writes.size();
     const auto classification = assembled.kind;
     completed_processing_before_current_ =
         active->second.processing_nanoseconds;
-    reserveRetainedIdentityBytes(structural_id.size());
     active_.erase(active);
     active_bytes_ -= released_bytes;
-    completed_structural_ids_.insert(structural_id);
-    retained_identity_high_water_records_ =
-        std::max(retained_identity_high_water_records_,
-                 completed_structural_ids_.size());
     assembled.cdc_seq = next_cdc_seq_;
     ++next_cdc_seq_;
     raw_row_events_ += static_cast<std::uint64_t>(raw_row_count);
@@ -1003,16 +971,9 @@ private:
       }
     }
     result.kind = CdcTransactionKind::WorkloadMarked;
-    result.correlation_id = marker.correlation_id;
+    result.correlation_id = marker;
     result.writes = normalizeApplicationWrites(application_rows);
 
-    if (seen_marker_identities_.contains(marker.identity)) {
-      fail(CdcErrorCode::MarkerDuplicate, "unified marker identity was reused");
-    }
-    reserveRetainedIdentityBytes(marker.identity.size());
-    // reserveRetainedIdentityBytes is intentionally before these insertions:
-    // an allocation failure is sticky and cannot be mistaken for a valid run.
-    seen_marker_identities_.insert(marker.identity);
     return result;
   }
 
@@ -1094,7 +1055,7 @@ private:
     }
   }
 
-  [[nodiscard]] MarkerInsert validateMarker(const RowEvent &row) const {
+  [[nodiscard]] RunScopedCorrelationId validateMarker(const RowEvent &row) const {
     if (row.operation != "c" || !row.after.is_object()) {
       fail(CdcErrorCode::MarkerMalformed,
            "session_txn marker must be an insert with a complete final row");
@@ -1127,19 +1088,11 @@ private:
            "session_txn key/session/txn_id is malformed or inconsistent");
     }
 
-    const std::string identity =
-        after_session + '\0' + std::to_string(after_txn);
-    if (seen_marker_identities_.contains(identity)) {
-      fail(CdcErrorCode::MarkerDuplicate, "unified marker identity was reused");
-    }
-    return MarkerInsert{
-        .correlation_id = RunScopedCorrelationId{.run_id = config_.run_id,
-                                                 .session_id = after_session,
-                                                 .txn_id = after_txn},
-        .session_id = after_session,
-        .txn_id = after_txn,
-        .identity = identity,
-    };
+    // Per-session marker order is checked at the joiner boundary. This layer
+    // validates framing and row shape without retaining every past marker.
+    return RunScopedCorrelationId{.run_id = config_.run_id,
+                                  .session_id = after_session,
+                                  .txn_id = after_txn};
   }
 
   [[nodiscard]] std::vector<NormalizedWrite>
@@ -1251,8 +1204,6 @@ private:
   QualifiedTable marker_table_;
   QualifiedTable fence_table_;
   std::unordered_map<std::string, ActiveTransaction> active_;
-  std::unordered_set<std::string> completed_structural_ids_;
-  std::unordered_set<std::string> seen_marker_identities_;
   std::set<RunFencePhase> seen_fences_;
   LifecyclePhase lifecycle_phase_ = LifecyclePhase::AwaitRunStart;
   std::optional<StreamId> last_stream_id_;
@@ -1277,9 +1228,6 @@ private:
   std::size_t observed_events_per_transaction_high_water_ = 0;
   std::size_t active_bytes_ = 0;
   std::size_t active_bytes_high_water_ = 0;
-  std::size_t retained_identity_bytes_ = 0;
-  std::size_t retained_identity_high_water_records_ = 0;
-  std::size_t retained_identity_high_water_bytes_ = 0;
   std::size_t startup_schema_snapshot_records_ = 0;
   std::optional<Failure> failure_;
   std::optional<std::string> current_timed_structural_id_;

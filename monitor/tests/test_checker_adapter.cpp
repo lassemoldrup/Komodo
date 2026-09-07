@@ -383,6 +383,21 @@ void testInputAndSequenceErrorsAreSticky() {
 
 void testStateLimitAndIdentityCollision() {
   {
+    auto checker = adapter();
+    checker.consumePhaseAnchor(0U, session_one);
+    for (std::uint64_t sequence = 1U; sequence <= 1024U; ++sequence) {
+      const auto suffix = std::to_string(sequence);
+      const auto padded = std::string(12U - suffix.size(), '0') + suffix;
+      checker.consumeWorkload(sequence,
+          client(session_one, sequence, sequence, {},
+                 "11111111-1111-4111-8111-" + padded,
+                 "22222222-2222-4222-8222-" + padded), {});
+    }
+    BLACKBOX_CHECK(checker.metrics().workload_transactions == 1024U);
+    BLACKBOX_CHECK(checker.metrics().mapped_identity_records == 0U);
+    BLACKBOX_CHECK(checker.metrics().mapped_identity_bytes == 0U);
+  }
+  {
     auto checker = adapter(0U);
     expectError(
         checker,

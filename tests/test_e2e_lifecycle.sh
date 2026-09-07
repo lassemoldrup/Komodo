@@ -323,7 +323,6 @@ assembler_active_transactions=1024
 assembler_events_per_transaction=100000
 assembler_active_bytes=268435456
 assembler_completed_transactions=10000000
-assembler_retained_identity_bytes=268435456
 pending_client_records=1000000
 pending_client_bytes=268435456
 pending_cdc_slots=1000000
@@ -344,7 +343,6 @@ while (( $# > 0 )); do
     --max-assembler-events-per-transaction) assembler_events_per_transaction=$2; shift 2 ;;
     --max-assembler-active-bytes) assembler_active_bytes=$2; shift 2 ;;
     --max-assembler-completed-transactions) assembler_completed_transactions=$2; shift 2 ;;
-    --max-assembler-retained-identity-bytes) assembler_retained_identity_bytes=$2; shift 2 ;;
     --max-pending-client-records) pending_client_records=$2; shift 2 ;;
     --max-pending-client-bytes) pending_client_bytes=$2; shift 2 ;;
     --max-pending-cdc-slots) pending_cdc_slots=$2; shift 2 ;;
@@ -366,7 +364,6 @@ echo "monitor:assembler-active-transactions:$assembler_active_transactions" >>"$
 echo "monitor:assembler-events-per-transaction:$assembler_events_per_transaction" >>"$EVENT_LOG"
 echo "monitor:assembler-active-bytes:$assembler_active_bytes" >>"$EVENT_LOG"
 echo "monitor:assembler-completed-transactions:$assembler_completed_transactions" >>"$EVENT_LOG"
-echo "monitor:assembler-retained-identity-bytes:$assembler_retained_identity_bytes" >>"$EVENT_LOG"
 echo "monitor:pending-client-records:$pending_client_records" >>"$EVENT_LOG"
 echo "monitor:pending-client-bytes:$pending_client_bytes" >>"$EVENT_LOG"
 echo "monitor:pending-cdc-slots:$pending_cdc_slots" >>"$EVENT_LOG"
@@ -757,7 +754,6 @@ run_case() {
       BLACKBOX_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION="${TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION:-}" \
       BLACKBOX_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES="${TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES:-}" \
       BLACKBOX_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS="${TEST_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS:-}" \
-      BLACKBOX_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES="${TEST_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES:-}" \
       BLACKBOX_MONITOR_MAX_PENDING_CLIENT_RECORDS="${TEST_MONITOR_MAX_PENDING_CLIENT_RECORDS:-}" \
       BLACKBOX_MONITOR_MAX_PENDING_CLIENT_BYTES="$pending_client_bytes" \
       BLACKBOX_MONITOR_MAX_PENDING_CDC_SLOTS="${TEST_MONITOR_MAX_PENDING_CDC_SLOTS:-}" \
@@ -920,7 +916,6 @@ export TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS=111
 export TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION=112
 export TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES=113
 export TEST_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=114
-export TEST_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=115
 export TEST_MONITOR_MAX_PENDING_CLIENT_RECORDS=116
 export TEST_MONITOR_MAX_PENDING_CDC_SLOTS=117
 export TEST_MONITOR_MAX_PENDING_CDC_BYTES=118
@@ -934,7 +929,6 @@ unset TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS
 unset TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION
 unset TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES
 unset TEST_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS
-unset TEST_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES
 unset TEST_MONITOR_MAX_PENDING_CLIENT_RECORDS
 unset TEST_MONITOR_MAX_PENDING_CDC_SLOTS
 unset TEST_MONITOR_MAX_PENDING_CDC_BYTES
@@ -951,8 +945,6 @@ grep -q '^monitor:assembler-active-bytes:113$' "$CASE_LOG" ||
   fail 'coordinator did not pass assembler active-byte capacity'
 grep -q '^monitor:assembler-completed-transactions:114$' "$CASE_LOG" ||
   fail 'coordinator did not pass assembler completed-transaction capacity'
-grep -q '^monitor:assembler-retained-identity-bytes:115$' "$CASE_LOG" ||
-  fail 'coordinator did not pass assembler identity capacity'
 grep -q '^monitor:pending-client-records:116$' "$CASE_LOG" ||
   fail 'coordinator did not pass pending-client record capacity'
 grep -q '^monitor:pending-client-bytes:1073741824$' "$CASE_LOG" ||
@@ -992,7 +984,6 @@ for invalid_limit_name in \
   TEST_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION \
   TEST_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES \
   TEST_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS \
-  TEST_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES \
   TEST_MONITOR_MAX_PENDING_CLIENT_RECORDS \
   TEST_MONITOR_MAX_PENDING_CDC_SLOTS \
   TEST_MONITOR_MAX_PENDING_CDC_BYTES \

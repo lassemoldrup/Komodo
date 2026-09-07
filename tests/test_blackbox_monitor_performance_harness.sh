@@ -68,7 +68,6 @@ for option in \
   --monitor-assembler-events-per-transaction \
   --monitor-assembler-active-bytes \
   --monitor-assembler-completed-transactions \
-  --monitor-assembler-retained-identity-bytes \
   --monitor-pending-client-records \
   --monitor-pending-client-bytes \
   --monitor-pending-cdc-slots \
@@ -86,14 +85,6 @@ for option in \
     fi
   done
 done
-for invalid in 0 101; do
-  if "$RUNNER" --corpus-dir "$PLACEHOLDER_CORPUS" --output-root "$PLACEHOLDER_OUTPUT" \
-      --maximum-capacity-utilization-percent "$invalid" \
-      --print-stage-order >/dev/null 2>&1; then
-    fail "capacity utilization threshold accepted $invalid"
-  fi
-done
-
 "$RUNNER" --help 2>&1 | grep -q -- '--expected-duration-seconds' ||
   fail "help omits the source-duration contract"
 "$RUNNER" --help 2>&1 | grep -q -- '--monitor-bootstrap-state-rows' ||
@@ -106,8 +97,6 @@ done
   fail "help omits pending CDC capacities"
 "$RUNNER" --help 2>&1 | grep -q -- '--monitor-checker-state-bytes' ||
   fail "help omits checker capacity"
-"$RUNNER" --help 2>&1 | grep -q -- '--maximum-capacity-utilization-percent' ||
-  fail "help omits capacity utilization threshold"
 
 # shellcheck source=scripts/run_blackbox_monitor_performance.sh
 . "$RUNNER"

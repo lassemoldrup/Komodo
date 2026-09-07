@@ -106,12 +106,12 @@ class OracleSmallBankAssetsTest(unittest.TestCase):
         self.assertIn("SIZE 512M", prerequisites)
         backend = json.loads((ROOT / "protocol/backends/oracle.json").read_text(encoding="utf-8"))
         facts = {
-            item["name"]: item.get("expected_value")
+            item["name"]: item["value_rule"]
             for item in backend["attestation_fact_contract"]
         }
-        self.assertEqual(facts["online_redo_log_groups"], "6")
-        self.assertEqual(facts["online_redo_large_groups"], "4")
-        self.assertEqual(facts["online_redo_large_group_bytes"], "536870912")
+        self.assertEqual(facts["online_redo_log_groups"], "record_only")
+        self.assertEqual(facts["online_redo_large_groups"], "record_only")
+        self.assertEqual(facts["online_redo_large_group_bytes"], "record_only")
 
 
 if __name__ == "__main__":

@@ -90,8 +90,6 @@ test-yugabytedb-ysql-connector-contract:
 ## Destructive integration against the pinned MariaDB/Debezium/Redis stack
 test-lifecycle-live: test-monitor
 	BLACKBOX_CDC_REPLAY_BIN=$(MONITOR_BUILD_DIR)/blackbox_cdc_replay \
-	BLACKBOX_CDC_INGEST_BIN=$(MONITOR_BUILD_DIR)/blackbox_cdc_ingest \
-	BLACKBOX_PREFIX_INGEST_BIN=$(MONITOR_BUILD_DIR)/blackbox_prefix_ingest \
 	BLACKBOX_MONITOR_BIN=$(MONITOR_BUILD_DIR)/blackbox_run_monitor \
 		./tests/test_mariadb_lifecycle.sh
 

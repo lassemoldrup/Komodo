@@ -31,7 +31,7 @@
             "name": { "$ref": "common.schema.json#/$defs/canonicalIdentifier" },
             "value_rule": {
               "type": "string",
-              "enum": ["sha256", "canonical_identifier", "positive_integer"]
+              "enum": ["sha256", "canonical_identifier", "positive_integer", "record_only"]
             }
           }
         }

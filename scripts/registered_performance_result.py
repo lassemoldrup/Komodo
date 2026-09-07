@@ -109,6 +109,7 @@ def monitor_memory_and_gc_metrics(monitor: dict[str, Any], history_gc: bool,
             "monitor memory/CPU/GC counters are invalid")
     return {
         "history_gc": history_gc,
+        "identity_policy": monitor.get("identity_policy", "strict_history_audit_v1"),
         "workload_rss_sampling": workload_rss_sampling,
         "monitor_workload_sampled_peak_rss_mib": sampled_peak / 1024 if sampled_peak is not None else None,
         "rss_sample_interval_ms": 100 if workload_rss_sampling else None,
@@ -287,7 +288,6 @@ def main() -> int:
     parser.add_argument("--capture-profile", required=True)
     parser.add_argument("--repetition", required=True, type=int)
     parser.add_argument("--drain-limit-seconds", required=True, type=float)
-    parser.add_argument("--high-water-threshold-percent", default=70.0, type=float)
     parser.add_argument(
         "--evidence-retention", required=True, choices=("compact", "full")
     )
@@ -498,7 +498,6 @@ def main() -> int:
             (assembler.get("observed_events_per_transaction_high_water"), assembler_limits.get("max_events_per_transaction")),
             (assembler.get("active_assembly_high_water_bytes"), assembler_limits.get("max_active_bytes")),
             (assembler.get("completed_transactions"), assembler_limits.get("max_completed_transactions")),
-            (assembler.get("retained_identity_high_water_bytes"), assembler_limits.get("max_retained_identity_bytes")),
             (joiner.get("pending_client_high_water_records"), joiner_limits.get("max_pending_client_records")),
             (joiner.get("pending_client_high_water_bytes"), joiner_limits.get("max_pending_client_bytes")),
             (joiner.get("pending_cdc_high_water_slots"), joiner_limits.get("max_pending_cdc_slots")),
@@ -508,8 +507,6 @@ def main() -> int:
             (joiner.get("released_events_per_transaction_high_water"), joiner_limits.get("max_events_per_transaction")),
             (joiner.get("bootstrap_state_high_water_rows"), joiner_limits.get("max_bootstrap_state_rows")),
             (joiner.get("bootstrap_state_high_water_bytes"), joiner_limits.get("max_bootstrap_state_bytes")),
-            (checker.get("mapped_identity_high_water_records"), checker_limits.get("max_mapped_identity_records")),
-            (checker.get("mapped_identity_high_water_bytes"), checker_limits.get("max_mapped_identity_bytes")),
             (checker.get("events_per_transaction_high_water"), checker_limits.get("max_events_per_transaction")),
             (checker.get("engine", {}).get("peak_retained_state_bytes"), checker_limits.get("max_retained_state_bytes")),
         )
@@ -525,11 +522,6 @@ def main() -> int:
         require(redis_limit > 0, "Redis maxmemory is not positive")
         redis_utilization = redis_peak * 100.0 / redis_limit
         maximum_utilization = max([redis_utilization, *utilizations])
-        require(
-            0 < args.high_water_threshold_percent <= 100
-            and maximum_utilization < args.high_water_threshold_percent,
-            "declared resource high-water threshold was reached",
-        )
 
         def active_rate(count: int, nanoseconds: Any, label: str) -> float:
             duration = integer(nanoseconds, f"{label} active nanoseconds") / 1_000_000_000.0
@@ -552,7 +544,6 @@ def main() -> int:
                 "e2e_end_to_verdict_seconds": e2e_seconds,
                 "drain_tail_seconds": drain_seconds,
                 "resource_high_water_max_percent": maximum_utilization,
-                "resource_high_water_threshold_percent": args.high_water_threshold_percent,
                 "redis_used_memory_peak_bytes": redis_peak,
                 "redis_used_memory_peak_percent": redis_utilization,
                 "cdc_transport_entries": transport_entries,

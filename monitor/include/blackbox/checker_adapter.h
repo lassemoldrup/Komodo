@@ -53,8 +53,6 @@ struct CheckerAdapterConfig {
   std::vector<std::string> expected_session_ids;
   std::size_t max_retained_state_bytes = 512U * 1024U * 1024U;
   std::size_t max_events_per_transaction = 101000U;
-  std::size_t max_mapped_identity_records = 10000000U;
-  std::size_t max_mapped_identity_bytes = 256U * 1024U * 1024U;
   std::function<std::uint64_t()> monotonic_clock_nanoseconds = {};
   bool history_gc = false;
 };
@@ -75,6 +73,7 @@ struct CheckerAdapterMetrics {
   std::uint64_t workload_write_events = 0;
   std::uint64_t workload_consume_total_nanoseconds = 0;
   std::uint64_t workload_consume_max_nanoseconds = 0;
+  // Compatibility metrics: zero under the ordered-unique-input contract.
   std::size_t mapped_identity_records = 0;
   std::size_t mapped_identity_bytes = 0;
   std::size_t mapped_identity_high_water_records = 0;

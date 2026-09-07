@@ -125,6 +125,7 @@ enum class BackendFactValueRule {
   Sha256,
   CanonicalIdentifier,
   PositiveInteger,
+  RecordOnly,
 };
 
 struct BackendFactRule {

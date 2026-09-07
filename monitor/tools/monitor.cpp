@@ -83,8 +83,6 @@ struct Options {
       blackbox::DebeziumAssemblerConfig{}.max_active_bytes;
   std::size_t max_assembler_completed_transactions =
       blackbox::DebeziumAssemblerConfig{}.max_completed_transactions;
-  std::size_t max_assembler_retained_identity_bytes =
-      blackbox::DebeziumAssemblerConfig{}.max_retained_identity_bytes;
   std::size_t max_pending_client_records =
       blackbox::TransactionJoinerLimits{}.max_pending_client_records;
   std::size_t max_pending_client_bytes =
@@ -241,9 +239,6 @@ parseExpectedBackendFact(const std::string_view value) {
     } else if (argument == "--max-assembler-completed-transactions") {
       options.max_assembler_completed_transactions =
           parsePositiveSize(value, "max assembler completed transactions");
-    } else if (argument == "--max-assembler-retained-identity-bytes") {
-      options.max_assembler_retained_identity_bytes =
-          parsePositiveSize(value, "max assembler retained identity bytes");
     } else if (argument == "--max-pending-client-records") {
       options.max_pending_client_records =
           parsePositiveSize(value, "max pending client records");
@@ -1095,9 +1090,7 @@ public:
                      options_.max_assembler_events_per_transaction},
                     {"max_active_bytes", options_.max_assembler_active_bytes},
                     {"max_completed_transactions",
-                     options_.max_assembler_completed_transactions},
-                    {"max_retained_identity_bytes",
-                     options_.max_assembler_retained_identity_bytes}}},
+                     options_.max_assembler_completed_transactions}}},
               {"joiner",
                Json{{"max_pending_client_records",
                      options_.max_pending_client_records},
@@ -1121,11 +1114,7 @@ public:
                                {"max_retained_state_bytes",
                                 options_.max_checker_state_bytes},
                                {"max_events_per_transaction",
-                                options_.max_events_per_transaction},
-                               {"max_mapped_identity_records",
-                                options_.max_retained_identity_records},
-                               {"max_mapped_identity_bytes",
-                                options_.max_retained_identity_bytes}}}}},
+                                options_.max_events_per_transaction}}}}},
         {"assembler", assemblerMetricsJson(assembler_metrics_)},
         {"joiner", joinerMetricsJson(joiner_metrics_)},
         {"checker", checkerMetricsJson(joiner_metrics_.checker)},
@@ -1133,6 +1122,7 @@ public:
         {"diagnostics", diagnosticsJson(diagnostics_)},
     };
     auto &process = result["process"];
+    result["identity_policy"] = "ordered_unique_input_v1";
     result["memory_profile"] = Json{
         {"enabled", memory_profile_enabled_},
         {"sample_interval_ms", 30000},
@@ -1500,8 +1490,6 @@ int run(const Options &options) {
         .max_active_bytes = options.max_assembler_active_bytes,
         .max_completed_transactions =
             options.max_assembler_completed_transactions,
-        .max_retained_identity_bytes =
-            options.max_assembler_retained_identity_bytes,
     });
     reader_storage = std::make_unique<BlockingRedisReader>(
         reader_context.get(),

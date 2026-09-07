@@ -46,9 +46,7 @@
         "--monitor-bootstrap-state-bytes",
         "536870912",
         "--monitor-retained-identity-bytes",
-        "2147483648",
-        "--high-water-threshold-percent",
-        "70"
+        "2147483648"
       ],
       "parameters": {
         "BENCHBASE_MEASUREMENT_BATCH_SIZE": 128,
@@ -107,9 +105,7 @@
         "--monitor-bootstrap-state-bytes",
         "536870912",
         "--monitor-retained-identity-bytes",
-        "2147483648",
-        "--high-water-threshold-percent",
-        "70"
+        "2147483648"
       ],
       "parameters": {
         "BENCHBASE_MEASUREMENT_BATCH_SIZE": 128,
@@ -176,8 +172,6 @@
         "536870912",
         "--monitor-retained-identity-bytes",
         "2147483648",
-        "--high-water-threshold-percent",
-        "70",
         "--headline-transaction-type",
         "NewOrder",
         "--headline-rate-label",
@@ -239,8 +233,6 @@
         "536870912",
         "--monitor-retained-identity-bytes",
         "2147483648",
-        "--high-water-threshold-percent",
-        "70",
         "--headline-transaction-type",
         "NewOrder",
         "--headline-rate-label",
@@ -308,9 +300,7 @@
         "--monitor-bootstrap-state-bytes",
         "536870912",
         "--monitor-retained-identity-bytes",
-        "2147483648",
-        "--high-water-threshold-percent",
-        "70"
+        "2147483648"
       ],
       "parameters": {
         "BENCHBASE_MEASUREMENT_BATCH_SIZE": 128,
@@ -365,9 +355,7 @@
         "--monitor-bootstrap-state-bytes",
         "536870912",
         "--monitor-retained-identity-bytes",
-        "2147483648",
-        "--high-water-threshold-percent",
-        "70"
+        "2147483648"
       ],
       "parameters": {
         "BENCHBASE_MEASUREMENT_BATCH_SIZE": 128,

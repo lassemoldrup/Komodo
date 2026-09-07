@@ -180,6 +180,11 @@ Optional [history-delta GC](monitor/doc/history_gc.md) is enabled with
 `--history-gc on`, or `BLACKBOX_MONITOR_HISTORY_GC=on` in the runners. It defaults
 to `off` and uses the existing session anchors and validated completion records.
 
+The prototype uses an [ordered, unique-input contract](monitor/doc/prototype_input_contract.md).
+It retains pending matches and per-session progress, not full-history UUID or
+completed-transaction registries. Upstream UUID uniqueness and no recovery
+redelivery are preconditions; they are not additional checker verdicts.
+
 For workload-only sampled peak RSS, use `--workload-rss-sampling on` with
 `--metrics-output`, or set `workload_rss_sampling: true` in registered matrix
 cells. Sampling defaults to off and reads Linux `smaps_rollup` every 100 ms
@@ -227,15 +232,11 @@ cd /home/yifan/code/db-monitoring/si-monitoring
 make test-monitor
 ```
 
-`blackbox_cdc_replay` validates an `XRANGE --json` capture, while
-`blackbox_cdc_ingest` exercises bounded live multi-stream CDC ingestion.
-`blackbox_prefix_ingest` additionally consumes client transactions after an
-explicit client cursor and requires the exact validated bootstrap prefix,
-table count, and digest before releasing anchors. `make test-lifecycle-live`
-runs those diagnostic paths plus the complete one-run monitor against fresh
-MariaDB/Debezium/Redis evidence. The prefix tool deliberately leaves
-`END_FENCE` queued so its output continues to expose the pre-closure ordered
-prefix; the one-run monitor performs the audited terminal reconciliation.
+`blackbox_cdc_replay` validates a captured CDC stream; `blackbox_run_monitor`
+runs the complete live lifecycle. `make test-lifecycle-live` exercises the
+one-run monitor and offline CDC replay against fresh MariaDB evidence,
+including unknown-table, DDL and unmarked-writer failures. Intermediate
+live ingestion/prefix executables are no longer maintained.
 
 `make test-correctness-live` builds the BenchBase `FracturedReadProbe` client
 and runs four fresh audited stacks: a clean repeatable-read pass, a coordinated
@@ -428,11 +429,16 @@ YCSB weights, then writes one audited marker and commits once. The defaults are
 throughput and `client_logical_operations_per_second`, where the latter is the
 transaction rate multiplied by the declared operations per transaction.
 
-Backlog and head-of-line measurements remain in the reports as diagnostic
-telemetry. Acceptance requires terminal queues and unmatched evidence to be
-zero, the end-to-verdict tail to stay within `--drain-limit-seconds`, and
-resource high-water marks to remain below
-`--high-water-threshold-percent`; it does not impose a backlog-trend rule.
+Backlog, head-of-line and capacity-utilization measurements are diagnostic
+telemetry. Acceptance requires valid sampling, complete terminal reconciliation,
+empty terminal queues and the configured drain limit. There is no percentage
+headroom admission threshold. Actual component capacity limits remain enforced
+by the running components.
+
+Default failure evidence contains at most 64 tail records per stream, with
+a 5-second timeout per Redis command. Failure does not automatically request
+full streams. Full capture remains an explicit `--evidence-retention full`
+choice; its stream reads are bounded by the configured status timeout.
 
 The correctness evidence paths are prerequisites recorded in each matrix. A
 formal performance invocation verifies their checksum and admitted terminal
@@ -738,6 +744,6 @@ Development defaults, plaintext. MariaDB `root`/`rootpw`, `debezium`/`debezium_p
 `app`/`app_pw`. YugabyteDB application
 `blackbox_application`/`blackbox_application_password` and replication
 `blackbox_replication`/`blackbox_replication_password`. Audited Oracle runs
-derive fresh SYS, schema-owner, application, and LogMiner passwords from the
-new coordinator-owned run ID; the Compose defaults exist only for manual
-non-audited exploration.
+use the fixed SYS, schema-owner, application and LogMiner development defaults
+from Compose. Each can be overridden with its BLACKBOX_ORACLE_*_PASSWORD
+environment variable; application and administrative roles remain separate.

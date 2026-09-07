@@ -48,9 +48,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "parameters": {
         "BENCHBASE_MEASUREMENT_BATCH_SIZE": 128,
@@ -111,9 +109,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "parameters": {
         "BENCHBASE_MEASUREMENT_BATCH_SIZE": 128,
@@ -182,8 +178,6 @@
         "4294967296",
         "--monitor-checker-state-bytes",
         "1073741824",
-        "--high-water-threshold-percent",
-        "70",
         "--headline-transaction-type",
         "NewOrder",
         "--headline-rate-label",
@@ -247,8 +241,6 @@
         "4294967296",
         "--monitor-checker-state-bytes",
         "1073741824",
-        "--high-water-threshold-percent",
-        "70",
         "--headline-transaction-type",
         "NewOrder",
         "--headline-rate-label",
@@ -318,9 +310,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "parameters": {
         "BENCHBASE_MEASUREMENT_BATCH_SIZE": 128,
@@ -377,9 +367,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "parameters": {
         "BENCHBASE_MEASUREMENT_BATCH_SIZE": 128,

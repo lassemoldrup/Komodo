@@ -33,7 +33,6 @@ MONITOR_RETAINED_IDENTITY_BYTES=2147483648
 MONITOR_CHECKER_STATE_BYTES=536870912
 HISTORY_GC=${BLACKBOX_MONITOR_HISTORY_GC:-off}
 WORKLOAD_RSS_SAMPLING=${BLACKBOX_MONITOR_WORKLOAD_RSS_SAMPLING:-off}
-HIGH_WATER_THRESHOLD=70
 EVIDENCE_RETENTION=compact
 RETAINED_EVIDENCE=compact
 HEADLINE_TRANSACTION_TYPE=
@@ -73,7 +72,6 @@ while (( $# > 0 )); do
     --monitor-checker-state-bytes) MONITOR_CHECKER_STATE_BYTES=$2; shift 2 ;;
     --history-gc) HISTORY_GC=$2; shift 2 ;;
     --workload-rss-sampling) WORKLOAD_RSS_SAMPLING=$2; shift 2 ;;
-    --high-water-threshold-percent) HIGH_WATER_THRESHOLD=$2; shift 2 ;;
     --evidence-retention) EVIDENCE_RETENTION=$2; shift 2 ;;
     --headline-transaction-type) HEADLINE_TRANSACTION_TYPE=$2; shift 2 ;;
     --headline-rate-label) HEADLINE_RATE_LABEL=$2; shift 2 ;;
@@ -263,8 +261,8 @@ capture_full_streams() {
   [[ -f $OUTPUT/run-id.txt ]] || return 0
   local run_id
   run_id=$(tr -d '[:space:]' <"$OUTPUT/run-id.txt")
-  redis-cli -h host.docker.internal --json XRANGE cdc - + >"$OUTPUT/cdc-stream.json"
-  redis-cli -h host.docker.internal --json XRANGE "blackbox:client:$run_id" - + \
+  timeout "$STATUS_TIMEOUT" redis-cli -h host.docker.internal --json XRANGE cdc - + >"$OUTPUT/cdc-stream.json"
+  timeout "$STATUS_TIMEOUT" redis-cli -h host.docker.internal --json XRANGE "blackbox:client:$run_id" - + \
     >"$OUTPUT/client-stream.json"
   capture_status_and_redis_info
   RETAINED_EVIDENCE=full
@@ -320,11 +318,33 @@ capture_compact_streams() {
   RETAINED_EVIDENCE=compact
 }
 
+capture_failure_evidence() {
+  [[ -f $OUTPUT/run-id.txt ]] || return 0
+  local run_id
+  run_id=$(tr -d '[:space:]' <"$OUTPUT/run-id.txt")
+  # Failure diagnostics must not block cleanup or materialize the full streams.
+  timeout 5 redis-cli -h host.docker.internal --json XREVRANGE cdc + - COUNT 64 \
+    >"$OUTPUT/failure-cdc-tail.json" 2>"$OUTPUT/failure-cdc-tail.err" || true
+  timeout 5 redis-cli -h host.docker.internal --json \
+    XREVRANGE "blackbox:client:$run_id" + - COUNT 64 \
+    >"$OUTPUT/failure-client-tail.json" 2>"$OUTPUT/failure-client-tail.err" || true
+  timeout 5 redis-cli -h host.docker.internal --json \
+    XREVRANGE "blackbox:status:$run_id" + - COUNT 64 \
+    >"$OUTPUT/failure-status-tail.json" 2>"$OUTPUT/failure-status-tail.err" || true
+  timeout 5 redis-cli -h host.docker.internal --raw INFO all \
+    >"$OUTPUT/redis-info-after.txt" 2>"$OUTPUT/failure-redis-info.err" || true
+  jq -n --arg requested "$EVIDENCE_RETENTION" \
+    '{kind:"performance_evidence_retention",requested:$requested,retained:"diagnostic",
+      full_streams_retained:false,tail_records_per_stream:64,command_timeout_seconds:5}' \
+    >"$OUTPUT/evidence-retention.json"
+}
+
 capture_success_evidence() {
-  if [[ $EVIDENCE_RETENTION == compact ]] && capture_compact_streams; then
-    return 0
+  if [[ $EVIDENCE_RETENTION == full ]]; then
+    capture_full_streams
+  else
+    capture_compact_streams
   fi
-  capture_full_streams
 }
 
 compress_full_streams() {
@@ -496,11 +516,10 @@ if [[ $EXECUTION_PROFILE == coordinated_e2e ]]; then
       CELL_STATUS=1
       printf '%s\n' "$CELL_STATUS" >"$OUTPUT/e2e-exit-status.txt"
     fi
-  else
-    capture_full_streams || true
   fi
   capture_containers
   (( CELL_STATUS == 0 )) || {
+    capture_failure_evidence || true
     compress_full_streams || true
     teardown_stack
     STACK_MAY_BE_RUNNING=0
@@ -579,7 +598,6 @@ result_args=(
   --history-gc "$HISTORY_GC"
   --workload-rss-sampling "$WORKLOAD_RSS_SAMPLING"
   --drain-limit-seconds "$DRAIN_LIMIT"
-  --high-water-threshold-percent "$HIGH_WATER_THRESHOLD"
 )
 if [[ -n $HEADLINE_TRANSACTION_TYPE ]]; then
   result_args+=(--headline-transaction-type "$HEADLINE_TRANSACTION_TYPE"
@@ -599,23 +617,8 @@ if (( result_status == 0 )); then
   result_status=$?
 fi
 set -e
-if (( result_status != 0 )) &&
-   [[ $EXECUTION_PROFILE == coordinated_e2e && $RETAINED_EVIDENCE == compact ]]; then
-  if capture_full_streams; then
-    result_status=0
-    set +e
-    run_result_reporter
-    result_status=$?
-    if (( result_status == 0 )); then
-      jq -e '.accepted == true' "$OUTPUT/result.json" >/dev/null
-      result_status=$?
-    fi
-    set -e
-  else
-    result_status=1
-  fi
-fi
 if (( result_status != 0 )); then
+  capture_failure_evidence || true
   compress_full_streams || true
   teardown_stack
   STACK_MAY_BE_RUNNING=0

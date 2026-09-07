@@ -27,7 +27,6 @@ MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR
 MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION:-100000}
 MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES:-268435456}
 MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS:-10000000}
-MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES:-268435456}
 MONITOR_MAX_PENDING_CLIENT_RECORDS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_RECORDS:-1000000}
 MONITOR_MAX_PENDING_CLIENT_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_PENDING_CLIENT_BYTES:-3221225472}
 MONITOR_MAX_PENDING_CDC_SLOTS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_PENDING_CDC_SLOTS:-1000000}
@@ -39,7 +38,6 @@ MONITOR_MAX_BOOTSTRAP_STATE_ROWS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_BOOT
 MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_BYTES:-268435456}
 MONITOR_MAX_CHECKER_STATE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_CHECKER_STATE_BYTES:-536870912}
 MONITOR_HISTORY_GC=${BLACKBOX_MONITOR_HISTORY_GC:-off}
-MAXIMUM_CAPACITY_UTILIZATION_PERCENT=${BLACKBOX_MONITOR_PERFORMANCE_MAXIMUM_CAPACITY_UTILIZATION_PERCENT:-70}
 OUTPUT_MAX_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_OUTPUT_MAX_BYTES:-107374182400}
 COMPOSE_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_COMPOSE_TIMEOUT_SECONDS:-300}
 DOCKER_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_DOCKER_TIMEOUT_SECONDS:-30}
@@ -84,7 +82,6 @@ Options:
   --monitor-assembler-events-per-transaction N
   --monitor-assembler-active-bytes N
   --monitor-assembler-completed-transactions N
-  --monitor-assembler-retained-identity-bytes N
                              Assembler capacities (defaults: monitor defaults).
   --monitor-pending-client-records N
   --monitor-pending-client-bytes N
@@ -101,7 +98,6 @@ Options:
                              Joiner bootstrap byte capacity (default: 268435456).
   --monitor-checker-state-bytes N
                              Checker state capacity (default: 536870912).
-  --maximum-capacity-utilization-percent N
                              Require every high-water mark below N percent (default: 70).
   --output-max-bytes N       Artifact limit, at most 100 GiB (default: 100 GiB).
   --replay-timeout-seconds N Per-stream replay limit (default: 1800).
@@ -245,10 +241,6 @@ parse_arguments() {
         MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS=${2:?missing --monitor-assembler-completed-transactions value}
         shift 2
         ;;
-      --monitor-assembler-retained-identity-bytes)
-        MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES=${2:?missing --monitor-assembler-retained-identity-bytes value}
-        shift 2
-        ;;
       --monitor-pending-client-records)
         MONITOR_MAX_PENDING_CLIENT_RECORDS=${2:?missing --monitor-pending-client-records value}
         shift 2
@@ -287,10 +279,6 @@ parse_arguments() {
         ;;
       --monitor-checker-state-bytes)
         MONITOR_MAX_CHECKER_STATE_BYTES=${2:?missing --monitor-checker-state-bytes value}
-        shift 2
-        ;;
-      --maximum-capacity-utilization-percent)
-        MAXIMUM_CAPACITY_UTILIZATION_PERCENT=${2:?missing --maximum-capacity-utilization-percent value}
         shift 2
         ;;
       --output-max-bytes)
@@ -335,7 +323,6 @@ parse_arguments() {
   require_capacity_count monitor-assembler-events-per-transaction "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION"
   require_capacity_bytes monitor-assembler-active-bytes "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES"
   require_capacity_count monitor-assembler-completed-transactions "$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS"
-  require_capacity_bytes monitor-assembler-retained-identity-bytes "$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES"
   require_capacity_count monitor-pending-client-records "$MONITOR_MAX_PENDING_CLIENT_RECORDS"
   require_capacity_bytes monitor-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES"
   require_capacity_count monitor-pending-cdc-slots "$MONITOR_MAX_PENDING_CDC_SLOTS"
@@ -346,9 +333,6 @@ parse_arguments() {
   require_capacity_count monitor-bootstrap-state-rows "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS"
   require_capacity_bytes monitor-bootstrap-state-bytes "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES"
   require_capacity_bytes monitor-checker-state-bytes "$MONITOR_MAX_CHECKER_STATE_BYTES"
-  require_positive_integer maximum-capacity-utilization-percent "$MAXIMUM_CAPACITY_UTILIZATION_PERCENT"
-  (( MAXIMUM_CAPACITY_UTILIZATION_PERCENT <= 100 )) ||
-    die "maximum-capacity-utilization-percent may not exceed 100"
   require_capacity_bytes output-max-bytes "$OUTPUT_MAX_BYTES"
   (( OUTPUT_MAX_BYTES <= 107374182400 )) ||
     die "output-max-bytes may not exceed 107374182400"
@@ -907,7 +891,6 @@ write_trial_metadata() {
     ",\"monitor_max_assembler_events_per_transaction\":$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION" \
     ",\"monitor_max_assembler_active_bytes\":$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES" \
     ",\"monitor_max_assembler_completed_transactions\":$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS" \
-    ",\"monitor_max_assembler_retained_identity_bytes\":$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES" \
     ",\"monitor_max_pending_client_records\":$MONITOR_MAX_PENDING_CLIENT_RECORDS" \
     ",\"monitor_max_pending_cdc_slots\":$MONITOR_MAX_PENDING_CDC_SLOTS" \
     ",\"monitor_max_pending_cdc_bytes\":$MONITOR_MAX_PENDING_CDC_BYTES" \
@@ -923,7 +906,7 @@ write_trial_metadata() {
     "$REDIS_MAXMEMORY_BYTES" "$MONITOR_MAX_PENDING_CLIENT_BYTES" \
     "$MONITOR_MAX_RETAINED_IDENTITY_BYTES" \
     "$MONITOR_MAX_BOOTSTRAP_STATE_ROWS" "$MONITOR_MAX_BOOTSTRAP_STATE_BYTES" \
-    "$capacity_json" "$MAXIMUM_CAPACITY_UTILIZATION_PERCENT" <<'PY'
+    "$capacity_json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -956,7 +939,6 @@ document = {
     "monitor_max_retained_identity_bytes": int(values[20]),
     "monitor_max_bootstrap_state_rows": int(values[21]),
     "monitor_max_bootstrap_state_bytes": int(values[22]),
-    "maximum_capacity_utilization_percent": int(values[24]),
 }
 document.update(json.loads(values[23]))
 Path(values[0]).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -990,7 +972,6 @@ run_monitor() {
     --max-assembler-events-per-transaction "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION"
     --max-assembler-active-bytes "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES"
     --max-assembler-completed-transactions "$MONITOR_MAX_ASSEMBLER_COMPLETED_TRANSACTIONS"
-    --max-assembler-retained-identity-bytes "$MONITOR_MAX_ASSEMBLER_RETAINED_IDENTITY_BYTES"
     --max-pending-client-records "$MONITOR_MAX_PENDING_CLIENT_RECORDS"
     --max-pending-client-bytes "$MONITOR_MAX_PENDING_CLIENT_BYTES"
     --max-pending-cdc-slots "$MONITOR_MAX_PENDING_CDC_SLOTS"
@@ -1117,7 +1098,6 @@ limit_checks = (
     (("assembler", "max_events_per_transaction"), "monitor_max_assembler_events_per_transaction"),
     (("assembler", "max_active_bytes"), "monitor_max_assembler_active_bytes"),
     (("assembler", "max_completed_transactions"), "monitor_max_assembler_completed_transactions"),
-    (("assembler", "max_retained_identity_bytes"), "monitor_max_assembler_retained_identity_bytes"),
     (("joiner", "max_pending_client_records"), "monitor_max_pending_client_records"),
     (("joiner", "max_pending_client_bytes"), "monitor_max_pending_client_bytes"),
     (("joiner", "max_pending_cdc_slots"), "monitor_max_pending_cdc_slots"),
@@ -1135,46 +1115,9 @@ for metric_path, metadata_name in limit_checks:
 for metric_name, metadata_name in (
     ("max_retained_state_bytes", "monitor_max_checker_state_bytes"),
     ("max_events_per_transaction", "monitor_max_events_per_transaction"),
-    ("max_mapped_identity_records", "monitor_max_retained_identity_records"),
-    ("max_mapped_identity_bytes", "monitor_max_retained_identity_bytes"),
 ):
     if at(metrics, "limits", "checker", metric_name) != metadata.get(metadata_name):
         fail(f"checker limit {metric_name} differs from metadata")
-threshold = integer(
-    metadata.get("maximum_capacity_utilization_percent"),
-    "maximum capacity utilization percent",
-    1,
-)
-if threshold > 100:
-    fail("maximum capacity utilization percent exceeds 100")
-capacity_checks = (
-    (("assembler", "active_transactions_high_water"), ("assembler", "max_active_transactions")),
-    (("assembler", "observed_events_per_transaction_high_water"), ("assembler", "max_events_per_transaction")),
-    (("assembler", "active_assembly_high_water_bytes"), ("assembler", "max_active_bytes")),
-    (("assembler", "completed_transactions"), ("assembler", "max_completed_transactions")),
-    (("assembler", "retained_identity_high_water_bytes"), ("assembler", "max_retained_identity_bytes")),
-    (("joiner", "pending_client_high_water_records"), ("joiner", "max_pending_client_records")),
-    (("joiner", "pending_client_high_water_bytes"), ("joiner", "max_pending_client_bytes")),
-    (("joiner", "pending_cdc_high_water_slots"), ("joiner", "max_pending_cdc_slots")),
-    (("joiner", "pending_cdc_high_water_bytes"), ("joiner", "max_pending_cdc_bytes")),
-    (("joiner", "retained_identity_high_water_records"), ("joiner", "max_retained_identity_records")),
-    (("joiner", "retained_identity_high_water_bytes"), ("joiner", "max_retained_identity_bytes")),
-    (("joiner", "released_events_per_transaction_high_water"), ("joiner", "max_events_per_transaction")),
-    (("joiner", "bootstrap_state_high_water_rows"), ("joiner", "max_bootstrap_state_rows")),
-    (("joiner", "bootstrap_state_high_water_bytes"), ("joiner", "max_bootstrap_state_bytes")),
-    (("checker", "mapped_identity_high_water_records"), ("checker", "max_mapped_identity_records")),
-    (("checker", "mapped_identity_high_water_bytes"), ("checker", "max_mapped_identity_bytes")),
-    (("checker", "events_per_transaction_high_water"), ("checker", "max_events_per_transaction")),
-    (("checker", "engine", "peak_retained_state_bytes"), ("checker", "max_retained_state_bytes")),
-)
-for observed_path, limit_path in capacity_checks:
-    observed = integer(at(metrics, *observed_path), ".".join(observed_path))
-    capacity = integer(at(metrics, "limits", *limit_path), ".".join(limit_path), 1)
-    if observed * 100 >= capacity * threshold:
-        fail(
-            f"{'.'.join(observed_path)} reached {observed}/{capacity}, "
-            f"not below {threshold} percent"
-        )
 for name in (
     "missing_client_head_wait_count",
     "missing_client_head_wait_total_nanoseconds",

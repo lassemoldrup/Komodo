@@ -59,6 +59,7 @@ struct TransactionJoinerLimits {
   std::size_t max_pending_client_bytes = 256U * 1024U * 1024U;
   std::size_t max_pending_cdc_slots = 1000000U;
   std::size_t max_pending_cdc_bytes = 256U * 1024U * 1024U;
+  // Bound per-session progress metadata, not a history of completed UUIDs.
   std::size_t max_retained_identity_records = 10000000U;
   std::size_t max_retained_identity_bytes = 512U * 1024U * 1024U;
   std::size_t max_events_per_transaction = 101000U;
@@ -120,6 +121,7 @@ struct TransactionJoinerMetrics {
   std::uint64_t missing_client_head_wait_current_nanoseconds = 0;
   std::uint64_t missing_client_head_wait_total_nanoseconds = 0;
   std::uint64_t missing_client_head_wait_max_nanoseconds = 0;
+  // Client/CDC per-session progress only; pending evidence is counted separately.
   std::size_t retained_identity_records = 0;
   std::size_t retained_identity_bytes = 0;
   std::size_t retained_identity_high_water_records = 0;
@@ -164,6 +166,7 @@ public:
 
   void acceptClientPayload(std::string_view payload);
   void acceptClientTransaction(ClientTxn transaction);
+  // Internal input: writes must already be normalized by the assembler/codec.
   void acceptCdcTransaction(CdcTransaction transaction);
   // RunController has validated this session's completion count and digest.
   void acceptSessionDone(std::string_view session_id);

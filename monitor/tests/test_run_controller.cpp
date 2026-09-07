@@ -451,6 +451,9 @@ donePayload(const std::uint64_t count,
     case blackbox::BackendFactValueRule::PositiveInteger:
       value = "1";
       break;
+    case blackbox::BackendFactValueRule::RecordOnly:
+      value = "test_metadata";
+      break;
     }
     if (const auto override = fact_overrides.find(std::string(rule.name));
         override != fact_overrides.end()) {

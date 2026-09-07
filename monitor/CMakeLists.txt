@@ -77,30 +77,14 @@ add_executable(blackbox_cdc_codec_replay
   tools/cdc_codec_replay.cpp
 )
 
-add_executable(blackbox_cdc_ingest
-  tools/cdc_ingest.cpp
-)
-add_executable(blackbox_prefix_ingest
-  tools/prefix_ingest.cpp
-)
 add_executable(blackbox_run_monitor
   tools/monitor.cpp
 )
 add_executable(blackbox_evidence_replay
   tools/evidence_replay.cpp
 )
-target_link_libraries(blackbox_cdc_ingest PRIVATE blackbox_monitor)
-target_link_libraries(blackbox_prefix_ingest PRIVATE blackbox_monitor)
 target_link_libraries(blackbox_run_monitor PRIVATE blackbox_monitor Threads::Threads)
 target_link_libraries(blackbox_evidence_replay PRIVATE blackbox_monitor)
-target_compile_options(blackbox_cdc_ingest
-  PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wconversion
-    -Wsign-conversion
-)
 target_link_libraries(blackbox_cdc_replay PRIVATE blackbox_monitor)
 target_link_libraries(blackbox_cdc_codec_replay PRIVATE blackbox_monitor)
 target_compile_options(blackbox_cdc_codec_replay
@@ -112,14 +96,6 @@ target_compile_options(blackbox_cdc_codec_replay
     -Wsign-conversion
 )
 target_compile_options(blackbox_cdc_replay
-  PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wconversion
-    -Wsign-conversion
-)
-target_compile_options(blackbox_prefix_ingest
   PRIVATE
     -Wall
     -Wextra

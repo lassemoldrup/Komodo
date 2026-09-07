@@ -9,14 +9,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
-#include <iomanip>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <span>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -27,14 +25,9 @@ namespace blackbox {
 namespace {
 
 constexpr std::size_t node_charge = 64U;
-constexpr std::size_t adapter_identity_charge = 128U;
 constexpr std::size_t allocator_metadata_charge = 64U;
 constexpr std::size_t minimum_allocator_size_class = 64U;
 constexpr std::size_t allocator_page_size = 4096U;
-constexpr std::uint64_t bootstrap_transaction_tag = 0x626f6f7473747270ULL;
-constexpr std::uint64_t bootstrap_attempt_tag = 0x626f6f746174746dULL;
-constexpr std::uint64_t phase_anchor_transaction_tag = 0x7068617365616e63ULL;
-constexpr std::uint64_t phase_anchor_attempt_tag = 0x7068617365617474ULL;
 
 [[nodiscard]] std::uint64_t steadyClockNanoseconds() noexcept {
   return static_cast<std::uint64_t>(
@@ -186,18 +179,6 @@ void checkedAdd(std::size_t &total, const std::size_t additional) {
     }
   }
   return result;
-}
-
-[[nodiscard]] std::string syntheticUuid(const std::uint64_t tag,
-                                        const std::uint64_t sequence) {
-  std::ostringstream result;
-  result << std::hex << std::setfill('0') << std::nouppercase << std::setw(8)
-         << static_cast<std::uint32_t>(tag >> 32U) << '-' << std::setw(4)
-         << static_cast<std::uint16_t>((tag >> 16U) & 0xffffU) << '-'
-         << std::setw(4) << static_cast<std::uint16_t>(tag & 0xffffU) << '-'
-         << std::setw(4) << static_cast<std::uint16_t>(sequence >> 48U) << '-'
-         << std::setw(12) << (sequence & 0x0000ffffffffffffULL);
-  return result.str();
 }
 
 class DigestContext final {
@@ -377,10 +358,6 @@ public:
           .max_retained_state_bytes = config_.limits.max_checker_state_bytes,
           .max_events_per_transaction =
               config_.limits.max_events_per_transaction,
-          .max_mapped_identity_records =
-              config_.limits.max_retained_identity_records,
-          .max_mapped_identity_bytes =
-              config_.limits.max_retained_identity_bytes,
           .monotonic_clock_nanoseconds = monotonic_clock_nanoseconds_,
           .history_gc = config_.history_gc});
       if (config_.history_gc) {
@@ -628,12 +605,6 @@ private:
   struct BufferedCdc {
     CdcTransaction transaction;
     std::size_t charge = 0;
-  };
-
-  struct LogicalMetadata {
-    std::string session_id;
-    std::uint64_t session_seq = 0;
-    std::string attempt_id;
   };
 
   struct SessionProgress {
@@ -890,20 +861,6 @@ private:
         std::max(retained_identity_high_water_bytes_, retained_identity_bytes_);
   }
 
-  [[nodiscard]] std::size_t identityCharge(const std::string &value) const {
-    std::size_t result = node_charge + sizeof(std::string);
-    checkedAdd(result, stringAllocationCharge(value));
-    return result;
-  }
-
-  void ensureExternalIdentityIsNotReserved(const ClientTxn &client) const {
-    if (reserved_transaction_ids_.contains(client.logical_txn_id) ||
-        reserved_attempt_ids_.contains(client.attempt_id)) {
-      fail(MonitorErrorCode::InternalError,
-           "external UUID collides with a reserved checker identity");
-    }
-  }
-
   void acceptClient(ClientTxn client) {
     if (!session_lifetimes_.empty()) {
       const auto session = session_lifetimes_.find(client.session_id);
@@ -916,25 +873,9 @@ private:
              "ClientTxn follows SessionDone for its session");
       }
     }
-    ensureExternalIdentityIsNotReserved(client);
-    if (seen_client_correlations_.contains(client.correlation_id)) {
+    if (client_by_correlation_.contains(client.correlation_id)) {
       fail(MonitorErrorCode::ClientDuplicateCorrelation,
-           "client marker identity is duplicated");
-    }
-    if (seen_attempt_ids_.contains(client.attempt_id)) {
-      fail(MonitorErrorCode::AttemptDuplicate,
-           "committed client attempt identity is duplicated");
-    }
-    const auto logical = logical_transactions_.find(client.logical_txn_id);
-    if (logical != logical_transactions_.end()) {
-      if (logical->second.session_id == client.session_id &&
-          logical->second.session_seq == client.session_seq &&
-          logical->second.attempt_id != client.attempt_id) {
-        fail(MonitorErrorCode::MultipleCommittedAttempts,
-             "one logical transaction has multiple committed attempts");
-      }
-      fail(MonitorErrorCode::LogicalTransactionDuplicate,
-           "logical transaction identity is reused");
+           "pending client marker identity is duplicated");
     }
     if (client.correlation_id.txn_id < client.session_seq) {
       fail(MonitorErrorCode::SessionAttemptProgressInvalid,
@@ -961,26 +902,12 @@ private:
                            config_.limits.max_pending_client_bytes,
                            "pending client evidence");
 
-    std::size_t retained_records = 5U;
-    std::size_t retained_bytes =
-        node_charge + sizeof(std::string) + sizeof(LogicalMetadata);
-    checkedAdd(retained_bytes, stringAllocationCharge(client.logical_txn_id));
-    checkedAdd(retained_bytes, stringAllocationCharge(client.session_id));
-    checkedAdd(retained_bytes, stringAllocationCharge(client.attempt_id));
-    checkedAdd(retained_bytes, identityCharge(client.attempt_id));
-    checkedAdd(retained_bytes, adapter_identity_charge * 2U);
-    checkedAdd(retained_bytes, node_charge + sizeof(RunScopedCorrelationId));
-    checkedAdd(retained_bytes,
-               stringAllocationCharge(client.correlation_id.run_id));
-    checkedAdd(retained_bytes,
-               stringAllocationCharge(client.correlation_id.session_id));
     if (session == client_session_progress_.end()) {
-      ++retained_records;
-      checkedAdd(retained_bytes,
-                 node_charge + sizeof(std::string) + sizeof(SessionProgress));
+      std::size_t retained_bytes =
+          node_charge + sizeof(std::string) + sizeof(SessionProgress);
       checkedAdd(retained_bytes, stringAllocationCharge(client.session_id));
+      reserveRetainedIdentities(1U, retained_bytes);
     }
-    reserveRetainedIdentities(retained_records, retained_bytes);
 
     const bool cdc_is_pending =
         pending_cdc_correlations_.contains(client.correlation_id);
@@ -988,8 +915,6 @@ private:
       ++cdc_first_matches_;
     }
     const auto correlation = client.correlation_id;
-    const auto logical_id = client.logical_txn_id;
-    const auto attempt_id = client.attempt_id;
     const auto session_id = client.session_id;
     const auto session_seq = client.session_seq;
     client_by_correlation_.emplace(
@@ -1004,12 +929,6 @@ private:
     } else {
       ++unmatched_client_records_;
     }
-    seen_client_correlations_.insert(correlation);
-    seen_attempt_ids_.insert(attempt_id);
-    logical_transactions_.emplace(logical_id,
-                                  LogicalMetadata{.session_id = session_id,
-                                                  .session_seq = session_seq,
-                                                  .attempt_id = attempt_id});
     client_session_progress_[session_id] = SessionProgress{
         .session_seq = session_seq, .attempt_surplus = attempt_surplus};
     pending_client_bytes_ += charge;
@@ -1026,61 +945,6 @@ private:
     drainReadyPrefix();
   }
 
-  void validateWrites(const std::vector<NormalizedWrite> &writes) const {
-    for (std::size_t index = 0; index < writes.size(); ++index) {
-      const auto &write = writes[index];
-      if (write.key.empty()) {
-        fail(MonitorErrorCode::CheckerInputRejected,
-             "CDC normalized write has an empty key");
-      }
-      const auto table = tableFromKey(write.key);
-      if (!application_tables_.contains(table)) {
-        fail(MonitorErrorCode::CheckerInputRejected,
-             "CDC normalized write names an unallowlisted table");
-      }
-      const auto *codec = config_.benchmark_adapter->rowCodec(table);
-      if (codec == nullptr) {
-        fail(MonitorErrorCode::CheckerInputRejected,
-             "CDC normalized write table lacks a registered codec");
-      }
-      try {
-        codec->validateKey(write.key);
-      } catch (const CanonicalEncodingError &error) {
-        fail(MonitorErrorCode::CheckerInputRejected,
-             std::string("CDC normalized write key is invalid: ") +
-                 error.what());
-      }
-      switch (write.state) {
-      case NormalizedValueState::Present:
-        if (!write.value.has_value()) {
-          fail(MonitorErrorCode::CheckerInputRejected,
-               "present CDC write lacks a value");
-        }
-        try {
-          codec->validatePresentValue(*write.value);
-        } catch (const CanonicalEncodingError &error) {
-          fail(MonitorErrorCode::CheckerInputRejected,
-               std::string("CDC normalized write value is invalid: ") +
-                   error.what());
-        }
-        break;
-      case NormalizedValueState::Absent:
-        if (write.value.has_value()) {
-          fail(MonitorErrorCode::CheckerInputRejected,
-               "absent CDC write carries a value");
-        }
-        break;
-      default:
-        fail(MonitorErrorCode::CheckerInputRejected,
-             "CDC write has an invalid value state");
-      }
-      if (index != 0U && !bytesLess(writes[index - 1U].key, write.key)) {
-        fail(MonitorErrorCode::CheckerInputRejected,
-             "CDC writes are duplicated or reordered");
-      }
-    }
-  }
-
   void validateCdc(const CdcTransaction &transaction) const {
     if (transaction.cdc_seq != next_cdc_seq_) {
       fail(MonitorErrorCode::CdcOrderInvalid,
@@ -1091,7 +955,6 @@ private:
       fail(MonitorErrorCode::CdcOrderInvalid,
            "completed CDC transaction lacks stream boundaries");
     }
-    validateWrites(transaction.writes);
     switch (transaction.kind) {
     case CdcTransactionKind::RunControl:
       if (!transaction.fence_phase.has_value() ||
@@ -1136,10 +999,15 @@ private:
 
   void acceptCdc(CdcTransaction transaction) {
     validateCdc(transaction);
-    if (transaction.kind == CdcTransactionKind::WorkloadMarked &&
-        seen_cdc_correlations_.contains(*transaction.correlation_id)) {
-      fail(MonitorErrorCode::MarkerDuplicate,
-           "CDC marker identity is duplicated");
+    if (transaction.kind == CdcTransactionKind::WorkloadMarked) {
+      const auto &correlation = *transaction.correlation_id;
+      const auto progress = cdc_session_progress_.find(correlation.session_id);
+      if (pending_cdc_correlations_.contains(correlation) ||
+          (progress != cdc_session_progress_.end() &&
+           correlation.txn_id <= progress->second)) {
+        fail(MonitorErrorCode::MarkerDuplicate,
+             "CDC marker sequence is repeated or regressed within its session");
+      }
     }
     if (end_fence_observed_) {
       fail(MonitorErrorCode::CdcOrderInvalid,
@@ -1160,11 +1028,12 @@ private:
     if (transaction.kind == CdcTransactionKind::WorkloadMarked) {
       workload_correlation = *transaction.correlation_id;
       const auto &correlation = *workload_correlation;
-      std::size_t identity_bytes = node_charge + sizeof(RunScopedCorrelationId);
-      checkedAdd(identity_bytes, stringAllocationCharge(correlation.run_id));
-      checkedAdd(identity_bytes,
-                 stringAllocationCharge(correlation.session_id));
-      reserveRetainedIdentities(1U, identity_bytes);
+      if (!cdc_session_progress_.contains(correlation.session_id)) {
+        std::size_t identity_bytes =
+            node_charge + sizeof(std::string) + sizeof(std::uint64_t);
+        checkedAdd(identity_bytes, stringAllocationCharge(correlation.session_id));
+        reserveRetainedIdentities(1U, identity_bytes);
+      }
       client_is_pending = client_by_correlation_.contains(correlation);
     }
     const auto kind = transaction.kind;
@@ -1184,7 +1053,7 @@ private:
       } else {
         ++unmatched_workload_cdc_slots_;
       }
-      seen_cdc_correlations_.insert(*workload_correlation);
+      cdc_session_progress_[workload_correlation->session_id] = workload_correlation->txn_id;
       pending_cdc_correlations_.insert(*workload_correlation);
     }
     if (is_end_fence) {
@@ -1329,51 +1198,6 @@ private:
     }
   }
 
-  void reserveSyntheticIdentity(const std::string &transaction_id,
-                                const std::string &attempt_id) {
-    if (logical_transactions_.contains(transaction_id) ||
-        seen_attempt_ids_.contains(attempt_id)) {
-      fail(MonitorErrorCode::InternalError,
-           "reserved checker identity collides with client UUID evidence");
-    }
-    std::size_t bytes = 0;
-    checkedAdd(bytes, identityCharge(transaction_id));
-    checkedAdd(bytes, identityCharge(attempt_id));
-    checkedAdd(bytes, adapter_identity_charge * 2U);
-    reserveRetainedIdentities(4U, bytes);
-    reserved_transaction_ids_.insert(transaction_id);
-    reserved_attempt_ids_.insert(attempt_id);
-  }
-
-  void preflightAnchors() {
-    std::vector<std::pair<std::string, std::string>> identities;
-    identities.reserve(config_.expected_session_ids.size());
-    std::size_t retained_bytes = 0;
-    for (std::size_t index = 0; index < config_.expected_session_ids.size();
-         ++index) {
-      const auto ordinal = static_cast<std::uint64_t>(index + 1U);
-      auto transaction_id =
-          syntheticUuid(phase_anchor_transaction_tag, ordinal);
-      auto attempt_id = syntheticUuid(phase_anchor_attempt_tag, ordinal);
-      if (logical_transactions_.contains(transaction_id) ||
-          seen_attempt_ids_.contains(attempt_id)) {
-        fail(MonitorErrorCode::InternalError,
-             "phase-anchor identity collides with client UUID evidence");
-      }
-      checkedAdd(retained_bytes, identityCharge(transaction_id));
-      checkedAdd(retained_bytes, identityCharge(attempt_id));
-      checkedAdd(retained_bytes, adapter_identity_charge * 2U);
-      identities.emplace_back(std::move(transaction_id), std::move(attempt_id));
-    }
-    reserveRetainedIdentities(
-        checkedProduct(identities.size(), static_cast<std::size_t>(4U)),
-        retained_bytes);
-    for (const auto &[transaction_id, attempt_id] : identities) {
-      reserved_transaction_ids_.insert(transaction_id);
-      reserved_attempt_ids_.insert(attempt_id);
-    }
-  }
-
   void popCdcHead() {
     pending_cdc_bytes_ -= cdc_slots_.front().charge;
     cdc_slots_.pop_front();
@@ -1438,7 +1262,6 @@ private:
             head_block_reason_ = HeadBlockReason::BootstrapValidation;
             return;
           }
-          preflightAnchors();
           requireReleaseSequenceCapacity(config_.expected_session_ids.size());
           for (const auto &session_id : config_.expected_session_ids) {
             if (checker_.has_value()) {
@@ -1474,13 +1297,8 @@ private:
           fail(MonitorErrorCode::FenceOrderInvalid,
                "bootstrap CDC transaction is outside the load prefix");
         }
-        const auto transaction_id =
-            syntheticUuid(bootstrap_transaction_tag, head.cdc_seq);
-        const auto attempt_id =
-            syntheticUuid(bootstrap_attempt_tag, head.cdc_seq);
         requireReleaseSequenceCapacity();
         requireBootstrapEventCapacity(head.writes.size());
-        reserveSyntheticIdentity(transaction_id, attempt_id);
         if (checker_.has_value()) {
           checker_->consumeBootstrap(next_checker_commit_seq_, head.cdc_seq,
                                      head.writes);
@@ -1561,17 +1379,10 @@ private:
       client_by_correlation_;
   std::deque<BufferedCdc> cdc_slots_;
   std::unordered_set<RunScopedCorrelationId, CorrelationHash>
-      seen_client_correlations_;
-  std::unordered_set<RunScopedCorrelationId, CorrelationHash>
-      seen_cdc_correlations_;
-  std::unordered_set<RunScopedCorrelationId, CorrelationHash>
       pending_cdc_correlations_;
-  std::unordered_set<std::string> seen_attempt_ids_;
-  std::unordered_map<std::string, LogicalMetadata> logical_transactions_;
   std::unordered_map<std::string, SessionProgress> client_session_progress_;
+  std::unordered_map<std::string, std::uint64_t> cdc_session_progress_;
   std::unordered_map<std::string, SessionLifetime> session_lifetimes_;
-  std::unordered_set<std::string> reserved_transaction_ids_;
-  std::unordered_set<std::string> reserved_attempt_ids_;
   std::optional<BootstrapPrefix> approved_bootstrap_prefix_;
   std::optional<RunScopedCorrelationId> missing_client_wait_correlation_;
   std::optional<std::uint64_t> missing_client_wait_started_nanoseconds_;

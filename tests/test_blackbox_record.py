@@ -335,6 +335,58 @@ class BlackboxRecordTest(unittest.TestCase):
             )
             self.assertIn("database_name differs", failed.stderr)
 
+    def test_oracle_record_only_facts_preserve_tuning_without_relaxing_contract(self) -> None:
+        example = json.loads(
+            (ROOT / "protocol/examples/backends/oracle-schema-attestation.json").read_text()
+        )
+        contract = json.loads((ROOT / "protocol/backends/oracle.json").read_text())
+        recorded_names = {
+            rule["name"] for rule in contract["attestation_fact_contract"]
+            if rule["value_rule"] == "record_only"
+        }
+        self.assertEqual(len(recorded_names), 5)
+        with tempfile.TemporaryDirectory(prefix="oracle-record-only-test-") as temporary:
+            root = Path(temporary)
+            tables, facts = root / "tables.json", root / "facts.json"
+            tables.write_text(json.dumps(example["tables"]), encoding="utf-8")
+            arguments = (
+                "schema-attestation", "--run-id", RUN_ID, "--phase", "STARTUP",
+                "--backend", "oracle", "--backend-source-id", example["backend_source_id"],
+                "--benchmark", "ycsb", "--tables-file", str(tables),
+                "--facts-file", str(facts),
+            )
+            recorded = [fact for fact in example["backend_facts"]
+                        if fact["name"] in recorded_names]
+            for value in ("experiment-specific tuning", "", "x" * 4096):
+                with self.subTest(value_length=len(value)):
+                    for fact in recorded:
+                        fact["canonical_value"] = value
+                    facts.write_text(json.dumps(example["backend_facts"]), encoding="utf-8")
+                    result = json.loads(self.run_tool(*arguments).stdout)
+                    self.assertEqual(result["backend_facts"], example["backend_facts"])
+
+            target = recorded[0]
+            for invalid in (42, None, "x" * 4097):
+                with self.subTest(invalid_type=type(invalid).__name__):
+                    target["canonical_value"] = invalid
+                    facts.write_text(json.dumps(example["backend_facts"]), encoding="utf-8")
+                    self.assertIn("value is invalid", self.run_tool(
+                        *arguments, expected_status=2).stderr)
+            target["canonical_value"] = "metadata"
+            target["name"] = "unexpected_fact"
+            facts.write_text(json.dumps(example["backend_facts"]), encoding="utf-8")
+            self.assertIn("name/order differs", self.run_tool(
+                *arguments, expected_status=2).stderr)
+            target["name"] = next(rule["name"] for rule in contract["attestation_fact_contract"]
+                                  if rule["value_rule"] == "record_only")
+            exact_name = next(rule["name"] for rule in contract["attestation_fact_contract"]
+                              if rule["value_rule"] == "exact")
+            next(fact for fact in example["backend_facts"]
+                 if fact["name"] == exact_name)["canonical_value"] = "wrong"
+            facts.write_text(json.dumps(example["backend_facts"]), encoding="utf-8")
+            self.assertIn(f"{exact_name} differs", self.run_tool(
+                *arguments, expected_status=2).stderr)
+
     def test_run_manifest_selects_yugabyte_without_a_generic_backend_enum(self) -> None:
         result = self.run_tool(
             "run-manifest",

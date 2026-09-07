@@ -302,9 +302,20 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
             self.assertIn("synthetic_benchmark", command)
 
     def test_generic_scheduler_and_runner_have_no_product_name_decisions(self) -> None:
-        text = SCRIPT.read_text(encoding="utf-8") + (
+        runner = (
             ROOT / "scripts/run_registered_performance_cell.sh"
-        ).read_text(encoding="utf-8") + (
+        ).read_text(encoding="utf-8")
+        before_loader, loader_marker, remainder = runner.partition('LOADER_COMMAND="cd ')
+        loader, workload_marker, after_loader = remainder.partition('WORKLOAD_COMMAND="cd ')
+        self.assertTrue(loader_marker)
+        self.assertTrue(workload_marker)
+        # This loader-only JDBC optimization is covered by test_oceanbase_loader.
+        # Exempt its one guard, not the entire block or other backend decisions.
+        loader_guard = "if [[ $BACKEND == oceanbase_mysql ]]; then\n"
+        self.assertEqual(loader.count(loader_guard), 1)
+        runner = (before_loader + loader_marker + loader.replace(loader_guard, "", 1)
+                  + workload_marker + after_loader)
+        text = SCRIPT.read_text(encoding="utf-8") + runner + (
             ROOT / "scripts/registered_performance_result.py"
         ).read_text(encoding="utf-8")
         for forbidden in (

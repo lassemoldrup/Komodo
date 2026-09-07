@@ -34,7 +34,6 @@ struct DebeziumAssemblerConfig {
   std::size_t max_events_per_transaction = 100000;
   std::size_t max_active_bytes = 256U * 1024U * 1024U;
   std::size_t max_completed_transactions = 10000000;
-  std::size_t max_retained_identity_bytes = 256U * 1024U * 1024U;
   std::function<std::uint64_t()> monotonic_clock_nanoseconds = {};
 };
 
@@ -65,6 +64,7 @@ struct DebeziumAssemblerMetrics {
   std::size_t observed_events_per_transaction_high_water = 0;
   std::size_t active_assembly_bytes = 0;
   std::size_t active_assembly_high_water_bytes = 0;
+  // Compatibility counters for the removed completed-identity tables: zero.
   std::size_t retained_identity_records = 0;
   std::size_t retained_identity_bytes = 0;
   std::size_t retained_identity_high_water_records = 0;

@@ -16,24 +16,15 @@ else
   OWN_CAPTURE=1
 fi
 SCAN_PATH=$(mktemp /tmp/mariadb-bootstrap-scan.XXXXXX)
+LOADER_DECLARATION_PATH=$(mktemp /tmp/mariadb-loader-declaration.XXXXXX.json)
+export BLACKBOX_LOADER_DECLARED_COUNTS_FILE="$LOADER_DECLARATION_PATH"
 REPLAY_PATH=$(mktemp /tmp/mariadb-cdc-replay.XXXXXX.json)
-INGEST_PATH=$(mktemp /tmp/mariadb-cdc-ingest.XXXXXX.json)
-INGEST_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-ingest.XXXXXX.log)
-PREFIX_INGEST_PATH=$(mktemp /tmp/mariadb-prefix-ingest.XXXXXX.json)
-PREFIX_ERROR_PATH=$(mktemp /tmp/mariadb-prefix-ingest.XXXXXX.log)
-BAD_PREFIX_ERROR_PATH=$(mktemp /tmp/mariadb-prefix-invalid.XXXXXX.log)
 MONITOR_PATH=$(mktemp /tmp/mariadb-run-monitor.XXXXXX.log)
 MONITOR_ERROR_PATH=$(mktemp /tmp/mariadb-run-monitor.XXXXXX.err)
 CONCURRENT_MONITOR_PATH=$(mktemp /tmp/mariadb-concurrent-monitor.XXXXXX.log)
 CONCURRENT_MONITOR_ERROR_PATH=$(mktemp /tmp/mariadb-concurrent-monitor.XXXXXX.err)
 RESTART_MONITOR_PATH=$(mktemp /tmp/mariadb-restart-monitor.XXXXXX.log)
 RESTART_MONITOR_ERROR_PATH=$(mktemp /tmp/mariadb-restart-monitor.XXXXXX.err)
-UNKNOWN_INGEST_PATH=$(mktemp /tmp/mariadb-cdc-unknown.XXXXXX.json)
-UNKNOWN_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-unknown.XXXXXX.log)
-DDL_INGEST_PATH=$(mktemp /tmp/mariadb-cdc-ddl.XXXXXX.json)
-DDL_ERROR_PATH=$(mktemp /tmp/mariadb-cdc-ddl.XXXXXX.log)
-INGEST_PID=
-PREFIX_PID=
 MONITOR_PID=
 
 
@@ -43,36 +34,20 @@ compose() {
 
 
 cleanup() {
-  if [[ -n $INGEST_PID ]] && kill -0 "$INGEST_PID" >/dev/null 2>&1; then
-    kill "$INGEST_PID" >/dev/null 2>&1 || true
-    wait "$INGEST_PID" >/dev/null 2>&1 || true
-  fi
-  if [[ -n $PREFIX_PID ]] && kill -0 "$PREFIX_PID" >/dev/null 2>&1; then
-    kill "$PREFIX_PID" >/dev/null 2>&1 || true
-    wait "$PREFIX_PID" >/dev/null 2>&1 || true
-  fi
   if [[ -n $MONITOR_PID ]] && kill -0 "$MONITOR_PID" >/dev/null 2>&1; then
     kill "$MONITOR_PID" >/dev/null 2>&1 || true
     wait "$MONITOR_PID" >/dev/null 2>&1 || true
   fi
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -f -- "$SCAN_PATH"
+  rm -f -- "$LOADER_DECLARATION_PATH"
   rm -f -- "$REPLAY_PATH"
-  rm -f -- "$INGEST_PATH"
-  rm -f -- "$INGEST_ERROR_PATH"
-  rm -f -- "$PREFIX_INGEST_PATH"
-  rm -f -- "$PREFIX_ERROR_PATH"
-  rm -f -- "$BAD_PREFIX_ERROR_PATH"
   rm -f -- "$MONITOR_PATH"
   rm -f -- "$MONITOR_ERROR_PATH"
   rm -f -- "$CONCURRENT_MONITOR_PATH"
   rm -f -- "$CONCURRENT_MONITOR_ERROR_PATH"
   rm -f -- "$RESTART_MONITOR_PATH"
   rm -f -- "$RESTART_MONITOR_ERROR_PATH"
-  rm -f -- "$UNKNOWN_INGEST_PATH"
-  rm -f -- "$UNKNOWN_ERROR_PATH"
-  rm -f -- "$DDL_INGEST_PATH"
-  rm -f -- "$DDL_ERROR_PATH"
   if (( OWN_CAPTURE == 1 )); then
     rm -f -- "$CAPTURE_PATH"
   fi
@@ -125,6 +100,8 @@ reset_database_and_redis() {
   compose up --detach --force-recreate redis mariadb
   wait_healthy cdc-redis
   wait_healthy cdc-mariadb
+  jq -n '{declared_table_row_counts:[{table:"benchbase.usertable",row_count:0}]}' \
+    >"$LOADER_DECLARATION_PATH"
 }
 
 
@@ -184,144 +161,6 @@ start_connector_with_snapshot_schema() {
     ' <<<"$startup_capture" >/dev/null; then
     echo "Debezium startup evidence was not the pinned schema snapshot" >&2
     blackbox_redis --json XRANGE cdc - + >&2 || true
-    return 1
-  fi
-}
-
-
-wait_ingest_blocked() {
-  local deadline=$(( $(date +%s) + 10 ))
-  while (( $(date +%s) <= deadline )); do
-    if blackbox_redis --raw CLIENT LIST | awk '
-      {
-        blocked = 0
-        xread = 0
-        for (field = 1; field <= NF; ++field) {
-          if ($field ~ /^flags=[^ ]*b/) blocked = 1
-          if ($field == "cmd=xread") xread = 1
-        }
-        if (blocked && xread) found = 1
-      }
-      END { exit(found ? 0 : 1) }
-    '; then
-      return 0
-    fi
-    if [[ -n $INGEST_PID ]] && ! kill -0 "$INGEST_PID" >/dev/null 2>&1; then
-      return 1
-    fi
-    sleep 0.05
-  done
-  return 1
-}
-
-
-start_live_ingest() {
-  local output_path=$1
-  local error_path=$2
-  "$BLACKBOX_CDC_INGEST_BIN" \
-    --redis-host "$BLACKBOX_REDIS_HOST" \
-    --redis-port "$BLACKBOX_REDIS_PORT" \
-    --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
-    --backend mariadb \
-    --benchmark ycsb \
-    --backend-source-id mariadb-main \
-    --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
-    >"$output_path" 2>"$error_path" &
-  INGEST_PID=$!
-  if ! wait_ingest_blocked; then
-    cat "$error_path" >&2
-    echo "live CDC ingestion did not enter blocking XREAD" >&2
-    return 1
-  fi
-}
-
-
-wait_ingest_exit() {
-  local expected_status=$1
-  local error_path=$2
-  local status
-  if wait "$INGEST_PID"; then
-    status=0
-  else
-    status=$?
-  fi
-  INGEST_PID=
-  if (( status != expected_status )); then
-    cat "$error_path" >&2
-    echo "live CDC ingestion exited with $status, expected $expected_status" >&2
-    return 1
-  fi
-}
-
-
-wait_prefix_blocked() {
-  local deadline=$(( $(date +%s) + 10 ))
-  while (( $(date +%s) <= deadline )); do
-    local blocked_readers
-    blocked_readers=$(blackbox_redis --raw CLIENT LIST | awk '
-      {
-        blocked = 0
-        xread = 0
-        for (field = 1; field <= NF; ++field) {
-          if ($field ~ /^flags=[^ ]*b/) blocked = 1
-          if ($field == "cmd=xread") xread = 1
-        }
-        if (blocked && xread) count += 1
-      }
-      END { print count + 0 }
-    ')
-    if (( blocked_readers >= 2 )); then
-      return 0
-    fi
-    if [[ -n $PREFIX_PID ]] && ! kill -0 "$PREFIX_PID" >/dev/null 2>&1; then
-      return 1
-    fi
-    sleep 0.05
-  done
-  return 1
-}
-
-
-start_live_prefix() {
-  local client_cursor=$1
-  local bootstrap_count=$2
-  local bootstrap_digest=$3
-  "$BLACKBOX_PREFIX_INGEST_BIN" \
-    --redis-host "$BLACKBOX_REDIS_HOST" \
-    --redis-port "$BLACKBOX_REDIS_PORT" \
-    --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
-    --backend mariadb \
-    --benchmark ycsb \
-    --backend-source-id mariadb-main \
-    --client-cursor "$client_cursor" \
-    --expected-session-id ycsb/worker/1 \
-    --approved-load-cdc-seq 2 \
-    --approved-bootstrap-transactions 1 \
-    --approved-bootstrap-table-count "benchbase.usertable=$bootstrap_count" \
-    --approved-bootstrap-digest "$bootstrap_digest" \
-    --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
-    >"$PREFIX_INGEST_PATH" 2>"$PREFIX_ERROR_PATH" &
-  PREFIX_PID=$!
-  if ! wait_prefix_blocked; then
-    cat "$PREFIX_ERROR_PATH" >&2
-    echo "live prefix ingestion did not enter blocking XREAD" >&2
-    return 1
-  fi
-}
-
-
-wait_prefix_exit() {
-  local expected_status=$1
-  local status
-  if wait "$PREFIX_PID"; then
-    status=0
-  else
-    status=$?
-  fi
-  PREFIX_PID=
-  if (( status != expected_status )); then
-    cat "$PREFIX_ERROR_PATH" >&2
-    echo "live prefix ingestion exited with $status, expected $expected_status" >&2
     return 1
   fi
 }
@@ -671,25 +510,22 @@ run_unknown_table_negative() {
     "CREATE TABLE unmodeled_probe (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB" \
     >/dev/null
   start_connector_with_snapshot_schema unmodeled_probe
-
   BLACKBOX_ACTIVE_RUN_ID=$(blackbox_new_uuid)
   BLACKBOX_SESSION_IDS=(ycsb/worker/unknown-table)
   export BLACKBOX_ACTIVE_RUN_ID
-  start_live_ingest "$UNKNOWN_INGEST_PATH" "$UNKNOWN_ERROR_PATH"
-  sleep 0.2
-
+  start_live_monitor
   blackbox_publish_record \
     "$(blackbox_client_stream)" "$(blackbox_build_run_manifest)" >/dev/null
-  wait_ingest_blocked
+  publish_schema_attestation STARTUP
   blackbox_commit_fence RUN_START
   wait_cdc_fence RUN_START
-  wait_ingest_blocked
+  blackbox_wait_for_status START_FENCE_SEEN
+  blackbox_capture_bootstrap_scan "$SCAN_PATH"
+  blackbox_publish_record "$(blackbox_client_stream)" \
+    "$(blackbox_build_bootstrap_manifest "$SCAN_PATH")" >/dev/null
   blackbox_commit_fence LOAD_FINISHED
   wait_cdc_fence LOAD_FINISHED
-  wait_ingest_blocked
-
-  # The unknown-table row deliberately follows the marker. With connector-side
-  # table filtering this would make the marker falsely appear final.
+  blackbox_wait_for_status LOAD_FINISHED_SEEN
   blackbox_database_query "
     START TRANSACTION;
     INSERT INTO session_txn (session_id, txn_id)
@@ -698,36 +534,33 @@ run_unknown_table_negative() {
     COMMIT;
   " >/dev/null
   wait_unknown_table_row
-  wait_ingest_exit 2 "$UNKNOWN_ERROR_PATH"
-  grep -Fq UNEXPECTED_TABLE "$UNKNOWN_ERROR_PATH"
+  blackbox_wait_for_status FINAL
+  jq -e '.outcome == "INVALID" and
+    any(.diagnostics[]; .code == "UNEXPECTED_TABLE")' <<<"$MATCHED_STATUS" >/dev/null
+  wait_monitor_exit 4
 }
-
 
 run_ddl_negative() {
   reset_database_and_redis
   start_connector_with_snapshot_schema
-
   BLACKBOX_ACTIVE_RUN_ID=$(blackbox_new_uuid)
   BLACKBOX_SESSION_IDS=(ycsb/worker/ddl)
   export BLACKBOX_ACTIVE_RUN_ID
-  start_live_ingest "$DDL_INGEST_PATH" "$DDL_ERROR_PATH"
-  sleep 0.2
-
+  start_live_monitor
   blackbox_publish_record \
     "$(blackbox_client_stream)" "$(blackbox_build_run_manifest)" >/dev/null
-  wait_ingest_blocked
+  publish_schema_attestation STARTUP
   blackbox_commit_fence RUN_START
   wait_cdc_fence RUN_START
-  wait_ingest_blocked
-
+  blackbox_wait_for_status START_FENCE_SEEN
   root_database_query \
-    "CREATE TABLE ddl_probe (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB" \
-    >/dev/null
+    "CREATE TABLE ddl_probe (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB" >/dev/null
   wait_ddl_record
-  wait_ingest_exit 2 "$DDL_ERROR_PATH"
-  grep -Fq DDL_OBSERVED "$DDL_ERROR_PATH"
+  blackbox_wait_for_status FINAL
+  jq -e '.outcome == "INVALID" and
+    any(.diagnostics[]; .code == "DDL_OBSERVED")' <<<"$MATCHED_STATUS" >/dev/null
+  wait_monitor_exit 4
 }
-
 
 main() {
   blackbox_require_command docker
@@ -735,14 +568,6 @@ main() {
   blackbox_require_command "$BLACKBOX_MARIADB_CLI"
   if [[ -z ${BLACKBOX_CDC_REPLAY_BIN:-} || ! -x $BLACKBOX_CDC_REPLAY_BIN ]]; then
     echo "BLACKBOX_CDC_REPLAY_BIN must name the built C++ CDC replay tool" >&2
-    return 1
-  fi
-  if [[ -z ${BLACKBOX_CDC_INGEST_BIN:-} || ! -x $BLACKBOX_CDC_INGEST_BIN ]]; then
-    echo "BLACKBOX_CDC_INGEST_BIN must name the built C++ CDC ingestion tool" >&2
-    return 1
-  fi
-  if [[ -z ${BLACKBOX_PREFIX_INGEST_BIN:-} || ! -x $BLACKBOX_PREFIX_INGEST_BIN ]]; then
-    echo "BLACKBOX_PREFIX_INGEST_BIN must name the built C++ prefix ingestion tool" >&2
     return 1
   fi
   if [[ -z ${BLACKBOX_MONITOR_BIN:-} || ! -x $BLACKBOX_MONITOR_BIN ]]; then
@@ -778,7 +603,6 @@ main() {
   wait "$sleeper_pid"
 
   start_connector_with_snapshot_schema
-  start_live_ingest "$INGEST_PATH" "$INGEST_ERROR_PATH"
   start_live_monitor
   expect_monitor_ownership_rejection \
     "$CONCURRENT_MONITOR_PATH" "$CONCURRENT_MONITOR_ERROR_PATH"
@@ -790,11 +614,9 @@ main() {
   run_manifest=$(blackbox_build_run_manifest)
   blackbox_publish_record "$(blackbox_client_stream)" "$run_manifest" >/dev/null
   publish_schema_attestation STARTUP
-  wait_ingest_blocked
   blackbox_commit_fence RUN_START
   wait_cdc_fence RUN_START
   blackbox_wait_for_status START_FENCE_SEEN
-  wait_ingest_blocked
 
   blackbox_database_query "
     START TRANSACTION;
@@ -806,21 +628,19 @@ main() {
     COMMIT;
   " >/dev/null
 
+  jq -n '{declared_table_row_counts:[{table:"benchbase.usertable",row_count:2}]}' \
+    >"$LOADER_DECLARATION_PATH"
   blackbox_capture_bootstrap_scan "$SCAN_PATH"
-  local bootstrap_manifest bootstrap_digest bootstrap_count bootstrap_client_cursor
+  local bootstrap_manifest bootstrap_digest bootstrap_count
   bootstrap_manifest=$(blackbox_build_bootstrap_manifest "$SCAN_PATH")
   bootstrap_digest=$(jq -r '.canonical_state_digest' <<<"$bootstrap_manifest")
   bootstrap_count=$(jq -r '.table_row_counts[0].row_count' <<<"$bootstrap_manifest")
   [[ $bootstrap_digest == 71749720e062cf361dbad1e139c88d7d39b10debeddf18562d35cd80ae53afa8 ]]
   [[ $bootstrap_count == 2 ]]
-  bootstrap_client_cursor=$(
-    blackbox_publish_record "$(blackbox_client_stream)" "$bootstrap_manifest"
-  )
-  start_live_prefix "$bootstrap_client_cursor" "$bootstrap_count" "$bootstrap_digest"
+  blackbox_publish_record "$(blackbox_client_stream)" "$bootstrap_manifest" >/dev/null
   blackbox_commit_fence LOAD_FINISHED
   wait_cdc_fence LOAD_FINISHED
   blackbox_wait_for_status LOAD_FINISHED_SEEN
-  wait_ingest_blocked
 
   # Loader/bootstrap activity must not create workload marker state.
   [[ $(blackbox_database_query "SELECT COUNT(*) FROM session_txn" | tr -d '[:space:]') == 0 ]]
@@ -936,71 +756,6 @@ main() {
     "$RESTART_MONITOR_PATH" "$RESTART_MONITOR_ERROR_PATH"
   [[ $(blackbox_redis --json XRANGE "$(blackbox_status_stream)" - + | jq \
     '[.[] | (.[1][1] | fromjson) | select(.lifecycle_state == "FINAL")] | length') == 1 ]]
-  wait_ingest_exit 0 "$INGEST_ERROR_PATH"
-  wait_prefix_exit 0
-  jq -e '
-    .completed_transactions == 11 and
-    .client_records_seen == 11 and
-    .xread_calls > .nonempty_xread_calls and
-    .nonempty_xread_calls >= 3 and
-    [.transactions[].cdc_seq] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] and
-    [.transactions[] | select(.kind == "RUN_CONTROL") | .fence_phase] ==
-      ["RUN_START", "LOAD_FINISHED", "END_FENCE"] and
-    [.transactions[3:10][].correlation_id.txn_id] == [1, 2, 3, 4, 5, 6, 7] and
-    [.transactions[3:10][].write_count] == [1, 0, 1, 1, 1, 1, 2] and
-    .transactions[4].correlation_id.txn_id == 2 and
-    .transactions[4].write_count == 0
-  ' "$INGEST_PATH" >/dev/null || {
-    printf 'CDC ingest diagnostics:\n' >&2
-    jq . "$INGEST_PATH" >&2
-    return 1
-  }
-
-  jq -e '
-    .completed_cdc_transactions == 11 and
-    .accepted_cdc_transactions == 11 and
-    .accepted_client_transactions == 7 and
-    .joined_workload_transactions == 7 and
-    .checker_consumed_transactions == 9 and
-    .checker_next_commit_seq == 9 and
-    .bootstrap_checker_transactions == 1 and
-    .phase_anchor_transactions == 1 and
-    .workload_checker_transactions == 7 and
-    .bootstrap_state_rows == 2 and
-    .bootstrap_state_bytes > 0 and
-    .pending_client_records == 0 and
-    .pending_cdc_slots == 1 and
-    (.client_first_matches + .cdc_first_matches) == 7 and
-    .end_fence_observed == true and
-    .checker_observation == "PASS_SO_FAR" and
-    .head_block_reason == "END_FENCE_DEFERRED" and
-    .client_records_read == 7 and
-    .xread_calls > 1
-  ' "$PREFIX_INGEST_PATH" >/dev/null
-
-  local bad_prefix_status
-  if "$BLACKBOX_PREFIX_INGEST_BIN" \
-    --redis-host "$BLACKBOX_REDIS_HOST" \
-    --redis-port "$BLACKBOX_REDIS_PORT" \
-    --run-id "$BLACKBOX_ACTIVE_RUN_ID" \
-    --backend mariadb \
-    --benchmark ycsb \
-    --backend-source-id mariadb-main \
-    --client-cursor "$bootstrap_client_cursor" \
-    --expected-session-id ycsb/worker/1 \
-    --approved-load-cdc-seq 2 \
-    --approved-bootstrap-transactions 1 \
-    --approved-bootstrap-table-count "benchbase.usertable=$bootstrap_count" \
-    --approved-bootstrap-digest "0000000000000000000000000000000000000000000000000000000000000000" \
-    --overall-timeout-ms "$(( STACK_TIMEOUT_SECONDS * 1000 ))" \
-    >/dev/null 2>"$BAD_PREFIX_ERROR_PATH"; then
-    bad_prefix_status=0
-  else
-    bad_prefix_status=$?
-  fi
-  [[ $bad_prefix_status == 2 ]]
-  grep -Fq BOOTSTRAP_STATE_MISMATCH "$BAD_PREFIX_ERROR_PATH"
-
   blackbox_redis --json XRANGE cdc - + >"$CAPTURE_PATH"
   python3 "$ROOT/tests/verify_lifecycle_stream.py" \
     --input "$CAPTURE_PATH" --run-id "$BLACKBOX_ACTIVE_RUN_ID" >/dev/null

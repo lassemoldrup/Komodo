@@ -1029,6 +1029,8 @@ def validate_backend_facts(
             require(CANONICAL_IDENTIFIER_PATTERN.fullmatch(value) is not None, f"{label} {fact['name']} is not canonical")
         elif value_rule == "positive_integer":
             require(value.isdigit() and int(value) > 0 and str(int(value)) == value, f"{label} {fact['name']} is not a positive integer")
+        elif value_rule == "record_only":
+            pass  # Tuning metadata: preserve it without a fixed-value gate.
         else:  # pragma: no cover - schema owns the enumeration
             raise RecordError(f"unsupported backend fact rule: {value_rule}")
         result.append({"name": fact["name"], "canonical_value": value})

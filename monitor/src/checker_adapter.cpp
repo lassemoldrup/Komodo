@@ -102,16 +102,6 @@ uuidWords(const std::string_view uuid) {
   return EntityUid{.words = {tag, sequence}};
 }
 
-struct EntityHash {
-  [[nodiscard]] std::size_t
-  operator()(const EntityUid &identity) const noexcept {
-    const auto first = std::hash<std::uint64_t>{}(identity.words[0]);
-    const auto second = std::hash<std::uint64_t>{}(identity.words[1]);
-    return first ^
-           (second + 0x9e3779b97f4a7c15ULL + (first << 6U) + (first >> 2U));
-  }
-};
-
 [[nodiscard]] bool bytesLess(const CanonicalBytes &left,
                              const CanonicalBytes &right) {
   return std::lexicographical_compare(
@@ -196,8 +186,6 @@ public:
         config_.expected_session_ids.size() >
             std::numeric_limits<std::uint32_t>::max() ||
         config_.max_events_per_transaction == 0U ||
-        config_.max_mapped_identity_records == 0U ||
-        config_.max_mapped_identity_bytes == 0U ||
         config_.max_retained_state_bytes ==
             std::numeric_limits<std::size_t>::max()) {
       throw std::invalid_argument("checker expected-session roster is invalid");
@@ -228,10 +216,6 @@ public:
       }
       const auto identity =
           makeBootstrapCheckerIdentity(config_.run_id, cdc_seq);
-      reserveIdentity(transaction_identities_, identity.transaction_id, true,
-                      MonitorErrorCode::LogicalTransactionDuplicate);
-      reserveIdentity(attempt_identities_, identity.attempt_id, true,
-                      MonitorErrorCode::AttemptDuplicate);
       consume(commit_seq, identity, {}, writes, nullptr);
       ++bootstrap_transactions_;
     });
@@ -248,10 +232,6 @@ public:
         }
         const auto identity =
             makePhaseAnchorCheckerIdentity(config_.run_id, found->second);
-        reserveIdentity(transaction_identities_, identity.transaction_id, true,
-                        MonitorErrorCode::LogicalTransactionDuplicate);
-        reserveIdentity(attempt_identities_, identity.attempt_id, true,
-                        MonitorErrorCode::AttemptDuplicate);
         consume(commit_seq, identity, {}, {}, nullptr);
         if (config_.history_gc) {
           session_history_[found->second - 1U].latest_commit_seq = commit_seq;
@@ -306,10 +286,15 @@ public:
                                    .local_session_counter = 1},
           .session_seq = client.session_seq,
       };
-      reserveIdentity(transaction_identities_, identity.transaction_id, false,
-                      MonitorErrorCode::LogicalTransactionDuplicate);
-      reserveIdentity(attempt_identities_, identity.attempt_id, false,
-                      MonitorErrorCode::AttemptDuplicate);
+      // UUID uniqueness is an upstream precondition. Keep synthetic namespaces
+      // disjoint without remembering every previously consumed UUID.
+      if (identity.transaction_id.words[0] == bootstrap_transaction_tag ||
+          identity.transaction_id.words[0] == phase_anchor_transaction_tag ||
+          identity.attempt_id.words[0] == bootstrap_attempt_tag ||
+          identity.attempt_id.words[0] == phase_anchor_attempt_tag) {
+        fail(MonitorErrorCode::InternalError,
+             "external UUID uses a reserved checker namespace");
+      }
       consume(commit_seq, identity, client.reads, writes, &client);
       ++workload_transactions_;
       if (config_.history_gc) {
@@ -365,11 +350,6 @@ public:
         .workload_consume_total_nanoseconds =
             workload_consume_total_nanoseconds_,
         .workload_consume_max_nanoseconds = workload_consume_max_nanoseconds_,
-        .mapped_identity_records = mapped_identity_records_,
-        .mapped_identity_bytes = mapped_identity_bytes_,
-        .mapped_identity_high_water_records =
-            mapped_identity_high_water_records_,
-        .mapped_identity_high_water_bytes = mapped_identity_high_water_bytes_,
         .events_per_transaction_high_water = events_per_transaction_high_water_,
         .engine = engine_.metrics(include_memory_profile),
         .history_gc_total_nanoseconds = history_gc_total_nanoseconds_,
@@ -420,12 +400,6 @@ private:
     std::string message;
   };
 
-  struct IdentityOrigin {
-    bool synthetic = false;
-  };
-
-  using IdentityMap = std::unordered_map<EntityUid, IdentityOrigin, EntityHash>;
-
   [[noreturn]] void fail(const MonitorErrorCode code,
                          const std::string &message) const {
     throw MonitorError(code, message);
@@ -466,74 +440,9 @@ private:
     }
   }
 
-  void reserveIdentity(IdentityMap &identities, const EntityUid &identity,
-                       const bool synthetic,
-                       const MonitorErrorCode duplicate_code) {
-    const auto existing = identities.find(identity);
-    if (existing != identities.end()) {
-      if (existing->second.synthetic != synthetic || synthetic) {
-        fail(MonitorErrorCode::InternalError,
-             "external and reserved checker identities collide");
-      }
-      fail(duplicate_code, "external checker identity is duplicated");
-    }
-    constexpr std::size_t charge = sizeof(IdentityMap::value_type) + 64U;
-    if (mapped_identity_records_ >= config_.max_mapped_identity_records ||
-        charge > config_.max_mapped_identity_bytes ||
-        mapped_identity_bytes_ > config_.max_mapped_identity_bytes - charge) {
-      fail(MonitorErrorCode::ResourceExhausted,
-           "mapped checker identities exceed their configured limit");
-    }
-    const auto [unused, inserted] =
-        identities.emplace(identity, IdentityOrigin{.synthetic = synthetic});
-    (void)unused;
-    if (!inserted) {
-      fail(MonitorErrorCode::InternalError,
-           "checker identity insertion contradicted its preflight");
-    }
-    ++mapped_identity_records_;
-    mapped_identity_bytes_ += charge;
-    mapped_identity_high_water_records_ =
-        std::max(mapped_identity_high_water_records_, mapped_identity_records_);
-    mapped_identity_high_water_bytes_ =
-        std::max(mapped_identity_high_water_bytes_, mapped_identity_bytes_);
-  }
-
-  void validateWrites(const std::span<const NormalizedWrite> writes) const {
-    for (std::size_t index = 0; index < writes.size(); ++index) {
-      const auto &write = writes[index];
-      if (write.key.empty()) {
-        fail(MonitorErrorCode::CheckerInputRejected,
-             "normalized write has an empty key");
-      }
-      switch (write.state) {
-      case NormalizedValueState::Present:
-        if (!write.value.has_value()) {
-          fail(MonitorErrorCode::CheckerInputRejected,
-               "present normalized write lacks a value");
-        }
-        break;
-      case NormalizedValueState::Absent:
-        if (write.value.has_value()) {
-          fail(MonitorErrorCode::CheckerInputRejected,
-               "absent normalized write carries a value");
-        }
-        break;
-      default:
-        fail(MonitorErrorCode::CheckerInputRejected,
-             "normalized write has an invalid value state");
-      }
-      if (index != 0U && !bytesLess(writes[index - 1U].key, write.key)) {
-        fail(MonitorErrorCode::CheckerInputRejected,
-             "normalized writes are duplicated or not canonically ordered");
-      }
-    }
-  }
-
   [[nodiscard]] std::vector<EventView>
   makeEvents(const std::span<const ClientRead> reads,
              const std::span<const NormalizedWrite> writes) const {
-    validateWrites(writes);
     const auto max_events =
         static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) +
         1U;
@@ -600,6 +509,31 @@ private:
     }
     for (std::size_t index = 0; index < writes.size(); ++index) {
       const auto &write = writes[index];
+      if (write.key.empty()) {
+        fail(MonitorErrorCode::CheckerInputRejected,
+             "normalized write has an empty key");
+      }
+      switch (write.state) {
+      case NormalizedValueState::Present:
+        if (!write.value.has_value()) {
+          fail(MonitorErrorCode::CheckerInputRejected,
+               "present normalized write lacks a value");
+        }
+        break;
+      case NormalizedValueState::Absent:
+        if (write.value.has_value()) {
+          fail(MonitorErrorCode::CheckerInputRejected,
+               "absent normalized write carries a value");
+        }
+        break;
+      default:
+        fail(MonitorErrorCode::CheckerInputRejected,
+             "normalized write has an invalid value state");
+      }
+      if (index != 0U && !bytesLess(writes[index - 1U].key, write.key)) {
+        fail(MonitorErrorCode::CheckerInputRejected,
+             "normalized writes are duplicated or not canonically ordered");
+      }
       const auto sequence = reads.size() + index;
       events.push_back(EventView{
           .sequence = static_cast<std::uint32_t>(sequence),
@@ -738,8 +672,6 @@ private:
   std::uint64_t history_gc_total_nanoseconds_ = 0;
   co_checker::online::SnapshotSOWWEngine engine_;
   std::function<std::uint64_t()> monotonic_clock_nanoseconds_;
-  IdentityMap transaction_identities_;
-  IdentityMap attempt_identities_;
   CheckerObservation observation_ = CheckerObservation::NotStarted;
   std::optional<AttributedViolation> first_violation_;
   std::optional<Failure> failure_;
@@ -756,10 +688,6 @@ private:
   std::uint64_t workload_write_events_ = 0;
   std::uint64_t workload_consume_total_nanoseconds_ = 0;
   std::uint64_t workload_consume_max_nanoseconds_ = 0;
-  std::size_t mapped_identity_records_ = 0;
-  std::size_t mapped_identity_bytes_ = 0;
-  std::size_t mapped_identity_high_water_records_ = 0;
-  std::size_t mapped_identity_high_water_bytes_ = 0;
   std::size_t events_per_transaction_high_water_ = 0;
 };
 

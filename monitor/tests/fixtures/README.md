@@ -60,7 +60,7 @@ make monitor-build
 BLACKBOX_ACTIVE_RUN_ID=084cc5a1-3cbe-4fef-bb5c-43559a1c13a0 \
 BLACKBOX_CAPTURE_PATH=/tmp/mariadb-cdc-capture.json \
 BLACKBOX_CDC_REPLAY_BIN=/tmp/db-monitoring-blackbox-monitor-build/blackbox_cdc_replay \
-BLACKBOX_CDC_INGEST_BIN=/tmp/db-monitoring-blackbox-monitor-build/blackbox_cdc_ingest \
+BLACKBOX_MONITOR_BIN=/tmp/db-monitoring-blackbox-monitor-build/blackbox_run_monitor \
   ./tests/test_mariadb_lifecycle.sh
 ```
 

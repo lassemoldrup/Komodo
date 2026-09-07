@@ -385,7 +385,7 @@ replay(Json root, DebeziumAssemblerConfig config = assemblerConfig(),
   BLACKBOX_CHECK(assembler.completedCount() == transactions.size());
   BLACKBOX_CHECK(assembler.activeTransactionCount() == 0U);
   BLACKBOX_CHECK(assembler.activeBytes() == 0U);
-  BLACKBOX_CHECK(assembler.retainedIdentityBytes() > 0U);
+  BLACKBOX_CHECK(assembler.retainedIdentityBytes() == 0U);
   return transactions;
 }
 
@@ -1027,9 +1027,9 @@ void checkMeasurementMetrics() {
   BLACKBOX_CHECK(metrics.observed_events_per_transaction_high_water == 5U);
   BLACKBOX_CHECK(metrics.active_assembly_bytes == 0U);
   BLACKBOX_CHECK(metrics.active_assembly_high_water_bytes > 0U);
-  BLACKBOX_CHECK(metrics.retained_identity_records == 11U);
-  BLACKBOX_CHECK(metrics.retained_identity_bytes > 0U);
-  BLACKBOX_CHECK(metrics.retained_identity_high_water_records == 11U);
+  BLACKBOX_CHECK(metrics.retained_identity_records == 0U);
+  BLACKBOX_CHECK(metrics.retained_identity_bytes == 0U);
+  BLACKBOX_CHECK(metrics.retained_identity_high_water_records == 0U);
   BLACKBOX_CHECK(metrics.retained_identity_high_water_bytes ==
                  metrics.retained_identity_bytes);
 }
@@ -1141,10 +1141,12 @@ void checkStructuralFailuresAreClosed() {
   expectError(captured, CdcErrorCode::ResourceExhausted,
               std::move(completion_limited));
 
-  auto identity_limited = assemblerConfig();
-  identity_limited.max_retained_identity_bytes = 1U;
-  expectError(captured, CdcErrorCode::ResourceExhausted,
-              std::move(identity_limited));
+  DebeziumTxnAssembler no_history(assemblerConfig());
+  for (const auto &record : recordsFromFixture(prependStartupSchemaSnapshot(captured))) {
+    (void)no_history.accept(record);
+  }
+  no_history.finish();
+  BLACKBOX_CHECK(no_history.retainedIdentityBytes() == 0U);
 
   DebeziumTxnAssembler missing_snapshot(assemblerConfig());
   try {
@@ -1247,7 +1249,9 @@ void checkMarkerAndFenceFailuresAreClosed() {
   envelope = envelopeAt(duplicate_marker, 15U);
   envelope["after"]["txn_id"] = 1;
   setEnvelope(duplicate_marker, 15U, envelope);
-  expectError(std::move(duplicate_marker), CdcErrorCode::MarkerDuplicate);
+  // Assembly validates frame/marker shape. Per-session marker order and
+  // duplicate pending correlations are enforced by TransactionJoiner.
+  BLACKBOX_CHECK(replay(duplicate_marker).size() == replay(captured).size());
 
   auto update_as_first = captured;
   envelope = envelopeAt(update_as_first, 12U);

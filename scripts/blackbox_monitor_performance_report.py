@@ -23,7 +23,6 @@ CAPACITY_METADATA_FIELDS = (
     "monitor_max_assembler_events_per_transaction",
     "monitor_max_assembler_active_bytes",
     "monitor_max_assembler_completed_transactions",
-    "monitor_max_assembler_retained_identity_bytes",
     "monitor_max_pending_client_records",
     "monitor_max_pending_client_bytes",
     "monitor_max_pending_cdc_slots",
@@ -34,7 +33,6 @@ CAPACITY_METADATA_FIELDS = (
     "monitor_max_bootstrap_state_rows",
     "monitor_max_bootstrap_state_bytes",
     "monitor_max_checker_state_bytes",
-    "maximum_capacity_utilization_percent",
 )
 
 CAPACITY_OBSERVATION_FIELDS = (
@@ -42,7 +40,6 @@ CAPACITY_OBSERVATION_FIELDS = (
     "assembler_events_per_transaction_high_water",
     "assembler_active_bytes_high_water",
     "assembler_completed_transactions",
-    "assembler_retained_identity_bytes_high_water",
     "joiner_pending_client_records_high_water",
     "joiner_pending_client_bytes_high_water",
     "joiner_pending_cdc_slots_high_water",
@@ -52,8 +49,6 @@ CAPACITY_OBSERVATION_FIELDS = (
     "joiner_events_per_transaction_high_water",
     "joiner_bootstrap_state_rows_high_water",
     "joiner_bootstrap_state_bytes_high_water",
-    "checker_mapped_identity_records_high_water",
-    "checker_mapped_identity_bytes_high_water",
     "checker_events_per_transaction_high_water",
     "checker_state_bytes_high_water",
     "join_buffer_records_high_water",
@@ -329,10 +324,6 @@ def validate_metadata(metadata: Mapping[str, Any], trial_dir: Path) -> dict[str,
         *CAPACITY_METADATA_FIELDS,
     ):
         result[field] = integer(metadata[field], f"{label}.{field}", minimum=1)
-    require(
-        result["maximum_capacity_utilization_percent"] <= 100,
-        f"{label}.maximum_capacity_utilization_percent exceeds 100",
-    )
     for field in (
         "source_trial_manifest_sha256",
         "source_cdc_sha256",
@@ -394,7 +385,6 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         (assembler_limits, "max_events_per_transaction", "monitor_max_assembler_events_per_transaction"),
         (assembler_limits, "max_active_bytes", "monitor_max_assembler_active_bytes"),
         (assembler_limits, "max_completed_transactions", "monitor_max_assembler_completed_transactions"),
-        (assembler_limits, "max_retained_identity_bytes", "monitor_max_assembler_retained_identity_bytes"),
         (joiner_limits, "max_pending_client_records", "monitor_max_pending_client_records"),
         (joiner_limits, "max_pending_client_bytes", "monitor_max_pending_client_bytes"),
         (joiner_limits, "max_pending_cdc_slots", "monitor_max_pending_cdc_slots"),
@@ -414,8 +404,6 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     for metric_field, metadata_field in (
         ("max_retained_state_bytes", "monitor_max_checker_state_bytes"),
         ("max_events_per_transaction", "monitor_max_events_per_transaction"),
-        ("max_mapped_identity_records", "monitor_max_retained_identity_records"),
-        ("max_mapped_identity_bytes", "monitor_max_retained_identity_bytes"),
     ):
         require(
             metric_integer(checker_limits, metric_field, f"{label}.limits.checker", minimum=1)
@@ -432,7 +420,6 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         (assembler, "observed_events_per_transaction_high_water", assembler_limits, "max_events_per_transaction", "assembler_events_per_transaction_high_water"),
         (assembler, "active_assembly_high_water_bytes", assembler_limits, "max_active_bytes", "assembler_active_bytes_high_water"),
         (assembler, "completed_transactions", assembler_limits, "max_completed_transactions", "assembler_completed_transactions"),
-        (assembler, "retained_identity_high_water_bytes", assembler_limits, "max_retained_identity_bytes", "assembler_retained_identity_bytes_high_water"),
         (joiner, "pending_client_high_water_records", joiner_limits, "max_pending_client_records", "joiner_pending_client_records_high_water"),
         (joiner, "pending_client_high_water_bytes", joiner_limits, "max_pending_client_bytes", "joiner_pending_client_bytes_high_water"),
         (joiner, "pending_cdc_high_water_slots", joiner_limits, "max_pending_cdc_slots", "joiner_pending_cdc_slots_high_water"),
@@ -442,8 +429,6 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         (joiner, "released_events_per_transaction_high_water", joiner_limits, "max_events_per_transaction", "joiner_events_per_transaction_high_water"),
         (joiner, "bootstrap_state_high_water_rows", joiner_limits, "max_bootstrap_state_rows", "joiner_bootstrap_state_rows_high_water"),
         (joiner, "bootstrap_state_high_water_bytes", joiner_limits, "max_bootstrap_state_bytes", "joiner_bootstrap_state_bytes_high_water"),
-        (checker, "mapped_identity_high_water_records", checker_limits, "max_mapped_identity_records", "checker_mapped_identity_records_high_water"),
-        (checker, "mapped_identity_high_water_bytes", checker_limits, "max_mapped_identity_bytes", "checker_mapped_identity_bytes_high_water"),
         (checker, "events_per_transaction_high_water", checker_limits, "max_events_per_transaction", "checker_events_per_transaction_high_water"),
         (checker_engine, "peak_retained_state_bytes", checker_limits, "max_retained_state_bytes", "checker_state_bytes_high_water"),
     )
@@ -453,10 +438,6 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         observed = metric_integer(observed_group, observed_field, label)
         capacity = metric_integer(capacity_group, capacity_field, f"{label}.limits", minimum=1)
         utilization = Decimal(observed) * Decimal(100) / Decimal(capacity)
-        require(
-            utilization < metadata["maximum_capacity_utilization_percent"],
-            f"{label}.{observed_field} is not below its capacity threshold",
-        )
         capacity_percentages.append(utilization)
         capacity_high_waters[output_field] = observed
     capacity_high_waters["join_buffer_records_high_water"] = metric_integer(

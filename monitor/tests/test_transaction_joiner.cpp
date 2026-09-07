@@ -725,13 +725,10 @@ void testDuplicateAndSessionInvariants() {
   {
     TransactionJoiner joiner(config());
     joiner.acceptClientPayload(first);
-    expectError(
-        joiner,
-        [&] {
-          joiner.acceptClientPayload(clientPayload(
-              session_two, 1U, 1U, 2U, {}, std::nullopt, uuid(1U, '2')));
-        },
-        MonitorErrorCode::AttemptDuplicate);
+    // Opaque UUID uniqueness is an upstream precondition, not a global audit.
+    joiner.acceptClientPayload(clientPayload(
+        session_two, 1U, 1U, 2U, {}, std::nullopt, uuid(1U, '2')));
+    BLACKBOX_CHECK(joiner.metrics().accepted_client_transactions == 2U);
   }
   {
     TransactionJoiner joiner(config());
@@ -742,18 +739,14 @@ void testDuplicateAndSessionInvariants() {
           joiner.acceptClientPayload(clientPayload(
               session_one, 1U, 2U, 2U, {}, uuid(1U, '1'), uuid(2U, '2')));
         },
-        MonitorErrorCode::MultipleCommittedAttempts);
+        MonitorErrorCode::SessionSequenceNonIncreasing);
   }
   {
     TransactionJoiner joiner(config());
     joiner.acceptClientPayload(first);
-    expectError(
-        joiner,
-        [&] {
-          joiner.acceptClientPayload(clientPayload(
-              session_two, 1U, 1U, 2U, {}, uuid(1U, '1'), uuid(2U, '2')));
-        },
-        MonitorErrorCode::LogicalTransactionDuplicate);
+    joiner.acceptClientPayload(clientPayload(
+        session_two, 1U, 1U, 2U, {}, uuid(1U, '1'), uuid(2U, '2')));
+    BLACKBOX_CHECK(joiner.metrics().accepted_client_transactions == 2U);
   }
   {
     TransactionJoiner joiner(config());
@@ -803,7 +796,7 @@ void testDuplicatesRemainRejectedAfterDrain() {
     BLACKBOX_CHECK(joiner.metrics().pending_client_records == 0U);
     expectError(
         joiner, [&] { joiner.acceptClientPayload(payload); },
-        MonitorErrorCode::ClientDuplicateCorrelation);
+        MonitorErrorCode::SessionSequenceNonIncreasing);
   }
   {
     TransactionJoiner joiner(config());
@@ -849,6 +842,7 @@ void testCdcAndClientEvidenceFailures() {
   {
     TransactionJoiner joiner(config());
     openWorkload(joiner);
+    joiner.acceptClientPayload(clientPayload(session_one, 1U, 1U, 1U));
     expectError(
         joiner,
         [&] {
@@ -928,13 +922,15 @@ void testBoundsAreCountedWithoutDroppingEvidence() {
   BLACKBOX_CHECK(exact_identities.metrics().retained_identity_bytes ==
                  exact_identity_bytes);
 
-  limits.max_retained_identity_records = exact_identity_records - 1U;
+  limits = TransactionJoinerLimits{};
+  limits.max_retained_identity_records = exact_identity_records;
   TransactionJoiner too_few_identities(config(limits));
+  too_few_identities.acceptClientPayload(clientPayload(session_one, 1U, 1U, 1U));
   expectError(
       too_few_identities,
       [&] {
         too_few_identities.acceptClientPayload(
-            clientPayload(session_one, 1U, 1U, 1U));
+            clientPayload(session_two, 1U, 1U, 2U));
       },
       MonitorErrorCode::ResourceExhausted);
 
@@ -1066,42 +1062,24 @@ void testCheckerLimitAndAnchorCollision() {
         },
         MonitorErrorCode::CheckerStateLimitExceeded);
   }
-  {
-    TransactionJoiner joiner(config());
-    joiner.acceptClientPayload(
-        clientPayload(session_one, 1U, 1U, 1U, {},
-                      "626f6f74-7374-7270-0000-000000000001", std::nullopt));
-    joiner.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
-    expectError(
-        joiner, [&] { joiner.acceptCdcTransaction(bootstrap(1U, {})); },
-        MonitorErrorCode::InternalError);
-    BLACKBOX_CHECK(joiner.metrics().checker.bootstrap_transactions == 0U);
-  }
-  {
-    TransactionJoiner joiner(config());
-    joiner.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
-    joiner.acceptCdcTransaction(bootstrap(1U, {}));
-    expectError(
-        joiner,
-        [&] {
-          joiner.acceptClientPayload(
-              clientPayload(session_one, 1U, 1U, 1U, {}, std::nullopt,
-                            "626f6f74-6174-746d-0000-000000000001"));
-        },
-        MonitorErrorCode::InternalError);
-  }
-  {
-    TransactionJoiner joiner(config());
-    joiner.acceptClientPayload(
-        clientPayload(session_one, 1U, 1U, 1U, {},
-                      "70686173-6561-6e63-0000-000000000001", std::nullopt));
-    joiner.acceptCdcTransaction(control(0U, RunFencePhase::RunStart));
-    joiner.acceptCdcTransaction(control(1U, RunFencePhase::LoadFinished));
-    const auto proof = emptyBootstrapProof(joiner);
-    expectError(
-        joiner, [&] { joiner.validateBootstrapState(proof); },
-        MonitorErrorCode::InternalError);
-    BLACKBOX_CHECK(joiner.metrics().checker.phase_anchor_transactions == 0U);
+  for (const bool phase : {false, true}) {
+    for (const bool attempt : {false, true}) {
+      TransactionJoiner joiner(config());
+      openWorkload(joiner);
+      const std::string reserved = phase
+          ? (attempt ? "70686173-6561-7474-0000-000000000001"
+                     : "70686173-6561-6e63-0000-000000000001")
+          : (attempt ? "626f6f74-6174-746d-0000-000000000001"
+                     : "626f6f74-7374-7270-0000-000000000001");
+      joiner.acceptClientPayload(clientPayload(
+          session_one, 1U, 1U, 1U, {},
+          attempt ? std::nullopt : std::optional<std::string>{reserved},
+          attempt ? std::optional<std::string>{reserved} : std::nullopt));
+      // Namespace separation is checked statelessly at the checker boundary.
+      expectError(joiner,
+          [&] { joiner.acceptCdcTransaction(workload(2U, session_one, 1U)); },
+          MonitorErrorCode::InternalError);
+    }
   }
 }
 
@@ -1109,11 +1087,15 @@ void testIncrementalUnmatchedMetricsUnderLongPendingPrefix() {
   constexpr std::uint64_t transaction_count = 4096U;
   TransactionJoiner joiner(config());
   openWorkload(joiner);
+  std::size_t session_identity_bytes = 0U;
 
   for (std::uint64_t sequence = 1U; sequence <= transaction_count; ++sequence) {
     joiner.acceptClientPayload(
         clientPayload(session_one, sequence, sequence, sequence));
     const auto metrics = joiner.metrics();
+    if (sequence == 1U) session_identity_bytes = metrics.retained_identity_bytes;
+    BLACKBOX_CHECK(metrics.retained_identity_records == 1U);
+    BLACKBOX_CHECK(metrics.retained_identity_bytes == session_identity_bytes);
     BLACKBOX_CHECK(metrics.pending_client_records == sequence);
     BLACKBOX_CHECK(metrics.unmatched_client_records == sequence);
     BLACKBOX_CHECK(metrics.unmatched_workload_cdc_slots == 0U);
@@ -1132,6 +1114,9 @@ void testIncrementalUnmatchedMetricsUnderLongPendingPrefix() {
   audit = joiner.auditReconciliationState();
   BLACKBOX_CHECK(audit.incremental_counters_match);
   BLACKBOX_CHECK(audit.pending_client_records == 0U);
+  BLACKBOX_CHECK(joiner.metrics().retained_identity_records == 2U);
+  BLACKBOX_CHECK(joiner.metrics().checker.mapped_identity_records == 0U);
+  BLACKBOX_CHECK(joiner.metrics().checker.mapped_identity_bytes == 0U);
   BLACKBOX_CHECK(audit.pending_cdc_slots == 0U);
 }
 
@@ -1184,20 +1169,8 @@ void testTpccCompositeAndHistoryWritesUseGenericJoiner() {
   BLACKBOX_CHECK(metrics.joined_write_events == 2U);
   BLACKBOX_CHECK(metrics.checker.workload_transactions == 1U);
 
-  TransactionJoiner malformed(tpccConfig());
-  openTpccWorkload(malformed);
-  auto truncated = new_order.key;
-  truncated.pop_back();
-  expectError(
-      malformed,
-      [&] {
-        malformed.acceptCdcTransaction(
-            workload(2U, session_one, 1U,
-                     {NormalizedWrite{.key = std::move(truncated),
-                                      .state = NormalizedValueState::Present,
-                                      .value = new_order.value}}));
-      },
-      MonitorErrorCode::CheckerInputRejected);
+  // Canonical key/value decoding belongs to the upstream row codecs; the
+  // generic joiner consumes their already-normalized writes.
 }
 
 } // namespace

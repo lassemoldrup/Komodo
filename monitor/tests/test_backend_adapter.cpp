@@ -48,6 +48,8 @@ using Json = nlohmann::json;
     return "canonical_identifier";
   case BackendFactValueRule::PositiveInteger:
     return "positive_integer";
+  case BackendFactValueRule::RecordOnly:
+    return "record_only";
   }
   std::abort();
 }
@@ -177,6 +179,8 @@ void checkYugabyteSchemaAttestationFailures() {
     case blackbox::BackendFactValueRule::PositiveInteger:
       fact.canonical_value = "0";
       break;
+    case blackbox::BackendFactValueRule::RecordOnly:
+      continue; // Recorded tuning values are not fixed correctness conditions.
     }
     expect(std::move(drifted_fact), MonitorErrorCode::BackendFactMismatch);
   }

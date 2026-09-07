@@ -990,6 +990,8 @@ def validate_schema_attestation(
             require(CANONICAL_IDENTIFIER.fullmatch(value) is not None, f"{label}: fact {fact['name']} is not a canonical identifier")
         elif rule["value_rule"] == "positive_integer":
             require(value.isdigit() and int(value) > 0 and str(int(value)) == value, f"{label}: fact {fact['name']} is not a canonical positive integer")
+        elif rule["value_rule"] == "record_only":
+            pass  # Preserve the observed setting without pinning its value.
         else:  # pragma: no cover - schema owns the enumeration
             raise VerificationError(f"{label}: unknown backend fact rule")
     require(

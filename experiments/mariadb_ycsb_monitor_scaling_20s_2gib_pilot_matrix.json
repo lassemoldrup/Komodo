@@ -32,9 +32,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "summary_metrics": [
         "client_logical_transactions_per_second",
@@ -106,9 +104,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "summary_metrics": [
         "client_logical_transactions_per_second",
@@ -180,9 +176,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "summary_metrics": [
         "client_logical_transactions_per_second",
@@ -254,9 +248,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "summary_metrics": [
         "client_logical_transactions_per_second",
@@ -328,9 +320,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "summary_metrics": [
         "client_logical_transactions_per_second",
@@ -402,9 +392,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "summary_metrics": [
         "client_logical_transactions_per_second",
@@ -476,9 +464,7 @@
         "--monitor-retained-identity-bytes",
         "4294967296",
         "--monitor-checker-state-bytes",
-        "1073741824",
-        "--high-water-threshold-percent",
-        "70"
+        "1073741824"
       ],
       "summary_metrics": [
         "client_logical_transactions_per_second",
