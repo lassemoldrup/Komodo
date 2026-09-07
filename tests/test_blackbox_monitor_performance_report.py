@@ -512,6 +512,11 @@ class MonitorPerformanceReportTest(unittest.TestCase):
     def test_rejects_invalid_wall_cpu_rss_or_limit_measurement(self) -> None:
         cases = (
             (
+                "history GC setting mismatch",
+                lambda value: value["limits"]["checker"].__setitem__("history_gc", True),
+                "history_gc differs from trial metadata",
+            ),
+            (
                 "zero wall",
                 lambda value: value.__setitem__("monitor_wall_time_nanoseconds", 0),
                 "less than 1",
@@ -593,6 +598,28 @@ class MonitorPerformanceReportTest(unittest.TestCase):
                 self.mutate(trial / "monitor_metrics.json", mutate)
                 with self.assertRaisesRegex(report.MonitorReportError, message):
                     report.collect_trials(root)
+
+    def test_history_gc_is_recorded_and_cannot_be_mixed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_complete_roster(root)
+            paths = list(root.rglob("metadata.json"))
+            for path in paths:
+                self.mutate(path, lambda value: value.__setitem__("history_gc", True))
+                self.mutate(
+                    path.parent / "monitor_metrics.json",
+                    lambda value: value["limits"]["checker"].__setitem__("history_gc", True),
+                )
+            rows, _ = report.collect_trials(root)
+            self.assertTrue(all(row["history_gc"] is True for row in rows))
+            path = paths[0]
+            self.mutate(path, lambda value: value.__setitem__("history_gc", False))
+            self.mutate(
+                path.parent / "monitor_metrics.json",
+                lambda value: value["limits"]["checker"].__setitem__("history_gc", False),
+            )
+            with self.assertRaisesRegex(report.MonitorReportError, "invariant.*history_gc"):
+                report.collect_trials(root)
 
     def test_missing_or_malformed_artifacts_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

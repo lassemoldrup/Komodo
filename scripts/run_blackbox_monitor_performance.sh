@@ -38,6 +38,7 @@ MONITOR_MAX_EVENTS_PER_TRANSACTION=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_EV
 MONITOR_MAX_BOOTSTRAP_STATE_ROWS=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_ROWS:-10000000}
 MONITOR_MAX_BOOTSTRAP_STATE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_BOOTSTRAP_STATE_BYTES:-268435456}
 MONITOR_MAX_CHECKER_STATE_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_MONITOR_MAX_CHECKER_STATE_BYTES:-536870912}
+MONITOR_HISTORY_GC=${BLACKBOX_MONITOR_HISTORY_GC:-off}
 MAXIMUM_CAPACITY_UTILIZATION_PERCENT=${BLACKBOX_MONITOR_PERFORMANCE_MAXIMUM_CAPACITY_UTILIZATION_PERCENT:-70}
 OUTPUT_MAX_BYTES=${BLACKBOX_MONITOR_PERFORMANCE_OUTPUT_MAX_BYTES:-107374182400}
 COMPOSE_TIMEOUT_SECONDS=${BLACKBOX_MONITOR_PERFORMANCE_COMPOSE_TIMEOUT_SECONDS:-300}
@@ -323,6 +324,8 @@ parse_arguments() {
     esac
   done
   configure_stages
+  [[ $MONITOR_HISTORY_GC == on || $MONITOR_HISTORY_GC == off ]] ||
+    die "BLACKBOX_MONITOR_HISTORY_GC must be on or off"
   require_positive_integer repetitions "$REPETITIONS"
   require_positive_integer expected-duration-seconds "$EXPECTED_DURATION_SECONDS"
   require_unsigned_integer seed "$RANDOM_SEED"
@@ -896,6 +899,8 @@ write_trial_metadata() {
   local position=$4
   local roster_json
   local capacity_json
+  local history_gc_json=false
+  if [[ $MONITOR_HISTORY_GC == on ]]; then history_gc_json=true; fi
   roster_json=$(printf '%s\n' "${STAGES[@]}" | jq -Rsc 'split("\n")[:-1]')
   capacity_json=$(printf '%s' \
     "{\"monitor_max_assembler_active_transactions\":$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS" \
@@ -908,7 +913,8 @@ write_trial_metadata() {
     ",\"monitor_max_pending_cdc_bytes\":$MONITOR_MAX_PENDING_CDC_BYTES" \
     ",\"monitor_max_retained_identity_records\":$MONITOR_MAX_RETAINED_IDENTITY_RECORDS" \
     ",\"monitor_max_events_per_transaction\":$MONITOR_MAX_EVENTS_PER_TRANSACTION" \
-    ",\"monitor_max_checker_state_bytes\":$MONITOR_MAX_CHECKER_STATE_BYTES}")
+    ",\"monitor_max_checker_state_bytes\":$MONITOR_MAX_CHECKER_STATE_BYTES" \
+    ",\"history_gc\":$history_gc_json}")
   python3 - "$trial_dir/metadata.json" "$stage" "$repetition" "$position" \
     "$REPETITIONS" "$RANDOM_SEED" "$RUN_ID" "$EXPECTED_DURATION_SECONDS" \
     "$roster_json" "$CORPUS_DIR" "$SOURCE_TRIAL_MANIFEST_SHA256" \
@@ -979,6 +985,7 @@ run_monitor() {
   local outer_timeout=$(( MONITOR_TIMEOUT_SECONDS + 30 ))
   local measurement_timeout=$(( outer_timeout + 60 ))
   local capacity_args=(
+    --history-gc "$MONITOR_HISTORY_GC"
     --max-assembler-active-transactions "$MONITOR_MAX_ASSEMBLER_ACTIVE_TRANSACTIONS"
     --max-assembler-events-per-transaction "$MONITOR_MAX_ASSEMBLER_EVENTS_PER_TRANSACTION"
     --max-assembler-active-bytes "$MONITOR_MAX_ASSEMBLER_ACTIVE_BYTES"

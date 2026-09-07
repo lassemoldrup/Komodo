@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import copy
+import hashlib
 import json
 import socket
 import subprocess
@@ -499,6 +501,7 @@ def check_join_only_early_failure_artifact(executable):
             "max_checker_state_bytes": 536870912,
         }
         assert measurement["limits"]["checker"] == {
+            "history_gc": False,
             "max_retained_state_bytes": 536870912,
             "max_events_per_transaction": 101000,
             "max_mapped_identity_records": 10000000,
@@ -627,6 +630,10 @@ def check_capacity_options(executable):
                     "1073741824",
                     "--max-checker-state-bytes",
                     "2147483648",
+                    "--history-gc",
+                    "on",
+                    "--workload-rss-sampling",
+                    "on",
                 ],
             )
             assert result.returncode == 1, result
@@ -651,19 +658,141 @@ def check_capacity_options(executable):
             "max_checker_state_bytes": 2147483648,
         }
         assert measurement["limits"]["checker"] == {
+            "history_gc": True,
             "max_retained_state_bytes": 2147483648,
             "max_events_per_transaction": 202000,
             "max_mapped_identity_records": 20000000,
             "max_mapped_identity_bytes": 2147483648,
         }
+        assert measurement["process"]["workload_rss_sampling_enabled"] is True
+        assert measurement["process"]["workload_rss_sampling_started"] is False
+        assert measurement["process"]["workload_rss_sampling_valid"] is False
+        assert measurement["process"]["workload_sampled_peak_rss_kib"] is None
+        assert measurement["process"]["workload_rss_samples"] == 0
         assert_no_audited_result(measurement)
     print("monitor capacities: defaults, overrides, zero, and overflow validated")
+
+
+def check_rss_sampling_options(executable):
+    for arguments, message in (
+        (["--workload-rss-sampling", "invalid"], "must be on or off"),
+        (monitor_command(executable, 1, 1000, ["--workload-rss-sampling", "on"])[1:],
+         "workload RSS sampling requires --metrics-output"),
+    ):
+        result = subprocess.run([executable, *arguments], capture_output=True,
+                                text=True, timeout=2, check=False)
+        assert result.returncode == 1 and message in output(result), result
+
+
+def check_workload_rss_window(executable):
+    root = Path(__file__).resolve().parents[2]
+    attestation = json.loads((root / "protocol/examples/schema-attestation-startup.json").read_text())
+    attestation.update(run_id=RUN_ID, backend_source_id="blackbox-mariadb")
+    body = {key: attestation[key] for key in ("backend", "backend_source_id", "tables", "backend_facts")}
+    attestation["canonical_attestation_digest"] = hashlib.sha256(
+        b"db-monitoring/schema-attestation\x00" +
+        json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    bootstrap = {"kind": "bootstrap_manifest", "run_id": RUN_ID,
+                 "table_row_counts": [{"table": "benchbase.usertable", "row_count": 0}],
+                 "canonical_state_digest": "944dd6136dbad7047e31af3b6419eb6a632d4dea64bec8159e93307163810bc2"}
+    done = json.loads((root / "protocol/examples/session-done.json").read_text())
+    for key, value in done.items():
+        if isinstance(value, int): done[key] = 0
+    done["run_id"] = RUN_ID
+    session = done["session_id"].encode()
+    done["rolling_correlation_digest"] = hashlib.sha256(
+        b"db-monitoring/session-marker-seed\x00" + bytes.fromhex(RUN_ID.replace("-", "")) +
+        len(session).to_bytes(4, "big") + session).hexdigest()
+    final = dict(attestation, phase="FINAL")
+    template = json.loads((root / "monitor/tests/fixtures/mariadb_debezium_3_6_1_lifecycle.json").read_text())[:3]
+    schema = json.loads((root / "monitor/tests/fixtures/mariadb_debezium_3_6_1_snapshot_schema.json").read_text().replace("mariadb-main", "blackbox-mariadb"))
+    for index, entry in enumerate(schema):
+        entry[0] = f"{10 + index}-0"
+
+    def fence(phase, number):
+        entries = copy.deepcopy(template)
+        txid = f"0-1-{number + 9}"
+        for index, entry in enumerate(entries):
+            entry[0] = f"{100 + number}-{index}"
+            key, value = (json.loads(x) for x in entry[1])
+            if index == 1:
+                key.update(run_id=RUN_ID, phase=phase)
+                value["after"].update(run_id=RUN_ID, phase=phase)
+                value["source"].update(name="blackbox-mariadb", gtid=txid, pos=345 + number * 100)
+                value["transaction"]["id"] = txid
+            else:
+                key["id"] = value["id"] = txid
+            entry[1] = [json.dumps(key), json.dumps(value)]
+        return entries
+
+    def reply(client_records, cdc_records):
+        streams = []
+        for name, entries in ((f"blackbox:client:{RUN_ID}", client_records), ("cdc", cdc_records)):
+            if entries:
+                streams.append(resp_array([resp_bulk(name), resp_array([
+                    resp_array([resp_bulk(sid), resp_array([resp_bulk(x) for x in fields])])
+                    for sid, fields in entries])]))
+        return resp_array(streams)
+
+    for enabled, mode in ((False, "audited"), (True, "audited"), (True, "join-only")):
+        xreads = 0
+        statuses = []
+
+        def handler(_connection_id, command):
+            nonlocal xreads
+            if command[0] == b"EVAL": return resp_integer(1)
+            if command[0] == b"XADD":
+                statuses.append(json.loads(command[-1]))
+                return resp_bulk(f"{len(statuses)}-0")
+            assert command[0] == b"XREAD", command
+            xreads += 1
+            if xreads == 1: return manifest_xread_reply()
+            if xreads == 2:
+                return reply([["2-0", ["payload", json.dumps(attestation)]],
+                              ["3-0", ["payload", json.dumps(bootstrap)]]],
+                             schema + fence("RUN_START", 0) + fence("LOAD_FINISHED", 1))
+            if xreads == 3:
+                assert any(s["lifecycle_state"] == "LOAD_FINISHED_SEEN" for s in statuses)
+                time.sleep(0.35) # Worker must sample while the main thread waits on Redis.
+                return reply([["4-0", ["payload", json.dumps(done)]],
+                              ["5-0", ["payload", json.dumps(final)]]], fence("END_FENCE", 2))
+            return b"*-1\r\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "metrics.json"
+            with ScriptedRedis(handler) as server:
+                result, _ = run_monitor(executable, server.port, 5000, extra_arguments=[
+                    "--metrics-output", str(path), "--processing-mode", mode,
+                    "--workload-rss-sampling", "on" if enabled else "off"])
+            metrics = json.loads(path.read_text())
+            assert result.returncode == 0, (output(result), metrics["diagnostics"])
+            process = metrics["process"]
+            assert metrics["evidence_reconciled"] is True
+            assert process["workload_rss_sampling_enabled"] is enabled
+            assert process["workload_rss_sampling_started"] is enabled
+            assert process["workload_rss_sampling_valid"] is enabled
+            assert process["workload_rss_sample_errors"] == 0
+            if enabled:
+                assert process["workload_sampled_peak_rss_kib"] > 0
+                assert process["workload_rss_samples"] >= 3
+                assert process["rss_sample_interval_ms"] == 100
+            else:
+                assert process["workload_sampled_peak_rss_kib"] is None
+                assert process["workload_rss_samples"] == 0
+    print("workload RSS: admission, idle sampling, final drain, and disabled mode verified")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--monitor", required=True)
     args = parser.parse_args()
+    result = subprocess.run(
+        [args.monitor, "--history-gc", "invalid"],
+        capture_output=True, text=True, timeout=2.0, check=False,
+    )
+    assert result.returncode == 1, result
+    assert "history-gc must be on or off" in output(result), output(result)
     check_ownership(args.monitor)
     check_claim_timeout(args.monitor)
     check_manifest_timeout(args.monitor)
@@ -674,6 +803,8 @@ def main():
     check_join_only_requires_metrics(args.monitor)
     check_join_only_early_failure_artifact(args.monitor)
     check_capacity_options(args.monitor)
+    check_rss_sampling_options(args.monitor)
+    check_workload_rss_window(args.monitor)
 
 
 if __name__ == "__main__":

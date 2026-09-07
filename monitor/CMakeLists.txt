@@ -28,6 +28,7 @@ pkg_check_modules(HIREDIS REQUIRED IMPORTED_TARGET hiredis=1.2.0)
 find_package(nlohmann_json 3.11.3 EXACT CONFIG REQUIRED)
 find_package(simdjson 3.6.4 EXACT CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(Threads REQUIRED)
 
 add_library(blackbox_monitor
   src/backend_adapter.cpp
@@ -90,7 +91,7 @@ add_executable(blackbox_evidence_replay
 )
 target_link_libraries(blackbox_cdc_ingest PRIVATE blackbox_monitor)
 target_link_libraries(blackbox_prefix_ingest PRIVATE blackbox_monitor)
-target_link_libraries(blackbox_run_monitor PRIVATE blackbox_monitor)
+target_link_libraries(blackbox_run_monitor PRIVATE blackbox_monitor Threads::Threads)
 target_link_libraries(blackbox_evidence_replay PRIVATE blackbox_monitor)
 target_compile_options(blackbox_cdc_ingest
   PRIVATE
@@ -161,10 +162,12 @@ if(BLACKBOX_MONITOR_BUILD_TESTING)
     tests/test_run_controller.cpp
     tests/test_strict_json.cpp
     tests/test_transaction_joiner.cpp
+    tests/test_workload_rss.cpp
   )
   target_link_libraries(blackbox_monitor_tests
     PRIVATE
       blackbox_monitor
+      Threads::Threads
       nlohmann_json::nlohmann_json
   )
   target_include_directories(blackbox_monitor_tests

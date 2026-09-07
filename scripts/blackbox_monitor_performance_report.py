@@ -92,6 +92,7 @@ JOIN_ONLY_CHECKER_COUNTERS = (
 RAW_FIELDS = (
     "stage",
     "mode",
+    "history_gc",
     "repetition",
     "stage_order_position",
     "trial_id",
@@ -188,6 +189,7 @@ METADATA_FIELDS = (
 )
 
 INVARIANT_FIELDS = (
+    "history_gc",
     "configured_repetitions",
     "configured_stages",
     "random_seed",
@@ -301,6 +303,8 @@ def validate_metadata(metadata: Mapping[str, Any], trial_dir: Path) -> dict[str,
     require(stage in roster, f"{label}.stage is absent from configured_stages")
 
     result = dict(metadata)
+    result["history_gc"] = metadata.get("history_gc", False)
+    require(isinstance(result["history_gc"], bool), f"{label}.history_gc is not boolean")
     result["configured_stages"] = roster
     result["repetition"] = integer(metadata["repetition"], f"{label}.repetition", minimum=1)
     result["stage_order_position"] = integer(
@@ -381,6 +385,10 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     assembler_limits = object_field(limits, "assembler", f"{label}.limits")
     joiner_limits = object_field(limits, "joiner", f"{label}.limits")
     checker_limits = object_field(limits, "checker", f"{label}.limits")
+    require(
+        checker_limits.get("history_gc", False) is metadata["history_gc"],
+        f"{label} history_gc differs from trial metadata",
+    )
     for group, metric_field, metadata_field in (
         (assembler_limits, "max_active_transactions", "monitor_max_assembler_active_transactions"),
         (assembler_limits, "max_events_per_transaction", "monitor_max_assembler_events_per_transaction"),
@@ -536,6 +544,7 @@ def trial_row(trial_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     row = {
         "stage": stage,
         "mode": MODE_LABELS[stage],
+        "history_gc": metadata["history_gc"],
         "repetition": metadata["repetition"],
         "stage_order_position": metadata["stage_order_position"],
         "trial_id": metadata["trial_id"],
@@ -728,6 +737,7 @@ def write_summary_json(
         "random_seed": metadata["random_seed"],
         "source_corpus": source,
         "provenance": {
+            "history_gc": metadata["history_gc"],
             "redis_maxmemory_bytes": metadata["redis_maxmemory_bytes"],
             **{field: metadata[field] for field in CAPACITY_METADATA_FIELDS},
             "si_monitoring_head": metadata["si_monitoring_head"],

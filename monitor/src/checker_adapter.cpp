@@ -139,6 +139,8 @@ struct EntityHash {
   case EngineErrorCode::InvalidValueState:
   case EngineErrorCode::InvalidReadSource:
   case EngineErrorCode::AbsentValueHasPayload:
+  case EngineErrorCode::InvalidHistoryFrontier:
+  case EngineErrorCode::HistoryUnavailable:
     return MonitorErrorCode::CheckerInputRejected;
   }
   return MonitorErrorCode::InternalError;
@@ -211,12 +213,19 @@ public:
             "checker expected-session roster is empty or duplicated");
       }
     }
+    if (config_.history_gc) {
+      session_history_.resize(config_.expected_session_ids.size());
+    }
   }
 
   void consumeBootstrap(const std::uint64_t commit_seq,
                         const std::uint64_t cdc_seq,
                         const std::vector<NormalizedWrite> &writes) {
     guarded([&] {
+      if (config_.history_gc && phase_anchor_transactions_ != 0U) {
+        fail(MonitorErrorCode::CheckerInputRejected,
+             "bootstrap transaction follows a workload phase anchor");
+      }
       const auto identity =
           makeBootstrapCheckerIdentity(config_.run_id, cdc_seq);
       reserveIdentity(transaction_identities_, identity.transaction_id, true,
@@ -244,6 +253,9 @@ public:
         reserveIdentity(attempt_identities_, identity.attempt_id, true,
                         MonitorErrorCode::AttemptDuplicate);
         consume(commit_seq, identity, {}, {}, nullptr);
+        if (config_.history_gc) {
+          session_history_[found->second - 1U].latest_commit_seq = commit_seq;
+        }
       } catch (const MonitorError &error) {
         if (error.code() == MonitorErrorCode::ResourceExhausted ||
             error.code() == MonitorErrorCode::CheckerStateLimitExceeded ||
@@ -255,6 +267,7 @@ public:
                                error.what());
       }
       ++phase_anchor_transactions_;
+      reclaimHistory();
     });
   }
 
@@ -279,6 +292,12 @@ public:
         fail(MonitorErrorCode::CheckerInputRejected,
              "real workload session_seq must be positive");
       }
+      if (config_.history_gc &&
+          (phase_anchor_transactions_ != session_history_.size() ||
+           session_history_[found->second - 1U].retired)) {
+        fail(MonitorErrorCode::CheckerInputRejected,
+             "workload requires all phase anchors and an active session");
+      }
       CheckerTransactionIdentity identity{
           .transaction_id = entity(client.logical_txn_id),
           .attempt_id = entity(client.attempt_id),
@@ -293,6 +312,31 @@ public:
                       MonitorErrorCode::AttemptDuplicate);
       consume(commit_seq, identity, client.reads, writes, &client);
       ++workload_transactions_;
+      if (config_.history_gc) {
+        session_history_[found->second - 1U].latest_commit_seq = commit_seq;
+      }
+      reclaimHistory();
+    });
+  }
+
+  void retireSession(const std::string_view session_id) {
+    guarded([&] {
+      if (!config_.history_gc) {
+        return;
+      }
+      const auto found = session_ordinals_.find(std::string(session_id));
+      if (found == session_ordinals_.end()) {
+        fail(MonitorErrorCode::SessionUnknown,
+             "session retirement names a session absent from the roster");
+      }
+      auto &session = session_history_[found->second - 1U];
+      if (phase_anchor_transactions_ != session_history_.size() ||
+          session.retired) {
+        fail(MonitorErrorCode::CheckerInputRejected,
+             "session retirement requires all anchors and an active session");
+      }
+      session.retired = true;
+      reclaimHistory();
     });
   }
 
@@ -305,7 +349,7 @@ public:
     return first_violation_;
   }
 
-  [[nodiscard]] CheckerAdapterMetrics metrics() const {
+  [[nodiscard]] CheckerAdapterMetrics metrics(const bool include_memory_profile = false) const {
     return CheckerAdapterMetrics{
         .next_commit_seq = next_commit_seq_,
         .consumed_transactions = consumed_transactions_,
@@ -327,7 +371,8 @@ public:
             mapped_identity_high_water_records_,
         .mapped_identity_high_water_bytes = mapped_identity_high_water_bytes_,
         .events_per_transaction_high_water = events_per_transaction_high_water_,
-        .engine = engine_.metrics(),
+        .engine = engine_.metrics(include_memory_profile),
+        .history_gc_total_nanoseconds = history_gc_total_nanoseconds_,
     };
   }
 
@@ -341,6 +386,35 @@ public:
   }
 
 private:
+  struct SessionHistory {
+    std::optional<std::uint64_t> latest_commit_seq;
+    bool retired = false;
+  };
+
+  void reclaimHistory() {
+    // The fixed manifest roster must be completely anchored before pruning.
+    // One-shot bootstrap sessions never participate in this minimum.
+    if (!config_.history_gc ||
+        phase_anchor_transactions_ != session_history_.size()) {
+      return;
+    }
+    const auto started = monotonic_clock_nanoseconds_();
+    auto frontier = next_commit_seq_ - 1U;
+    for (const auto &session : session_history_) {
+      if (!session.retired) {
+        frontier = std::min(frontier, session.latest_commit_seq.value());
+      }
+    }
+    const auto error = engine_.pruneHistoryThrough(frontier);
+    const auto finished = monotonic_clock_nanoseconds_();
+    if (finished >= started) {
+      history_gc_total_nanoseconds_ += finished - started;
+    }
+    if (error.has_value()) {
+      fail(checkerErrorCode(error->code, false), error->message);
+    }
+  }
+
   struct Failure {
     MonitorErrorCode code;
     std::string message;
@@ -660,6 +734,8 @@ private:
   CheckerAdapterConfig config_;
   RuntimeEpoch run_epoch_;
   std::unordered_map<std::string, std::uint32_t> session_ordinals_;
+  std::vector<SessionHistory> session_history_;
+  std::uint64_t history_gc_total_nanoseconds_ = 0;
   co_checker::online::SnapshotSOWWEngine engine_;
   std::function<std::uint64_t()> monotonic_clock_nanoseconds_;
   IdentityMap transaction_identities_;
@@ -711,6 +787,10 @@ void CheckerAdapter::consumeWorkload(
   impl_->consumeWorkload(commit_seq, client, writes);
 }
 
+void CheckerAdapter::retireSession(const std::string_view session_id) {
+  impl_->retireSession(session_id);
+}
+
 CheckerObservation CheckerAdapter::observation() const noexcept {
   return impl_->observation();
 }
@@ -720,8 +800,8 @@ CheckerAdapter::firstViolation() const noexcept {
   return impl_->firstViolation();
 }
 
-CheckerAdapterMetrics CheckerAdapter::metrics() const {
-  return impl_->metrics();
+CheckerAdapterMetrics CheckerAdapter::metrics(const bool include_memory_profile) const {
+  return impl_->metrics(include_memory_profile);
 }
 
 bool CheckerAdapter::failed() const noexcept { return impl_->failed(); }

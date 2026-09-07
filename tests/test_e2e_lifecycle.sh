@@ -334,6 +334,8 @@ events_per_transaction=101000
 bootstrap_state_rows=10000000
 bootstrap_state_bytes=268435456
 checker_state_bytes=536870912
+history_gc=off
+workload_rss_sampling=off
 while (( $# > 0 )); do
   case "$1" in
     --processing-mode) processing_mode=$2; shift 2 ;;
@@ -353,6 +355,8 @@ while (( $# > 0 )); do
     --max-bootstrap-state-rows) bootstrap_state_rows=$2; shift 2 ;;
     --max-bootstrap-state-bytes) bootstrap_state_bytes=$2; shift 2 ;;
     --max-checker-state-bytes) checker_state_bytes=$2; shift 2 ;;
+    --history-gc) history_gc=$2; shift 2 ;;
+    --workload-rss-sampling) workload_rss_sampling=$2; shift 2 ;;
     *) echo "unexpected monitor argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -373,6 +377,8 @@ echo "monitor:events-per-transaction:$events_per_transaction" >>"$EVENT_LOG"
 echo "monitor:bootstrap-state-rows:$bootstrap_state_rows" >>"$EVENT_LOG"
 echo "monitor:bootstrap-state-bytes:$bootstrap_state_bytes" >>"$EVENT_LOG"
 echo "monitor:checker-state-bytes:$checker_state_bytes" >>"$EVENT_LOG"
+echo "monitor:history-gc:$history_gc" >>"$EVENT_LOG"
+echo "monitor:workload-rss-sampling:$workload_rss_sampling" >>"$EVENT_LOG"
 while ! grep -q '^fence:END_FENCE$' "$EVENT_LOG"; do
   sleep 0.05
 done
@@ -792,6 +798,8 @@ run_case() {
 
 run_case clean 0
 [[ $CASE_STATUS == 0 ]] || fail "clean lifecycle exited $CASE_STATUS: $(cat "$TEST_ROOT/clean/stderr")"
+grep -q "^monitor:history-gc:${BLACKBOX_MONITOR_HISTORY_GC:-off}$" "$CASE_LOG" ||
+  fail 'history GC toggle was not forwarded to the monitor'
 
 manifest_line=$(line_of 'publish:run_manifest' "$CASE_LOG")
 startup_schema_line=$(line_of 'publish:schema_attestation:STARTUP' "$CASE_LOG")
@@ -878,6 +886,11 @@ audited_measurement_line=$(line_of 'monitor:measurement:completed' "$CASE_LOG")
   fail 'audited measurement was not written after FINAL publication'
 [[ $(jq -r '.outcome' "$CASE_ROOT/monitor-metrics.json") == PASS ]] ||
   fail 'audited measurement did not preserve the terminal outcome'
+
+BLACKBOX_MONITOR_WORKLOAD_RSS_SAMPLING=on run_case sampled_rss 0 0 0 0 0 0 '' audited 1
+[[ $CASE_STATUS == 0 ]] || fail 'sampled RSS lifecycle failed'
+grep -q '^monitor:workload-rss-sampling:on$' "$CASE_LOG" ||
+  fail 'workload RSS sampling toggle was not forwarded'
 
 run_case join_only_clean 0 0 0 0 0 0 '' join-only
 [[ $CASE_STATUS == 0 ]] ||

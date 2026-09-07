@@ -4,6 +4,7 @@
 #include "blackbox/protocol_records.h"
 #include "blackbox/redis_reader.h"
 #include "blackbox/run_controller.h"
+#include "workload_rss.h"
 
 #include <hiredis/hiredis.h>
 #include <nlohmann/json.hpp>
@@ -11,6 +12,9 @@
 #include <fcntl.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -20,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <ctime>
 #include <exception>
 #include <iomanip>
@@ -66,6 +71,8 @@ struct Options {
   std::string run_id;
   std::chrono::milliseconds overall_timeout{120000};
   ProcessingMode processing_mode = ProcessingMode::Audited;
+  bool history_gc = false;
+  bool workload_rss_sampling = false;
   std::optional<std::string> metrics_output;
   std::vector<blackbox::ProtocolBackendFact> expected_backend_facts;
   std::size_t max_assembler_active_transactions =
@@ -205,6 +212,16 @@ parseExpectedBackendFact(const std::string_view value) {
         throw std::invalid_argument(
             "processing mode must be audited or join-only");
       }
+    } else if (argument == "--history-gc") {
+      if (value != "on" && value != "off") {
+        throw std::invalid_argument("history-gc must be on or off");
+      }
+      options.history_gc = value == "on";
+    } else if (argument == "--workload-rss-sampling") {
+      if (value != "on" && value != "off") {
+        throw std::invalid_argument("workload-rss-sampling must be on or off");
+      }
+      options.workload_rss_sampling = value == "on";
     } else if (argument == "--metrics-output") {
       if (value.empty() || value.size() > 4096U) {
         throw std::invalid_argument("metrics output path is invalid");
@@ -269,6 +286,9 @@ parseExpectedBackendFact(const std::string_view value) {
       !options.metrics_output.has_value()) {
     throw std::invalid_argument(
         "join-only processing requires --metrics-output");
+  }
+  if (options.workload_rss_sampling && !options.metrics_output.has_value()) {
+    throw std::invalid_argument("workload RSS sampling requires --metrics-output");
   }
   return options;
 }
@@ -526,6 +546,34 @@ assemblerMetricsJson(const blackbox::DebeziumAssemblerMetrics &metrics) {
   };
 }
 
+[[nodiscard]] Json memoryProfileJson(
+    const std::optional<co_checker::online::SnapshotSOWWMemoryProfile> &profile) {
+  if (!profile) return nullptr;
+  return Json{
+      {"snapshot_size_bytes", profile->snapshot_size_bytes},
+      {"snapshot_capacity_bytes", profile->snapshot_capacity_bytes},
+      {"latest_writer_size_bytes", profile->latest_writer_size_bytes},
+      {"latest_writer_capacity_bytes", profile->latest_writer_capacity_bytes},
+      {"key_index_capacity_bytes", profile->key_index_capacity_bytes},
+      {"key_descriptor_capacity_bytes", profile->key_descriptor_capacity_bytes},
+      {"key_payload_capacity_bytes", profile->key_payload_capacity_bytes},
+      {"value_index_capacity_bytes", profile->value_index_capacity_bytes},
+      {"value_descriptor_capacity_bytes", profile->value_descriptor_capacity_bytes},
+      {"value_payload_capacity_bytes", profile->value_payload_capacity_bytes},
+      {"value_reference_capacity_bytes", profile->value_reference_capacity_bytes},
+      {"value_free_id_capacity_bytes", profile->value_free_id_capacity_bytes},
+      {"snapshot_value_count", profile->snapshot_value_count},
+      {"snapshot_value_bytes", profile->snapshot_value_bytes},
+      {"history_only_value_count", profile->history_only_value_count},
+      {"history_only_value_bytes", profile->history_only_value_bytes},
+      {"unreferenced_value_count", profile->unreferenced_value_count},
+      {"unreferenced_value_bytes", profile->unreferenced_value_bytes},
+      {"history_delta_capacity_bytes", profile->history_delta_capacity_bytes},
+      {"session_value_bytes", profile->session_value_bytes},
+      {"session_bucket_bytes", profile->session_bucket_bytes},
+  };
+}
+
 [[nodiscard]] Json
 checkerMetricsJson(const blackbox::CheckerAdapterMetrics &metrics) {
   const auto &engine = metrics.engine;
@@ -554,8 +602,10 @@ checkerMetricsJson(const blackbox::CheckerAdapterMetrics &metrics) {
        metrics.mapped_identity_high_water_bytes},
       {"events_per_transaction_high_water",
        metrics.events_per_transaction_high_water},
+      {"history_gc_total_nanoseconds", metrics.history_gc_total_nanoseconds},
       {"engine",
        Json{
+           {"memory_profile", memoryProfileJson(engine.memory_profile)},
            {"retained_state_capacity_bytes",
             engine.retained_state_capacity_bytes},
            {"retained_state_bytes", engine.retained_state_bytes},
@@ -564,10 +614,18 @@ checkerMetricsJson(const blackbox::CheckerAdapterMetrics &metrics) {
            {"interned_key_bytes", engine.interned_key_bytes},
            {"interned_value_count", engine.interned_value_count},
            {"interned_value_bytes", engine.interned_value_bytes},
+           {"reclaimed_value_count", engine.reclaimed_value_count},
+           {"reclaimed_value_bytes", engine.reclaimed_value_bytes},
            {"current_snapshot_keys", engine.current_snapshot_keys},
            {"history_entries", engine.history_entries},
            {"history_deltas", engine.history_deltas},
            {"history_logical_bytes", engine.history_logical_bytes},
+           {"retained_floor", engine.retained_floor.has_value()
+                                  ? Json(*engine.retained_floor)
+                                  : Json(nullptr)},
+           {"reclaimed_history_entries", engine.reclaimed_history_entries},
+           {"reclaimed_history_deltas", engine.reclaimed_history_deltas},
+           {"reclaimed_history_bytes", engine.reclaimed_history_bytes},
            {"snapshot_read_events", engine.snapshot_read_events},
            {"unique_snapshot_reads", engine.unique_snapshot_reads},
            {"identical_snapshot_repeats", engine.identical_snapshot_repeats},
@@ -873,7 +931,16 @@ void writeAtomically(const std::string &target,
 
 class MeasurementArtifact final {
 public:
+  void startWorkload() {
+    workload_started_steady_ = std::chrono::steady_clock::now();
+    next_memory_sample_ = {};
+    if (options_.workload_rss_sampling) workload_rss_.start();
+  }
+  void stopWorkload() { workload_rss_.stop(); }
+
   explicit MeasurementArtifact(const Options &options) : options_(options) {
+    const char *profile = std::getenv("BLACKBOX_MONITOR_MEMORY_PROFILE");
+    memory_profile_enabled_ = profile != nullptr && std::string_view(profile) == "on";
     if (!options_.metrics_output.has_value()) {
       return;
     }
@@ -897,13 +964,73 @@ public:
     }
   }
 
+  void sampleMemory(const DebeziumTxnAssembler &assembler,
+                    const RunController &controller, const bool force = false) {
+    if (!memory_profile_enabled_ || !options_.metrics_output) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < next_memory_sample_) return;
+    next_memory_sample_ = now + std::chrono::seconds(30);
+    const auto started = std::chrono::steady_clock::now();
+    const auto joiner = controller.joinerMetrics();
+    const auto assembly = assembler.metrics();
+    const auto &engine = joiner.checker.engine;
+    Json point{
+        {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(now - started_steady_).count()},
+        {"stage", controller.terminal() ? "final" : (workload_started_steady_ ? "workload" : "bootstrap")},
+        {"workload_elapsed_ms", workload_started_steady_
+            ? Json(std::chrono::duration_cast<std::chrono::milliseconds>(now - *workload_started_steady_).count()) : Json(nullptr)},
+        {"workload_transactions", joiner.checker.workload_transactions},
+        {"value_count", engine.interned_value_count},
+        {"value_bytes", engine.interned_value_bytes},
+        {"key_count", engine.interned_key_count},
+        {"key_bytes", engine.interned_key_bytes},
+        {"snapshot_keys", engine.current_snapshot_keys},
+        {"history_bytes", engine.history_logical_bytes},
+        {"bootstrap_copy_bytes", joiner.bootstrap_state_bytes},
+        {"checker_identity_bytes", joiner.checker.mapped_identity_bytes},
+        {"checker_identity_records", joiner.checker.mapped_identity_records},
+        {"joiner_identity_bytes", joiner.retained_identity_bytes},
+        {"joiner_identity_records", joiner.retained_identity_records},
+        {"assembler_identity_bytes", assembly.retained_identity_bytes},
+        {"assembler_identity_records", assembly.retained_identity_records},
+    };
+    try {
+      std::ifstream input("/proc/self/smaps_rollup");
+      point["rss_kib"] = WorkloadRssSampler::parseRss(input);
+    } catch (...) {
+      point["rss_kib"] = nullptr;
+      ++memory_profile_sample_errors_;
+    }
+#if defined(__GLIBC__)
+    const auto allocator = mallinfo2();
+    point["allocator_arena_bytes"] = allocator.arena;
+    point["allocator_in_use_arena_bytes"] = allocator.uordblks;
+    point["allocator_free_arena_bytes"] = allocator.fordblks;
+    point["allocator_mmap_bytes"] = allocator.hblkhd;
+#endif
+    memory_timeline_.push_back(std::move(point));
+    memory_profile_sample_nanoseconds_ +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count();
+  }
+
   void capture(const DebeziumTxnAssembler &assembler,
-               const RunController &controller) {
+               const RunController &controller, const bool final_capture = false) {
     if (!options_.metrics_output.has_value()) {
       return;
     }
     assembler_metrics_ = assembler.metrics();
-    joiner_metrics_ = controller.joinerMetrics();
+    if (final_capture && memory_profile_enabled_) {
+      stopWorkload(); // Exclude the census bitmap and scan from sampled peak RSS.
+      sampleMemory(assembler, controller, true);
+      const auto started = std::chrono::steady_clock::now();
+      joiner_metrics_ = controller.joinerMetrics(true);
+      memory_profile_census_nanoseconds_ =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - started).count();
+    } else {
+      joiner_metrics_ = controller.joinerMetrics();
+    }
     reconciliation_ = controller.finalReconciliation();
     diagnostics_ = controller.diagnostics();
     final_outcome_ = controller.finalOutcome();
@@ -926,6 +1053,7 @@ public:
   }
 
   void write() {
+    stopWorkload();
     if (written_ || !options_.metrics_output.has_value()) {
       written_ = true;
       return;
@@ -989,7 +1117,8 @@ public:
                      options_.max_bootstrap_state_bytes},
                     {"max_checker_state_bytes",
                      options_.max_checker_state_bytes}}},
-              {"checker", Json{{"max_retained_state_bytes",
+              {"checker", Json{{"history_gc", options_.history_gc},
+                               {"max_retained_state_bytes",
                                 options_.max_checker_state_bytes},
                                {"max_events_per_transaction",
                                 options_.max_events_per_transaction},
@@ -1003,6 +1132,24 @@ public:
         {"reconciliation", reconciliationJson(reconciliation_)},
         {"diagnostics", diagnosticsJson(diagnostics_)},
     };
+    auto &process = result["process"];
+    result["memory_profile"] = Json{
+        {"enabled", memory_profile_enabled_},
+        {"sample_interval_ms", 30000},
+        {"sample_errors", memory_profile_sample_errors_},
+        {"sampling_nanoseconds", memory_profile_sample_nanoseconds_},
+        {"final_census_nanoseconds", memory_profile_census_nanoseconds_},
+        {"timeline", memory_timeline_},
+    };
+    process["workload_rss_sampling_enabled"] = options_.workload_rss_sampling;
+    process["workload_rss_sampling_started"] = workload_rss_.started();
+    process["workload_rss_sampling_valid"] = workload_rss_.valid();
+    process["workload_sampled_peak_rss_kib"] =
+        workload_rss_.valid() ? Json(workload_rss_.peak()) : Json(nullptr);
+    process["rss_sample_interval_ms"] =
+        options_.workload_rss_sampling ? Json(WorkloadRssSampler::interval_ms) : Json(nullptr);
+    process["workload_rss_samples"] = workload_rss_.samples();
+    process["workload_rss_sample_errors"] = workload_rss_.errors();
     if (options_.processing_mode == ProcessingMode::Audited &&
         final_outcome_.has_value()) {
       result["outcome"] = blackbox::toString(*final_outcome_);
@@ -1030,6 +1177,14 @@ public:
 
 private:
   const Options &options_;
+  WorkloadRssSampler workload_rss_;
+  bool memory_profile_enabled_ = false;
+  std::optional<std::chrono::steady_clock::time_point> workload_started_steady_;
+  std::chrono::steady_clock::time_point next_memory_sample_{};
+  Json memory_timeline_ = Json::array();
+  std::uint64_t memory_profile_sample_errors_ = 0;
+  std::int64_t memory_profile_sample_nanoseconds_ = 0;
+  std::int64_t memory_profile_census_nanoseconds_ = 0;
   std::chrono::steady_clock::time_point started_steady_{};
   std::chrono::system_clock::time_point started_system_{};
   rusage started_usage_{};
@@ -1128,10 +1283,15 @@ readManifest(redisContext *context, const Options &options,
 }
 
 void publishPending(RunController &controller, const StatusWriter &writer,
-                    std::optional<std::string> &terminal_payload) {
+                    std::optional<std::string> &terminal_payload,
+                    MeasurementArtifact &measurement) {
   for (auto &payload : controller.takePendingStatuses()) {
-    (void)writer.publish(payload);
     const auto status = Json::parse(payload);
+    if (status.at("lifecycle_state") == "LOAD_FINISHED_SEEN") {
+      measurement.startWorkload();
+    }
+    if (status.at("lifecycle_state") == "FINAL") measurement.stopWorkload();
+    (void)writer.publish(payload);
     if (status.at("lifecycle_state") == "FINAL") {
       if (terminal_payload.has_value()) {
         throw std::runtime_error(
@@ -1140,6 +1300,7 @@ void publishPending(RunController &controller, const StatusWriter &writer,
       terminal_payload = std::move(payload);
     }
   }
+  if (controller.terminal()) measurement.stopWorkload();
 }
 
 struct ReaderFailure {
@@ -1317,6 +1478,7 @@ int run(const Options &options) {
         options.max_bootstrap_state_bytes;
     controller_config.joiner_limits.max_checker_state_bytes =
         options.max_checker_state_bytes;
+    controller_config.history_gc = options.history_gc;
     controller_storage.emplace(manifest, std::move(controller_config));
     controller_storage->setLastClientStreamId(manifest_evidence.stream_id);
     assembler_storage.emplace(DebeziumAssemblerConfig{
@@ -1410,8 +1572,13 @@ int run(const Options &options) {
   auto &assembler = *assembler_storage;
   auto &controller = *controller_storage;
   auto &reader = *reader_storage;
+  // Stop sampling before the controller/assembler are destroyed on exceptions.
+  struct SamplingScope {
+    MeasurementArtifact &measurement;
+    ~SamplingScope() { measurement.stopWorkload(); }
+  } sampling_scope{measurement};
   std::optional<std::string> terminal_payload;
-  publishPending(controller, status_writer, terminal_payload);
+  publishPending(controller, status_writer, terminal_payload, measurement);
 
   while (!controller.terminal() &&
          std::chrono::steady_clock::now() < evidence_deadline) {
@@ -1435,7 +1602,7 @@ int run(const Options &options) {
         }
         return true;
       });
-      publishPending(controller, status_writer, terminal_payload);
+      publishPending(controller, status_writer, terminal_payload, measurement);
       if (count == 0U) {
         // END_FENCE is committed only after coordinator-proven client and
         // database-connection quiescence. Observing its completed CDC END is
@@ -1447,8 +1614,9 @@ int run(const Options &options) {
           assembler.finish();
         }
         controller.onInputIdle();
-        publishPending(controller, status_writer, terminal_payload);
+        publishPending(controller, status_writer, terminal_payload, measurement);
       }
+      if (!controller.terminal()) measurement.sampleMemory(assembler, controller);
     } catch (const RedisReaderError &error) {
       if (std::chrono::steady_clock::now() >= evidence_deadline) {
         try {
@@ -1461,7 +1629,7 @@ int run(const Options &options) {
         }
         controller.forceTimeoutFinal();
         measurement.capture(assembler, controller);
-        publishPending(controller, status_writer, terminal_payload);
+        publishPending(controller, status_writer, terminal_payload, measurement);
         continue;
       }
       const auto failure = classifyReaderFailure(error);
@@ -1469,7 +1637,7 @@ int run(const Options &options) {
                                      failure.message);
       controller.forceInvalidFinal(failure.code, failure.message);
       measurement.capture(assembler, controller);
-      publishPending(controller, status_writer, terminal_payload);
+      publishPending(controller, status_writer, terminal_payload, measurement);
     } catch (const CdcAssemblerError &error) {
       controller.noteExternalFailure(
           DiagnosticCategory::Protocol,
@@ -1477,7 +1645,7 @@ int run(const Options &options) {
       controller.forceInvalidFinal(
           std::string(blackbox::toString(error.code())), error.what());
       measurement.capture(assembler, controller);
-      publishPending(controller, status_writer, terminal_payload);
+      publishPending(controller, status_writer, terminal_payload, measurement);
     }
   }
 
@@ -1491,10 +1659,10 @@ int run(const Options &options) {
     }
     controller.forceTimeoutFinal();
     measurement.capture(assembler, controller);
-    publishPending(controller, status_writer, terminal_payload);
+    publishPending(controller, status_writer, terminal_payload, measurement);
   }
 
-  measurement.capture(assembler, controller);
+  measurement.capture(assembler, controller, true);
   if (options.processing_mode == ProcessingMode::JoinOnly) {
     if (terminal_payload.has_value()) {
       throw std::runtime_error(

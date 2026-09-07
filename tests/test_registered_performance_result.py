@@ -20,6 +20,42 @@ def load_module():
 
 
 class RegisteredPerformanceResultTest(unittest.TestCase):
+    def test_monitor_peak_memory_and_gc_cost_are_reported(self) -> None:
+        module = load_module()
+        monitor = {
+            "limits": {"checker": {"history_gc": True}},
+            "process": {"max_rss_kib": 2048, "user_cpu_nanoseconds": 2000000000,
+                        "system_cpu_nanoseconds": 1000000000},
+            "checker": {"consumed_transactions": 1000,
+                        "consume_total_nanoseconds": 1000000000,
+                        "history_gc_total_nanoseconds": 500000000,
+                        "engine": {"history_logical_bytes": 0, "reclaimed_history_bytes": 1234}},
+        }
+        result = module.monitor_memory_and_gc_metrics(monitor, True)
+        self.assertEqual(result["monitor_peak_rss_mib"], 2)
+        self.assertEqual(result["monitor_cpu_seconds"], 3)
+        self.assertEqual(result["monitor_cpu_us_per_consumed_transaction"], 3000)
+        self.assertEqual(result["monitor_checker_total_seconds_including_gc"], 1.5)
+        self.assertEqual(result["monitor_checker_us_per_consumed_transaction_including_gc"], 1500)
+        self.assertEqual(result["monitor_reclaimed_history_bytes"], 1234)
+        with self.assertRaisesRegex(ValueError, "history_gc differs"):
+            module.monitor_memory_and_gc_metrics(monitor, False)
+        monitor["process"].update({
+            "workload_rss_sampling_enabled": True,
+            "workload_rss_sampling_started": True,
+            "workload_rss_sampling_valid": True,
+            "workload_sampled_peak_rss_kib": 1024,
+            "rss_sample_interval_ms": 100,
+            "workload_rss_samples": 4,
+            "workload_rss_sample_errors": 0,
+        })
+        sampled = module.monitor_memory_and_gc_metrics(monitor, True, True)
+        self.assertEqual(sampled["monitor_workload_sampled_peak_rss_mib"], 1)
+        self.assertEqual(sampled["monitor_peak_rss_mib"], 2)
+        monitor["process"]["workload_rss_sample_errors"] = 1
+        with self.assertRaisesRegex(ValueError, "incomplete or failed"):
+            module.monitor_memory_and_gc_metrics(monitor, True, True)
+
     @staticmethod
     def cdc_entry(stream_id: str, field: object, value: object) -> list[object]:
         return [

@@ -380,6 +380,64 @@ void testStrictReadyPrefixAndEndDeferral() {
   BLACKBOX_CHECK(audit.unmatched_workload_cdc_slots == 0U);
 }
 
+void testHistoryGcWaitsForCompletedSessionsPendingCdc() {
+  auto gc_config = config();
+  gc_config.history_gc = true;
+  TransactionJoiner joiner(gc_config);
+  openWorkload(joiner);
+  joiner.acceptClientPayload(clientPayload(session_two, 1U, 1U, 1U));
+  joiner.acceptCdcTransaction(
+      workload(2U, session_two, 1U, {presentWrite(1, "new")}));
+  // Exercise CDC-first immediate consumption as well as client-first delivery.
+  joiner.acceptCdcTransaction(workload(3U, session_two, 2U));
+  joiner.acceptClientPayload(clientPayload(session_two, 2U, 2U, 2U));
+  joiner.acceptClientPayload(
+      clientPayload(session_one, 1U, 1U, 3U, {absentRead(0U, 1)}));
+  joiner.acceptSessionDone(session_one);
+  BLACKBOX_CHECK(joiner.metrics().checker.engine.retained_floor == 0U);
+  BLACKBOX_CHECK(joiner.metrics().checker.engine.history_entries == 1U);
+  BLACKBOX_CHECK(joiner.metrics().pending_client_records == 1U);
+
+  // This read needs to roll back B's write. SessionDone must not remove A's
+  // anchor until this transaction has been checked.
+  joiner.acceptCdcTransaction(workload(4U, session_one, 1U));
+  BLACKBOX_CHECK(joiner.checkerObservation() == CheckerObservation::PassSoFar);
+  BLACKBOX_CHECK(joiner.metrics().pending_client_records == 0U);
+  BLACKBOX_CHECK(joiner.metrics().checker.engine.retained_floor == 3U);
+  BLACKBOX_CHECK(joiner.metrics().checker.engine.history_entries == 0U);
+  joiner.acceptSessionDone(session_two);
+  BLACKBOX_CHECK(joiner.metrics().checker.engine.retained_floor == 4U);
+  BLACKBOX_CHECK(joiner.metrics().checker.next_commit_seq == 5U);
+  BLACKBOX_CHECK(joiner.auditReconciliationState().incremental_counters_match);
+  expectError(
+      joiner,
+      [&] {
+        joiner.acceptClientPayload(clientPayload(session_one, 2U, 2U, 4U));
+      },
+      MonitorErrorCode::ClientRecordAfterDone);
+}
+
+void testHistoryGcDefersEmptySessionRetirementUntilAnchors() {
+  auto gc_config = config();
+  gc_config.history_gc = true;
+  TransactionJoiner joiner(gc_config);
+  joiner.acceptSessionDone(session_one);
+  BLACKBOX_CHECK(!joiner.metrics().checker.engine.retained_floor.has_value());
+  openWorkload(joiner);
+  // A has no successful transaction, so its anchor can now be retired.
+  BLACKBOX_CHECK(joiner.metrics().checker.engine.retained_floor == 1U);
+  joiner.acceptClientPayload(clientPayload(session_two, 1U, 1U, 1U));
+  joiner.acceptCdcTransaction(
+      workload(2U, session_two, 1U, {presentWrite(1, "value")}));
+  BLACKBOX_CHECK(joiner.metrics().checker.engine.retained_floor == 2U);
+  BLACKBOX_CHECK(joiner.metrics().checker.engine.history_entries == 0U);
+  joiner.acceptSessionDone(session_two);
+  BLACKBOX_CHECK(joiner.metrics().checker.next_commit_seq == 3U);
+  expectError(
+      joiner, [&] { joiner.acceptSessionDone(session_two); },
+      MonitorErrorCode::SessionDoneMismatch);
+}
+
 void testHeadWaitClockAndCombinedJoinBufferPeak() {
   std::uint64_t now = 100U;
   auto joiner_config = config();
@@ -539,10 +597,10 @@ void testOrderedJoiningWithoutCheckerExecution() {
   BLACKBOX_CHECK(metrics.joined_write_events == 1U);
   BLACKBOX_CHECK(metrics.joined_ordered_events == 2U);
   BLACKBOX_CHECK(metrics.released_events_per_transaction_high_water == 2U);
-  BLACKBOX_CHECK(metrics.bootstrap_state_rows == 2U);
+  BLACKBOX_CHECK(metrics.bootstrap_state_rows == 0U);
   BLACKBOX_CHECK(metrics.bootstrap_state_high_water_rows == 2U);
-  BLACKBOX_CHECK(metrics.bootstrap_state_high_water_bytes ==
-                 metrics.bootstrap_state_bytes);
+  BLACKBOX_CHECK(metrics.bootstrap_state_high_water_bytes > 0U);
+  BLACKBOX_CHECK(metrics.bootstrap_state_bytes == 0U);
   BLACKBOX_CHECK(metrics.drain_invocations > 0U);
   BLACKBOX_CHECK(joiner.checkerObservation() == CheckerObservation::NotStarted);
   BLACKBOX_CHECK(!joiner.firstViolation().has_value());
@@ -1146,6 +1204,8 @@ void testTpccCompositeAndHistoryWritesUseGenericJoiner() {
 
 int runTransactionJoinerTests() {
   testStrictReadyPrefixAndEndDeferral();
+  testHistoryGcWaitsForCompletedSessionsPendingCdc();
+  testHistoryGcDefersEmptySessionRetirementUntilAnchors();
   testHeadWaitClockAndCombinedJoinBufferPeak();
   testDrainDurationClock();
   testWorkloadComponentTimingExcludesChecker();

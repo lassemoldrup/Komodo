@@ -31,6 +31,8 @@ MONITOR_PENDING_CLIENT_RECORDS=1000000
 MONITOR_PENDING_CLIENT_BYTES=268435456
 MONITOR_RETAINED_IDENTITY_BYTES=2147483648
 MONITOR_CHECKER_STATE_BYTES=536870912
+HISTORY_GC=${BLACKBOX_MONITOR_HISTORY_GC:-off}
+WORKLOAD_RSS_SAMPLING=${BLACKBOX_MONITOR_WORKLOAD_RSS_SAMPLING:-off}
 HIGH_WATER_THRESHOLD=70
 EVIDENCE_RETENTION=compact
 RETAINED_EVIDENCE=compact
@@ -69,6 +71,8 @@ while (( $# > 0 )); do
     --monitor-pending-client-bytes) MONITOR_PENDING_CLIENT_BYTES=$2; shift 2 ;;
     --monitor-retained-identity-bytes) MONITOR_RETAINED_IDENTITY_BYTES=$2; shift 2 ;;
     --monitor-checker-state-bytes) MONITOR_CHECKER_STATE_BYTES=$2; shift 2 ;;
+    --history-gc) HISTORY_GC=$2; shift 2 ;;
+    --workload-rss-sampling) WORKLOAD_RSS_SAMPLING=$2; shift 2 ;;
     --high-water-threshold-percent) HIGH_WATER_THRESHOLD=$2; shift 2 ;;
     --evidence-retention) EVIDENCE_RETENTION=$2; shift 2 ;;
     --headline-transaction-type) HEADLINE_TRANSACTION_TYPE=$2; shift 2 ;;
@@ -87,6 +91,20 @@ done
 [[ $EXECUTION_PROFILE == direct_benchbase ||
    $EXECUTION_PROFILE == coordinated_cdc_only ||
    $EXECUTION_PROFILE == coordinated_e2e ]]
+[[ $HISTORY_GC == on || $HISTORY_GC == off ]] || {
+  printf 'history-gc must be on or off\n' >&2; exit 2;
+}
+[[ $HISTORY_GC == off || $EXECUTION_PROFILE == coordinated_e2e ]] || {
+  printf 'history-gc requires coordinated_e2e\n' >&2; exit 2;
+}
+export BLACKBOX_MONITOR_HISTORY_GC="$HISTORY_GC"
+[[ $WORKLOAD_RSS_SAMPLING == on || $WORKLOAD_RSS_SAMPLING == off ]] || {
+  printf 'workload-rss-sampling must be on or off\n' >&2; exit 2;
+}
+[[ $WORKLOAD_RSS_SAMPLING == off || $EXECUTION_PROFILE == coordinated_e2e ]] || {
+  printf 'workload-rss-sampling requires coordinated_e2e\n' >&2; exit 2;
+}
+export BLACKBOX_MONITOR_WORKLOAD_RSS_SAMPLING="$WORKLOAD_RSS_SAMPLING"
 for value in "$REPETITION" "$LOADER_TIMEOUT" "$WORKLOAD_TIMEOUT" "$STACK_TIMEOUT" "$STATUS_TIMEOUT" "$DRAIN_LIMIT" "$REDIS_MAXMEMORY" "$MONITOR_BOOTSTRAP_STATE_BYTES" "$MONITOR_PENDING_CLIENT_RECORDS" "$MONITOR_PENDING_CLIENT_BYTES" "$MONITOR_RETAINED_IDENTITY_BYTES" "$MONITOR_CHECKER_STATE_BYTES"; do
   [[ $value =~ ^[1-9][0-9]*$ ]] || { printf 'positive integer parameter is invalid\n' >&2; exit 2; }
 done
@@ -548,6 +566,8 @@ result_args=(
   --artifact-dir "$OUTPUT" --backend "$BACKEND" --benchmark "$BENCHMARK"
   --mode "$MODE" --execution-profile "$EXECUTION_PROFILE" --workload "$WORKLOAD"
   --capture-profile "$CAPTURE_PROFILE" --repetition "$REPETITION"
+  --history-gc "$HISTORY_GC"
+  --workload-rss-sampling "$WORKLOAD_RSS_SAMPLING"
   --drain-limit-seconds "$DRAIN_LIMIT"
   --high-water-threshold-percent "$HIGH_WATER_THRESHOLD"
 )

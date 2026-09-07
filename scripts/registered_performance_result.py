@@ -80,6 +80,49 @@ def stream_key(stream_id: str) -> tuple[int, int]:
     return result
 
 
+def monitor_memory_and_gc_metrics(monitor: dict[str, Any], history_gc: bool,
+                                  workload_rss_sampling: bool = False) -> dict[str, Any]:
+    """Process RSS/CPU include bootstrap and drain; GC time is not hidden in checking."""
+    checker = monitor["checker"]
+    require(monitor["limits"]["checker"].get("history_gc", False) is history_gc,
+            "monitor history_gc differs from requested setting")
+    process = monitor["process"]
+    require(process.get("workload_rss_sampling_enabled", False) is workload_rss_sampling,
+            "monitor workload RSS sampling differs from requested setting")
+    sampled_peak = None
+    if workload_rss_sampling:
+        require(process.get("workload_rss_sampling_started") is True and
+                process.get("workload_rss_sampling_valid") is True and
+                process.get("workload_rss_sample_errors") == 0,
+                "workload RSS sampling is incomplete or failed")
+        sampled_peak = integer(process.get("workload_sampled_peak_rss_kib"), "workload peak RSS")
+        require(sampled_peak > 0 and process.get("rss_sample_interval_ms") == 100 and
+                integer(process.get("workload_rss_samples"), "RSS sample count") >= 2,
+                "workload RSS sampling counters are invalid")
+    rss = integer(process.get("max_rss_kib"), "monitor peak RSS")
+    cpu = sum(integer(process.get(field), field)
+              for field in ("user_cpu_nanoseconds", "system_cpu_nanoseconds"))
+    consumed = integer(checker.get("consumed_transactions"), "checker consumed transactions")
+    consume_ns = integer(checker.get("consume_total_nanoseconds"), "checker consume time")
+    gc_ns = integer(checker.get("history_gc_total_nanoseconds", 0), "history GC time")
+    require(rss > 0 and cpu >= 0 and consumed > 0 and consume_ns >= 0 and gc_ns >= 0,
+            "monitor memory/CPU/GC counters are invalid")
+    return {
+        "history_gc": history_gc,
+        "workload_rss_sampling": workload_rss_sampling,
+        "monitor_workload_sampled_peak_rss_mib": sampled_peak / 1024 if sampled_peak is not None else None,
+        "rss_sample_interval_ms": 100 if workload_rss_sampling else None,
+        "monitor_peak_rss_mib": rss / 1024,
+        "monitor_cpu_seconds": cpu / 1e9,
+        "monitor_cpu_us_per_consumed_transaction": cpu / consumed / 1000,
+        "monitor_history_gc_seconds": gc_ns / 1e9,
+        "monitor_checker_total_seconds_including_gc": (consume_ns + gc_ns) / 1e9,
+        "monitor_checker_us_per_consumed_transaction_including_gc": (consume_ns + gc_ns) / consumed / 1000,
+        "monitor_retained_history_bytes": checker["engine"]["history_logical_bytes"],
+        "monitor_reclaimed_history_bytes": checker["engine"].get("reclaimed_history_bytes", 0),
+    }
+
+
 def stream_ms(stream_id: str) -> int:
     return stream_key(stream_id)[0]
 
@@ -250,6 +293,8 @@ def main() -> int:
     )
     parser.add_argument("--headline-transaction-type")
     parser.add_argument("--headline-rate-label")
+    parser.add_argument("--history-gc", choices=("off", "on"), default="off")
+    parser.add_argument("--workload-rss-sampling", choices=("off", "on"), default="off")
     args = parser.parse_args()
 
     summary = load(only(args.artifact_dir / "workload-results", "*.summary.json"))
@@ -302,6 +347,7 @@ def main() -> int:
         "evidence_retention": args.evidence_retention,
         "repetition": args.repetition,
         "accepted": False,
+        "history_gc": args.history_gc == "on",
         "client_measurement_window_seconds": elapsed_seconds,
         "client_logical_transactions_per_second": rate(counters["logical_transactions_started"], elapsed_seconds),
         "client_successful_transactions_per_second": rate(counters["successful_transactions"], elapsed_seconds),
@@ -534,6 +580,8 @@ def main() -> int:
             result["cdc_transport_logical_utf8_bytes"] = window[
                 "logical_utf8_bytes"
             ]
+        result.update(monitor_memory_and_gc_metrics(
+            monitor, args.history_gc == "on", args.workload_rss_sampling == "on"))
 
     (args.artifact_dir / "result.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"

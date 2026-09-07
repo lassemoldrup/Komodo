@@ -381,7 +381,13 @@ public:
               config_.limits.max_retained_identity_records,
           .max_mapped_identity_bytes =
               config_.limits.max_retained_identity_bytes,
-          .monotonic_clock_nanoseconds = monotonic_clock_nanoseconds_});
+          .monotonic_clock_nanoseconds = monotonic_clock_nanoseconds_,
+          .history_gc = config_.history_gc});
+      if (config_.history_gc) {
+        for (const auto &session_id : config_.expected_session_ids) {
+          session_lifetimes_.emplace(session_id, SessionLifetime{});
+        }
+      }
     }
     expected_sessions_.insert(config_.expected_session_ids.begin(),
                               config_.expected_session_ids.end());
@@ -399,6 +405,25 @@ public:
 
   void acceptCdcTransaction(CdcTransaction transaction) {
     guarded([&] { acceptCdc(std::move(transaction)); });
+  }
+
+  void acceptSessionDone(const std::string_view session_id) {
+    guarded([&] {
+      if (session_lifetimes_.empty()) {
+        return;
+      }
+      const auto found = session_lifetimes_.find(std::string(session_id));
+      if (found == session_lifetimes_.end()) {
+        fail(MonitorErrorCode::SessionUnknown,
+             "session completion names a session absent from the roster");
+      }
+      if (found->second.done) {
+        fail(MonitorErrorCode::SessionDoneMismatch,
+             "session completion is duplicated");
+      }
+      found->second.done = true;
+      tryRetireSession(found->first, found->second);
+    });
   }
 
   void validateBootstrapState(const BootstrapStateProof &proof) {
@@ -484,7 +509,7 @@ public:
                                 : no_checker_violation_;
   }
 
-  [[nodiscard]] TransactionJoinerMetrics metrics() const {
+  [[nodiscard]] TransactionJoinerMetrics metrics(const bool include_memory_profile = false) const {
     std::uint64_t current_wait = 0;
     if (missing_client_wait_started_nanoseconds_.has_value()) {
       const auto now = monotonic_clock_nanoseconds_();
@@ -504,7 +529,7 @@ public:
                                     : 0U;
     }
     const auto checker_metrics =
-        checker_.has_value() ? checker_->metrics() : CheckerAdapterMetrics{};
+        checker_.has_value() ? checker_->metrics(include_memory_profile) : CheckerAdapterMetrics{};
     return TransactionJoinerMetrics{
         .next_cdc_seq = next_cdc_seq_,
         .accepted_client_transactions = accepted_client_transactions_,
@@ -615,6 +640,22 @@ private:
     std::uint64_t session_seq = 0;
     std::uint64_t attempt_surplus = 0;
   };
+
+  struct SessionLifetime {
+    std::size_t pending = 0;
+    bool done = false;
+    bool retired = false;
+  };
+
+  void tryRetireSession(const std::string &session_id,
+                        SessionLifetime &session) {
+    // Completion can arrive before CDC, even before the load fence/anchors.
+    if (lifecycle_ == JoinLifecycle::Workload && session.done &&
+        session.pending == 0U && !session.retired) {
+      checker_->retireSession(session_id);
+      session.retired = true;
+    }
+  }
 
   struct Failure {
     MonitorErrorCode code;
@@ -864,6 +905,17 @@ private:
   }
 
   void acceptClient(ClientTxn client) {
+    if (!session_lifetimes_.empty()) {
+      const auto session = session_lifetimes_.find(client.session_id);
+      if (session == session_lifetimes_.end()) {
+        fail(MonitorErrorCode::SessionUnknown,
+             "client names a session absent from the roster");
+      }
+      if (session->second.done) {
+        fail(MonitorErrorCode::ClientRecordAfterDone,
+             "ClientTxn follows SessionDone for its session");
+      }
+    }
     ensureExternalIdentityIsNotReserved(client);
     if (seen_client_correlations_.contains(client.correlation_id)) {
       fail(MonitorErrorCode::ClientDuplicateCorrelation,
@@ -967,6 +1019,10 @@ private:
         std::max(pending_client_high_water_bytes_, pending_client_bytes_);
     updateJoinBufferHighWater();
     ++accepted_client_transactions_;
+    // Increment before draining: this client may immediately unblock CDC.
+    if (!session_lifetimes_.empty()) {
+      ++session_lifetimes_.at(session_id).pending;
+    }
     drainReadyPrefix();
   }
 
@@ -1393,6 +1449,13 @@ private:
             ++phase_anchor_transactions_;
           }
           lifecycle_ = JoinLifecycle::Workload;
+          // The approved proof and counters suffice for final reconciliation.
+          // The engine owns its independent state for subsequent checking.
+          bootstrap_state_.clear();
+          bootstrap_state_bytes_ = 0U;
+          for (auto &[session_id, session] : session_lifetimes_) {
+            tryRetireSession(session_id, session);
+          }
           popCdcHead();
           continue;
         }
@@ -1455,6 +1518,16 @@ private:
             workload_processing_started, joiner_processing_paused);
         checker_->consumeWorkload(next_checker_commit_seq_,
                                   client->second.transaction, head.writes);
+        if (!session_lifetimes_.empty()) {
+          const auto &session_id = client->second.transaction.session_id;
+          auto &session = session_lifetimes_.at(session_id);
+          if (session.pending == 0U) {
+            fail(MonitorErrorCode::InternalError,
+                 "pending session transaction counter underflow");
+          }
+          --session.pending;
+          tryRetireSession(session_id, session);
+        }
         joiner_processing_resumed = monotonic_clock_nanoseconds_();
       }
       ++next_checker_commit_seq_;
@@ -1496,6 +1569,7 @@ private:
   std::unordered_set<std::string> seen_attempt_ids_;
   std::unordered_map<std::string, LogicalMetadata> logical_transactions_;
   std::unordered_map<std::string, SessionProgress> client_session_progress_;
+  std::unordered_map<std::string, SessionLifetime> session_lifetimes_;
   std::unordered_set<std::string> reserved_transaction_ids_;
   std::unordered_set<std::string> reserved_attempt_ids_;
   std::optional<BootstrapPrefix> approved_bootstrap_prefix_;
@@ -1576,6 +1650,10 @@ void TransactionJoiner::acceptCdcTransaction(CdcTransaction transaction) {
   impl_->acceptCdcTransaction(std::move(transaction));
 }
 
+void TransactionJoiner::acceptSessionDone(const std::string_view session_id) {
+  impl_->acceptSessionDone(session_id);
+}
+
 void TransactionJoiner::validateBootstrapState(
     const BootstrapStateProof &proof) {
   impl_->validateBootstrapState(proof);
@@ -1607,8 +1685,8 @@ TransactionJoiner::firstViolation() const noexcept {
   return impl_->firstViolation();
 }
 
-TransactionJoinerMetrics TransactionJoiner::metrics() const {
-  return impl_->metrics();
+TransactionJoinerMetrics TransactionJoiner::metrics(const bool include_memory_profile) const {
+  return impl_->metrics(include_memory_profile);
 }
 
 TransactionJoinerReconciliationAudit

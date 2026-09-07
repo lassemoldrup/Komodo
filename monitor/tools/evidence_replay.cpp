@@ -42,6 +42,7 @@ struct Options {
   std::string cdc_input;
   std::vector<ProtocolBackendFact> expected_backend_facts;
   blackbox::TransactionJoinerLimits joiner_limits;
+  bool history_gc = false;
 };
 
 struct StreamId {
@@ -100,6 +101,11 @@ struct EvidenceRecord {
       options.client_input = value;
     } else if (argument == "--cdc-input") {
       options.cdc_input = value;
+    } else if (argument == "--history-gc") {
+      if (value != "on" && value != "off") {
+        throw std::invalid_argument("history-gc must be on or off");
+      }
+      options.history_gc = value == "on";
     } else if (argument == "--max-pending-client-records") {
       options.joiner_limits.max_pending_client_records =
           decimal(value, argument);
@@ -231,6 +237,7 @@ int run(const Options &options) {
   blackbox::RunControllerConfig controller_config;
   controller_config.expected_backend_facts = options.expected_backend_facts;
   controller_config.joiner_limits = options.joiner_limits;
+  controller_config.history_gc = options.history_gc;
   RunController controller(manifest, std::move(controller_config));
   controller.setLastClientStreamId(manifest_entry.stream_id);
   DebeziumTxnAssembler assembler(DebeziumAssemblerConfig{
@@ -335,6 +342,7 @@ int run(const Options &options) {
   }
   std::cout << Json{{"kind", "production_evidence_replay"},
                     {"run_id", manifest.run_id},
+                    {"history_gc", options.history_gc},
                     {"final_status", *final},
                     {"transactions", std::move(transactions)},
                     {"status_records", std::move(statuses)}}

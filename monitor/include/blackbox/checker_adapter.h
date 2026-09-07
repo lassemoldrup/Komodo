@@ -56,6 +56,7 @@ struct CheckerAdapterConfig {
   std::size_t max_mapped_identity_records = 10000000U;
   std::size_t max_mapped_identity_bytes = 256U * 1024U * 1024U;
   std::function<std::uint64_t()> monotonic_clock_nanoseconds = {};
+  bool history_gc = false;
 };
 
 struct CheckerAdapterMetrics {
@@ -80,6 +81,7 @@ struct CheckerAdapterMetrics {
   std::size_t mapped_identity_high_water_bytes = 0;
   std::size_t events_per_transaction_high_water = 0;
   co_checker::online::SnapshotSOWWMetrics engine;
+  std::uint64_t history_gc_total_nanoseconds = 0;
 };
 
 [[nodiscard]] CheckerTransactionIdentity
@@ -105,11 +107,14 @@ public:
                           std::string_view session_id);
   void consumeWorkload(std::uint64_t commit_seq, const ClientTxn &client,
                        const std::vector<NormalizedWrite> &writes);
+  // Called only after valid SessionDone and consumption of all its ClientTxns.
+  // An internal control operation: does not consume a commit sequence.
+  void retireSession(std::string_view session_id);
 
   [[nodiscard]] CheckerObservation observation() const noexcept;
   [[nodiscard]] const std::optional<AttributedViolation> &
   firstViolation() const noexcept;
-  [[nodiscard]] CheckerAdapterMetrics metrics() const;
+  [[nodiscard]] CheckerAdapterMetrics metrics(bool include_memory_profile = false) const;
   [[nodiscard]] bool failed() const noexcept;
   [[nodiscard]] std::optional<MonitorErrorCode> errorCode() const noexcept;
 

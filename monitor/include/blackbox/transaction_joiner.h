@@ -76,6 +76,7 @@ struct TransactionJoinerConfig {
   TransactionJoinerLimits limits;
   bool execute_consistency_check = true;
   std::function<std::uint64_t()> monotonic_clock_nanoseconds = {};
+  bool history_gc = false;
 };
 
 struct TransactionJoinerMetrics {
@@ -164,6 +165,8 @@ public:
   void acceptClientPayload(std::string_view payload);
   void acceptClientTransaction(ClientTxn transaction);
   void acceptCdcTransaction(CdcTransaction transaction);
+  // RunController has validated this session's completion count and digest.
+  void acceptSessionDone(std::string_view session_id);
   void validateBootstrapState(const BootstrapStateProof &proof);
   void processEndFence();
   void drain();
@@ -174,7 +177,7 @@ public:
   [[nodiscard]] CheckerObservation checkerObservation() const noexcept;
   [[nodiscard]] const std::optional<AttributedViolation> &
   firstViolation() const noexcept;
-  [[nodiscard]] TransactionJoinerMetrics metrics() const;
+  [[nodiscard]] TransactionJoinerMetrics metrics(bool include_memory_profile = false) const;
   [[nodiscard]] TransactionJoinerReconciliationAudit
   auditReconciliationState() const;
   [[nodiscard]] bool failed() const noexcept;

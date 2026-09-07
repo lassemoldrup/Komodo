@@ -167,6 +167,7 @@ public:
             .limits = config_.joiner_limits,
             .execute_consistency_check =
                 config_.processing_mode == ProcessingMode::Audited,
+            .history_gc = config_.history_gc,
         }) {
     validateConfig();
     for (const auto &session_id : manifest_.expected_session_ids) {
@@ -383,8 +384,8 @@ public:
     return diagnostics_;
   }
 
-  [[nodiscard]] TransactionJoinerMetrics joinerMetrics() const {
-    return joiner_.metrics();
+  [[nodiscard]] TransactionJoinerMetrics joinerMetrics(const bool include_memory_profile = false) const {
+    return joiner_.metrics(include_memory_profile);
   }
 
   [[nodiscard]] std::vector<std::string> takePendingStatuses() {
@@ -662,6 +663,8 @@ private:
       invalidate(MonitorErrorCode::SessionDoneMismatch,
                  "SessionDone counters or rolling marker digest do not match "
                  "accepted ClientTxn evidence");
+    } else if (config_.history_gc && !admission_stopped_) {
+      joiner_.acceptSessionDone(done.session_id);
     }
   }
 
@@ -1228,8 +1231,8 @@ const std::vector<RunDiagnostic> &RunController::diagnostics() const noexcept {
   return impl_->diagnostics();
 }
 
-TransactionJoinerMetrics RunController::joinerMetrics() const {
-  return impl_->joinerMetrics();
+TransactionJoinerMetrics RunController::joinerMetrics(const bool include_memory_profile) const {
+  return impl_->joinerMetrics(include_memory_profile);
 }
 
 std::vector<std::string> RunController::takePendingStatuses() {

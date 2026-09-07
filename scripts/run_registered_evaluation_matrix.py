@@ -82,6 +82,8 @@ def verified_correctness(path: Path) -> None:
 def load_matrix(path: Path, *, allow_existing_output: bool = False) -> dict[str, Any]:
     document = json.loads(path.read_text(encoding="utf-8"))
     require(document.get("kind") == "registered_evaluation_matrix", "matrix kind differs")
+    require(isinstance(document.get("alternate_cell_order", False), bool),
+            "alternate_cell_order is not boolean")
     backends = registry(ROOT / "protocol" / "backends", "backend")
     benchmarks = registry(ROOT / "protocol" / "adapters", "benchmark")
     single_repetition_pilot = document.get("single_repetition_pilot", False)
@@ -99,6 +101,11 @@ def load_matrix(path: Path, *, allow_existing_output: bool = False) -> dict[str,
             require(isinstance(value, str) and NAME.fullmatch(value) is not None, f"cell {field} is invalid")
         require(cell["id"] not in ids, "matrix cell ID is duplicated")
         ids.add(cell["id"])
+        if "history_gc" in cell:
+            require(isinstance(cell["history_gc"], bool), "cell history_gc is not boolean")
+        if "workload_rss_sampling" in cell:
+            require(isinstance(cell["workload_rss_sampling"], bool),
+                    "cell workload_rss_sampling is not boolean")
         require(cell["backend"] in backends, f"unregistered backend: {cell['backend']}")
         require(cell["benchmark"] in benchmarks, f"unregistered benchmark: {cell['benchmark']}")
         minimum_repetitions = 1 if single_repetition_pilot else 3
@@ -203,7 +210,18 @@ def command(cell: dict[str, Any], output: Path, repetition: int = 1) -> list[str
     for name, value in sorted(cell.get("parameters", {}).items()):
         result.extend(("--parameter", f"{name}={value}"))
     result.extend(cell.get("runner_arguments", []))
+    if "history_gc" in cell:
+        result.extend(("--history-gc", "on" if cell["history_gc"] else "off"))
+    if "workload_rss_sampling" in cell:
+        result.extend(("--workload-rss-sampling", "on" if cell["workload_rss_sampling"] else "off"))
     return result
+
+
+def cells_for_repetition(matrix: dict[str, Any], repetition: int) -> list[dict[str, Any]]:
+    cells = matrix["cells"]
+    if matrix.get("alternate_cell_order", False) and repetition % 2 == 0:
+        return list(reversed(cells))
+    return cells
 
 
 def verify_existing_repetition(
@@ -217,6 +235,11 @@ def verify_existing_repetition(
     )
     existing = json.loads((output / "result.json").read_text(encoding="utf-8"))
     require(existing.get("accepted") is True, f"existing repetition is not accepted: {output}")
+    require(existing.get("workload_rss_sampling", False) is cell.get("workload_rss_sampling", False),
+            f"existing repetition workload_rss_sampling differs: {output}")
+    if "history_gc" in cell:
+        require(existing.get("history_gc") is cell["history_gc"],
+                f"existing repetition history_gc differs: {output}")
     for field in ("backend", "benchmark", "mode", "workload", "capture_profile"):
         require(
             existing.get(field) == cell[field],
@@ -256,6 +279,11 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
             subprocess.run(["sha256sum", "--check", "SHA256SUMS"], cwd=path, check=True, capture_output=True)
             result = json.loads((path / "result.json").read_text(encoding="utf-8"))
             require(result.get("accepted") is True, f"repetition is not accepted: {path}")
+            require(result.get("workload_rss_sampling", False) is cell.get("workload_rss_sampling", False),
+                    f"repetition workload_rss_sampling differs: {path}")
+            if "history_gc" in cell:
+                require(result.get("history_gc") is cell["history_gc"],
+                        f"repetition history_gc differs: {path}")
             result["repetition"] = repetition
             result["artifact_dir"] = str(path)
             results.append(result)
@@ -343,6 +371,14 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
         "e2e_throughput_transactions_per_second",
     ]
     concise_rows: list[dict[str, Any]] = []
+    gc_comparison = any("history_gc" in cell for cell in matrix["cells"])
+    rss_sampling = any(cell.get("workload_rss_sampling", False) for cell in matrix["cells"])
+    if rss_sampling:
+        concise_fields += ["workload_rss_sampling", "monitor_workload_sampled_peak_rss_mib",
+                           "rss_sample_interval_ms"]
+    if gc_comparison:
+        concise_fields += ["history_gc", "monitor_peak_rss_mib", "monitor_cpu_seconds",
+                           "monitor_history_gc_seconds"]
     for cell in matrix["cells"]:
         results = results_by_cell[cell["id"]]
 
@@ -370,6 +406,19 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
                 ),
             }
         )
+        if rss_sampling:
+            concise_rows[-1].update({
+                "workload_rss_sampling": cell.get("workload_rss_sampling", False),
+                "monitor_workload_sampled_peak_rss_mib": optional_mean("monitor_workload_sampled_peak_rss_mib"),
+                "rss_sample_interval_ms": optional_mean("rss_sample_interval_ms"),
+            })
+        if gc_comparison:
+            concise_rows[-1].update({
+                "history_gc": cell.get("history_gc", False),
+                "monitor_peak_rss_mib": optional_mean("monitor_peak_rss_mib"),
+                "monitor_cpu_seconds": optional_mean("monitor_cpu_seconds"),
+                "monitor_history_gc_seconds": optional_mean("monitor_history_gc_seconds"),
+            })
     with (root / "summary.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=concise_fields, lineterminator="\n")
         writer.writeheader()
@@ -391,7 +440,9 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
             "| {backend} | {benchmark} | {mode} | {p95} | {e2e_time} | {client} | {monitor} | {e2e} |".format(
                 backend=row["backend"],
                 benchmark=row["benchmark"],
-                mode=row["mode"],
+                mode=row["mode"] + (
+                    f' (GC {"on" if row["history_gc"] else "off"})' if gc_comparison else ""
+                ),
                 p95=display(row["client_p95_latency_microseconds"]),
                 e2e_time=display(row["e2e_time_seconds"]),
                 client=display(row["client_throughput_transactions_per_second"]),
@@ -399,6 +450,25 @@ def summarize(matrix: dict[str, Any], matrix_path: Path) -> None:
                 e2e=display(row["e2e_throughput_transactions_per_second"]),
             )
         )
+    if gc_comparison:
+        markdown += ["", "## History GC comparison", "",
+                     "Peak RSS is for the C++ monitor process over the complete run, including bootstrap and drain.", "",
+                     "| Backend | Benchmark | GC | Monitor peak RSS (MiB) | Monitor CPU (s) | GC time (s) |",
+                     "|---|---|---|---:|---:|---:|"]
+        for row in concise_rows:
+            markdown.append(
+                f'| {row["backend"]} | {row["benchmark"]} | {"on" if row["history_gc"] else "off"} '
+                f'| {display(row["monitor_peak_rss_mib"])} | {display(row["monitor_cpu_seconds"])} '
+                f'| {display(row["monitor_history_gc_seconds"])} |')
+    if rss_sampling:
+        markdown += ["", "## Workload sampled RSS", "",
+                     "100 ms sampling from LOAD_FINISHED_SEEN through final drain; excludes the bootstrap phase.", "",
+                     "| Backend | Benchmark | GC | Workload sampled peak RSS (MiB) |",
+                     "|---|---|---|---:|"]
+        for cell, row in zip(matrix["cells"], concise_rows):
+            markdown.append(
+                f'| {row["backend"]} | {row["benchmark"]} | {"on" if cell.get("history_gc", False) else "off"} '
+                f'| {display(row["monitor_workload_sampled_peak_rss_mib"])} |')
     (root / "summary.md").write_text("\n".join(markdown) + "\n", encoding="utf-8")
     subprocess.run(
         ["bash", "-lc", "find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >SHA256SUMS && sha256sum --check SHA256SUMS >/dev/null"],
@@ -427,7 +497,7 @@ def main() -> int:
         jobs = []
         maximum_repetitions = max(cell["repetitions"] for cell in matrix["cells"])
         for repetition in range(1, maximum_repetitions + 1):
-            for cell in matrix["cells"]:
+            for cell in cells_for_repetition(matrix, repetition):
                 if repetition > cell["repetitions"]:
                     continue
                 output = root / cell["id"] / f"repetition-{repetition:02d}"

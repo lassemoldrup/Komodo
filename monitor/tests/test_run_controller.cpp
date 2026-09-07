@@ -602,6 +602,96 @@ void testCleanPassRequiresDoneEndAndIdle() {
   BLACKBOX_CHECK(controller.takePendingStatuses().empty());
 }
 
+void testHistoryGcMatchesBaselineWithEarlyDoneAndAbortedGaps() {
+  for (const bool violation : {false, true}) {
+    auto roster = manifest();
+    const std::string idle_session = "ycsb/worker/2";
+    roster.expected_session_ids.push_back(idle_session);
+    std::optional<blackbox::ReconciliationSummary> baseline_reconciliation;
+    std::vector<blackbox::RunDiagnostic> baseline_diagnostics;
+    for (const bool gc : {false, true}) {
+      blackbox::RunControllerConfig config;
+      config.history_gc = gc;
+      RunController controller(roster, config);
+      openWorkload(controller);
+      std::array<std::optional<std::string>, 10> fields{};
+      fields[0] = "committed";
+      const auto key =
+          CanonicalYcsbCodec::encodeKey("benchbase", "usertable", 1);
+      const auto value = CanonicalYcsbCodec::encodeValue(fields);
+      controller.acceptClientPayload(clientPayload(1U));
+      controller.acceptCdcTransaction(
+          workload(2U, 1U,
+                   {NormalizedWrite{.key = key,
+                                    .state = NormalizedValueState::Present,
+                                    .value = value}}));
+      const ClientRead read{.event_seq = 0,
+                            .key = key,
+                            .state = violation ? ClientValueState::Absent
+                                               : ClientValueState::Present,
+                            .value =
+                                violation ? std::nullopt : std::optional(value),
+                            .source = ClientReadSource::Snapshot};
+      controller.acceptClientPayload(clientPayload(3U, {read}));
+      // Logical transactions 2 and 4 aborted. Do not wait for session_seq 4.
+      controller.acceptClientPayload(
+          donePayloadForProgress(4U, 4U, 2U, 2U, 2U, 0U,
+                                 {{.session_seq = 1U, .txn_id = 1U},
+                                  {.session_seq = 3U, .txn_id = 3U}}));
+      BLACKBOX_CHECK(controller.joinerMetrics().pending_client_records == 1U);
+      controller.acceptClientPayload(emptyDonePayload(idle_session));
+      // Retirement of the idle session can advance only to A's last consume.
+      if (gc) {
+        BLACKBOX_CHECK(
+            controller.joinerMetrics().checker.engine.retained_floor == 2U);
+      }
+      controller.acceptCdcTransaction(workload(3U, 3U));
+      BLACKBOX_CHECK(controller.joinerMetrics().pending_client_records == 0U);
+      controller.acceptCdcTransaction(control(4U, RunFencePhase::EndFence));
+      idle(controller);
+      BLACKBOX_CHECK(
+          controller.finalOutcome() ==
+          (violation ? FinalOutcome::Violation : FinalOutcome::Pass));
+      BLACKBOX_REQUIRE(controller.finalReconciliation().has_value());
+      BLACKBOX_CHECK(controller.finalReconciliation()->evidence_reconciled);
+      BLACKBOX_CHECK(controller.joinerMetrics().checker.consumed_transactions ==
+                     4U);
+      if (!gc) {
+        baseline_reconciliation = controller.finalReconciliation();
+        baseline_diagnostics = controller.diagnostics();
+        BLACKBOX_CHECK(
+            controller.joinerMetrics().checker.engine.history_entries == 1U);
+      } else {
+        BLACKBOX_CHECK(controller.finalReconciliation() ==
+                       baseline_reconciliation);
+        BLACKBOX_CHECK(controller.diagnostics() == baseline_diagnostics);
+        BLACKBOX_CHECK(
+            controller.joinerMetrics().checker.engine.retained_floor == 3U);
+        BLACKBOX_CHECK(
+            controller.joinerMetrics().checker.engine.history_entries == 0U);
+      }
+    }
+  }
+}
+
+void testHistoryGcInvalidDoneDoesNotRetireSession() {
+  auto roster = manifest();
+  roster.expected_session_ids.push_back("ycsb/worker/2");
+  blackbox::RunControllerConfig config;
+  config.history_gc = true;
+  RunController controller(roster, config);
+  openWorkload(controller);
+  controller.acceptClientPayload(donePayload(0U, std::string(64U, '0')));
+  BLACKBOX_CHECK(hasDiagnostic(controller, "SESSION_DONE_MISMATCH"));
+  // If the invalid completion had retired A, this would advance to B's
+  // anchor 1.
+  BLACKBOX_CHECK(controller.joinerMetrics().checker.engine.retained_floor ==
+                 0U);
+  controller.acceptClientPayload(clientPayload(1U));
+  controller.forceTimeoutFinal();
+  BLACKBOX_CHECK(controller.finalOutcome() == FinalOutcome::Invalid);
+}
+
 void testFinalAttestationMayPrecedeEndFenceObservation() {
   RunController controller(manifest());
   openWorkload(controller);
@@ -2042,6 +2132,8 @@ void testCapturedTpccControllerReconciliation() {
 
 int runRunControllerTests() {
   testCleanPassRequiresDoneEndAndIdle();
+  testHistoryGcMatchesBaselineWithEarlyDoneAndAbortedGaps();
+  testHistoryGcInvalidDoneDoesNotRetireSession();
   testFinalAttestationMayPrecedeEndFenceObservation();
   testSchemaAttestationGatesAndDrift();
   testRunOwnedYugabyteFactsRejectValidDrift();

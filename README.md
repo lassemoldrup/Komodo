@@ -176,6 +176,16 @@ unchanged `SnapshotSOWWEngine` synchronously through `CheckerAdapter`. Dense
 checker order therefore covers bootstrap transactions, anchors, and joined
 workload transactions only; controls never create a gap.
 
+Optional [history-delta GC](monitor/doc/history_gc.md) is enabled with
+`--history-gc on`, or `BLACKBOX_MONITOR_HISTORY_GC=on` in the runners. It defaults
+to `off` and uses the existing session anchors and validated completion records.
+
+For workload-only sampled peak RSS, use `--workload-rss-sampling on` with
+`--metrics-output`, or set `workload_rss_sampling: true` in registered matrix
+cells. Sampling defaults to off and reads Linux `smaps_rollup` every 100 ms
+from bootstrap approval through final drain. The original lifetime peak RSS
+is retained as a separate metric; see the same measurement documentation.
+
 `blackbox_run_monitor` owns one complete audited run. It first requires the
 client stream's first record to be the authoritative `RunManifest`, then replays
 CDC from `0-0` while consuming the remaining client records from the manifest's

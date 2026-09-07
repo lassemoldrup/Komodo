@@ -79,6 +79,7 @@ struct RunControllerConfig {
   // adapter still validates the complete fact roster and value shapes.
   std::vector<ProtocolBackendFact> expected_backend_facts;
   ProcessingMode processing_mode = ProcessingMode::Audited;
+  bool history_gc = false;
 };
 
 // Owns one complete fenced run. The caller supplies assembled CDC transactions
@@ -119,7 +120,7 @@ public:
   [[nodiscard]] const std::optional<ReconciliationSummary> &
   finalReconciliation() const noexcept;
   [[nodiscard]] const std::vector<RunDiagnostic> &diagnostics() const noexcept;
-  [[nodiscard]] TransactionJoinerMetrics joinerMetrics() const;
+  [[nodiscard]] TransactionJoinerMetrics joinerMetrics(bool include_memory_profile = false) const;
 
   [[nodiscard]] std::vector<std::string> takePendingStatuses();
   [[nodiscard]] std::string finalReport() const;

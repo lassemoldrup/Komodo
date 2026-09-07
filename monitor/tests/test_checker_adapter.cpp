@@ -402,6 +402,75 @@ void testStateLimitAndIdentityCollision() {
   }
 }
 
+void testHistoryGcLifecycle() {
+  auto baseline = adapter();
+  CheckerAdapter gc(CheckerAdapterConfig{
+      .run_id = std::string(run_id),
+      .expected_session_ids = {std::string(session_one),
+                               std::string(session_two)},
+      .history_gc = true,
+  });
+  for (auto *checker : {&baseline, &gc}) {
+    checker->consumeBootstrap(0U, 1U, {presentWrite(1, "old")});
+    checker->consumePhaseAnchor(1U, session_one);
+    // Bootstrap must remain until the entire roster has been anchored.
+    BLACKBOX_CHECK(checker->metrics().engine.history_entries == 1U);
+    checker->consumePhaseAnchor(2U, session_two);
+  }
+  BLACKBOX_CHECK(gc.metrics().engine.retained_floor == 1U);
+  BLACKBOX_CHECK(gc.metrics().engine.history_entries == 0U);
+  BLACKBOX_CHECK(baseline.metrics().engine.history_entries == 1U);
+
+  const auto consumeBoth = [&](const std::uint64_t seq, const ClientTxn &txn,
+                               const std::vector<NormalizedWrite> &writes) {
+    baseline.consumeWorkload(seq, txn, writes);
+    gc.consumeWorkload(seq, txn, writes);
+    BLACKBOX_CHECK(gc.observation() == baseline.observation());
+    BLACKBOX_CHECK(gc.firstViolation() == baseline.firstViolation());
+  };
+  consumeBoth(3U, client(session_two, 1U, 1U), {presentWrite(1, "new")});
+  consumeBoth(4U,
+              client(session_two, 2U, 2U, {},
+                     "33333333-3333-4333-8333-333333333333",
+                     "44444444-4444-4444-8444-444444444444"),
+              {});
+  BLACKBOX_CHECK(gc.metrics().engine.retained_floor == 1U);
+  BLACKBOX_CHECK(gc.metrics().engine.history_entries == 1U);
+  consumeBoth(5U,
+              client(session_one, 1U, 1U, {presentRead(0, 1, "old")},
+                     "55555555-5555-4555-8555-555555555555",
+                     "66666666-6666-4666-8666-666666666666"),
+              {});
+  BLACKBOX_CHECK(gc.observation() == CheckerObservation::PassSoFar);
+  BLACKBOX_CHECK(gc.metrics().engine.retained_floor == 4U);
+  BLACKBOX_CHECK(gc.metrics().engine.history_entries == 0U);
+  consumeBoth(6U,
+              client(session_one, 2U, 2U, {},
+                     "77777777-7777-4777-8777-777777777777",
+                     "88888888-8888-4888-8888-888888888888"),
+              {presentWrite(1, "last")});
+  BLACKBOX_CHECK(gc.metrics().engine.history_entries == 1U);
+  gc.retireSession(session_two);
+  BLACKBOX_CHECK(gc.metrics().engine.retained_floor == 6U);
+  BLACKBOX_CHECK(gc.metrics().engine.history_entries == 0U);
+  consumeBoth(7U,
+              client(session_one, 3U, 3U, {absentRead(0, 1)},
+                     "99999999-9999-4999-8999-999999999999",
+                     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+              {presentWrite(2, "committed")});
+  BLACKBOX_CHECK(gc.observation() == CheckerObservation::ViolationObserved);
+  gc.retireSession(session_one);
+  BLACKBOX_CHECK(gc.metrics().engine.retained_floor == 7U);
+  BLACKBOX_CHECK(gc.metrics().engine.history_entries == 0U);
+  BLACKBOX_CHECK(gc.metrics().engine.current_snapshot_keys == 2U);
+  BLACKBOX_CHECK(gc.metrics().consumed_transactions == 8U);
+  BLACKBOX_CHECK(gc.metrics().engine.reclaimed_history_entries == 4U);
+  BLACKBOX_CHECK(!baseline.metrics().engine.retained_floor.has_value());
+  expectError(
+      gc, [&] { gc.consumeWorkload(8U, client(session_one, 4U, 4U), {}); },
+      MonitorErrorCode::CheckerInputRejected);
+}
+
 } // namespace
 
 int runCheckerAdapterTests() {
@@ -414,5 +483,6 @@ int runCheckerAdapterTests() {
   testConflictingRepeatedReads();
   testInputAndSequenceErrorsAreSticky();
   testStateLimitAndIdentityCollision();
+  testHistoryGcLifecycle();
   return 0;
 }

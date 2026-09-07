@@ -23,6 +23,30 @@ def load_module():
 
 
 class RegisteredEvaluationMatrixTest(unittest.TestCase):
+    def test_command_forwards_explicit_history_gc_setting(self) -> None:
+        module = load_module()
+        cell = {field: "value" for field in (
+            "backend", "benchmark", "mode", "workload", "capture_profile",
+            "archive", "archive_sha256", "config", "expected_sessions",
+            "monitor_bin", "database_container", "connector_container")}
+        for enabled in (False, True):
+            cell["history_gc"] = enabled
+            command = module.command(cell, Path("/tmp/output"))
+            self.assertEqual(command[-2:], ["--history-gc", "on" if enabled else "off"])
+            cell["workload_rss_sampling"] = enabled
+            command = module.command(cell, Path("/tmp/output"))
+            self.assertEqual(command[-2:], ["--workload-rss-sampling", "on" if enabled else "off"])
+            del cell["workload_rss_sampling"]
+
+    def test_optional_alternating_order_preserves_default(self) -> None:
+        module = load_module()
+        matrix = {"cells": [{"id": "off"}, {"id": "on"}]}
+        self.assertEqual(module.cells_for_repetition(matrix, 2), matrix["cells"])
+        matrix["alternate_cell_order"] = True
+        self.assertEqual(module.cells_for_repetition(matrix, 1), matrix["cells"])
+        self.assertEqual(module.cells_for_repetition(matrix, 2), list(reversed(matrix["cells"])))
+        self.assertEqual(module.cells_for_repetition(matrix, 3), matrix["cells"])
+
     def test_performance_runner_defaults_to_compact_success_evidence(self) -> None:
         source = (
             ROOT / "scripts" / "run_registered_performance_cell.sh"
