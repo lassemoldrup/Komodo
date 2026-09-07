@@ -368,6 +368,20 @@ implicit-DML, and locking-read exclusions are not used as negative tests.
 
 ## Performance measurement
 
+OceanBase online runs enable `rewriteBatchedStatements=true` automatically for
+the BenchBase **loader only**, across TPC-C, YCSB, and SmallBank. Both the shared
+`e2e.sh` entry point and registered performance cells apply this policy; the
+effective loader command is recorded in `loader-command.txt` for registered
+cells. Existing occurrences of this URL option are replaced rather than
+duplicated. The workload JDBC URL, loader batch size, random seed, and transaction
+boundaries are unchanged. MariaDB, Oracle, and YugabyteDB are unaffected: this
+is an OceanBase Connector/J optimization, not a portable JDBC parameter.
+The TPC-C pilot measured 399.99 s versus 85.65 s mean loader time with identical
+bootstrap state and four accepted runs; other OceanBase benchmarks use the same
+policy but have no benchmark-specific speedup claim. Previously frozen study
+snapshots retain their recorded configuration; this default applies to new runs
+using these updated scripts.
+
 The formal performance experiment has exactly two modes. Both use the current
 BenchBase checkout, the same admitted SI contract, evidence-compatible
 schema, deterministic loaded bytes, scale, mix, seed, terminal count, rate,

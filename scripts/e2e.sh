@@ -489,6 +489,18 @@ run_client_phase() {
   local label=$1
   local command=$2
   local timeout_seconds=$3
+  if [[ $label == loader && $BLACKBOX_BACKEND == oceanbase_mysql ]]; then
+    local loader_url="${BLACKBOX_JDBC_URL%%\?*}?" parameter
+    local -a loader_parameters=()
+    IFS='&' read -r -a loader_parameters <<<"${BLACKBOX_JDBC_URL#*\?}"
+    for parameter in "${loader_parameters[@]}"; do
+      [[ $BLACKBOX_JDBC_URL == *\?* && -n $parameter &&
+         $parameter != rewriteBatchedStatements=* ]] || continue
+      loader_url+="$parameter&"
+    done
+    command="export BLACKBOX_JDBC_URL=$(printf '%q' "${loader_url}rewriteBatchedStatements=true"); $command"
+    blackbox_log "loader JDBC optimization: rewriteBatchedStatements=true (loader only)"
+  fi
   blackbox_log "phase $label: starting"
   setsid bash -lc "$command" &
   PHASE_SESSION_ID=$!

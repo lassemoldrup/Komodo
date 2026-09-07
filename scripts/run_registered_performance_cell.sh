@@ -235,6 +235,16 @@ MEASURED_ARGS+=(-- java -Xms1g -Xmx1g -XX:+AlwaysPreTouch -XX:+UseG1GC -jar benc
   -b "$BENCHMARK" -c "$CONFIG_PATH" --create=false --load=false --execute=true
   --directory "$OUTPUT/workload-results")
 LOADER_COMMAND="cd $(printf '%q' "$DIST") && exec $(shell_join "${LOADER_ARGS[@]}")"
+if [[ $BACKEND == oceanbase_mysql ]]; then
+  loader_url="${BLACKBOX_JDBC_URL%%\?*}?"
+  IFS='&' read -r -a loader_parameters <<<"${BLACKBOX_JDBC_URL#*\?}"
+  for parameter in "${loader_parameters[@]}"; do
+    [[ $BLACKBOX_JDBC_URL == *\?* && -n $parameter &&
+       $parameter != rewriteBatchedStatements=* ]] || continue
+    loader_url+="$parameter&"
+  done
+  LOADER_COMMAND="export BLACKBOX_JDBC_URL=$(printf '%q' "${loader_url}rewriteBatchedStatements=true"); $LOADER_COMMAND"
+fi
 WORKLOAD_COMMAND="cd $(printf '%q' "$DIST") && exec $(shell_join "${MEASURED_ARGS[@]}")"
 printf '%s\n' "$LOADER_COMMAND" >"$OUTPUT/loader-command.txt"
 printf '%s\n' "$WORKLOAD_COMMAND" >"$OUTPUT/workload-command.txt"
