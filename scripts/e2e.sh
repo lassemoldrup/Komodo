@@ -88,12 +88,26 @@ require_optional_positive_monitor_limit() {
 
 
 cleanup_owned_processes() {
-  local session_id
+  local session_id deadline grace=${BLACKBOX_TERMINATION_GRACE_SECONDS:-5}
+  # EXIT can run before configuration validation has completed.
+  [[ $grace =~ ^[1-9][0-9]*$ ]] || grace=5
   for session_id in "$PHASE_SESSION_ID" "$MONITOR_SESSION_ID"; do
-    if [[ -n $session_id ]] && blackbox_session_has_processes "$session_id"; then
-      pkill --session "$session_id" >/dev/null 2>&1 || true
+    [[ -n $session_id ]] || continue
+    if blackbox_session_has_processes "$session_id"; then
+      pkill --signal TERM --session "$session_id" >/dev/null 2>&1 || true
+      deadline=$(( SECONDS + grace ))
+      while blackbox_session_has_processes "$session_id" && (( SECONDS <= deadline )); do
+        sleep 0.1
+      done
+      if blackbox_session_has_processes "$session_id"; then
+        pkill --signal KILL --session "$session_id" >/dev/null 2>&1 || true
+      fi
     fi
+    # Sending TERM alone does not mean the child's signal handler has finished.
+    wait "$session_id" >/dev/null 2>&1 || true
   done
+  PHASE_SESSION_ID=
+  MONITOR_SESSION_ID=
   if [[ -n $BOOTSTRAP_SCAN_FILE && -f $BOOTSTRAP_SCAN_FILE ]]; then
     rm -f -- "$BOOTSTRAP_SCAN_FILE"
   fi
