@@ -67,7 +67,9 @@ blackbox_backend_database() {
   else
     sql=${1:-}
   fi
-  "$BLACKBOX_DOCKER" exec "$BLACKBOX_DATABASE_CONTAINER" obclient -N -s -A \
+  # Stream large bootstrap results. This pinned obclient can silently return no
+  # rows for a large buffered result even though the query exits successfully.
+  "$BLACKBOX_DOCKER" exec "$BLACKBOX_DATABASE_CONTAINER" obclient --quick -N -s -A \
     -h127.0.0.1 -P2883 -u"$BLACKBOX_DB_USER" -p"$BLACKBOX_DB_PASSWORD" \
     -Dbenchbase \
     -e "SET NAMES utf8mb4 COLLATE utf8mb4_bin; SET time_zone='+00:00'; SET SESSION ob_read_consistency='STRONG'; SET SESSION sql_mode='STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'; $sql"

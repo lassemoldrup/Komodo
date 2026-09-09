@@ -113,6 +113,49 @@ class OracleSmallBankAssetsTest(unittest.TestCase):
         self.assertEqual(facts["online_redo_large_groups"], "record_only")
         self.assertEqual(facts["online_redo_large_group_bytes"], "record_only")
 
+    def test_legacy_logminer_batch_setting_is_record_only(self) -> None:
+        properties = (ROOT / "debezium/application-oracle.properties").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("debezium.source.log.mining.batch.size.default=1000", properties)
+        backend = json.loads((ROOT / "protocol/backends/oracle.json").read_text(encoding="utf-8"))
+        facts = {
+            item["name"]: item["value_rule"]
+            for item in backend["attestation_fact_contract"]
+        }
+        self.assertEqual(facts["log_mining_batch_size_default"], "record_only")
+
+    def test_catalog_primary_keys_use_consistent_visible_views(self) -> None:
+        driver = (ROOT / "scripts/backends/oracle.sh").read_text(encoding="utf-8")
+        self.assertIn("FROM all_constraints p JOIN all_cons_columns c", driver)
+        self.assertNotIn("FROM dba_constraints p JOIN dba_cons_columns c", driver)
+        self.assertIn("for (( attempt=1; attempt<=12; ++attempt )); do", driver)
+        self.assertIn("if (( attempt < 12 )); then sleep 5; fi", driver)
+
+    def test_attestation_retries_incomplete_catalog_results(self) -> None:
+        driver = (ROOT / "scripts/backends/oracle.sh").read_text(encoding="utf-8")
+        attestation = driver.split(
+            "blackbox_backend_capture_attestation_inputs() {", 1
+        )[1].split("\n}\n", 1)[0]
+        self.assertIn("for (( attempt=1; attempt<=12; ++attempt )); do", attestation)
+        self.assertIn("oracle_catalog.py", attestation)
+        self.assertIn("[[ -s $privilege_file ]]", attestation)
+
+    def test_sqlplus_query_wrapper_streams_large_results(self) -> None:
+        driver = (ROOT / "scripts/backends/oracle.sh").read_text(encoding="utf-8")
+        sqlplus = driver.split("blackbox_backend_sqlplus_query() {", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        self.assertIn("sqlplus -s -L", sqlplus)
+        self.assertIn("set flush on arraysize 5000 rowprefetch 1000", sqlplus)
+        self.assertIn("set termout off", sqlplus)
+        self.assertIn("spool $remote_output", sqlplus)
+        self.assertIn('chmod 0644 "$local_script"', sqlplus)
+        self.assertIn('cp "$local_script" "cdc-oracle:$remote_script"', sqlplus)
+        self.assertIn("exec --detach cdc-oracle", sqlplus)
+        self.assertIn('cp "cdc-oracle:$remote_status" "$local_status"', sqlplus)
+        self.assertIn('cp "cdc-oracle:$remote_output" "$local_output"', sqlplus)
+
 
 if __name__ == "__main__":
     unittest.main()

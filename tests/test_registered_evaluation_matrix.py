@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,23 @@ def load_module():
 
 
 class RegisteredEvaluationMatrixTest(unittest.TestCase):
+    def test_runner_preflight_does_not_require_removed_headroom_variable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/run_registered_performance_cell.sh"),
+                 "--backend", "mariadb", "--benchmark", "tpcc",
+                 "--mode", "full_e2e", "--workload", "preflight",
+                 "--capture-profile", "mariadb_full_row_v1",
+                 "--execution-profile", "coordinated_e2e", "--repetition", "1",
+                 "--archive", str(Path(directory) / "missing.tgz")],
+                env={key: value for key, value in os.environ.items()
+                     if key != "HIGH_WATER_THRESHOLD"},
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("build artifact is missing", result.stderr)
+            self.assertNotIn("unbound variable", result.stderr)
+
     def test_command_forwards_explicit_history_gc_setting(self) -> None:
         module = load_module()
         cell = {field: "value" for field in (
@@ -90,6 +108,35 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
                 self.assertIn(
                     "client_logical_operations_per_second", cell["summary_metrics"]
                 )
+
+    def test_registered_direct_benchbase_modes_are_canonical(self) -> None:
+        matrix_paths = sorted(
+            (ROOT / "experiments").glob("*performance_matrix.json")
+        )
+        self.assertTrue(matrix_paths)
+        direct_cells = 0
+        for matrix_path in matrix_paths:
+            matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+            for cell in matrix["cells"]:
+                arguments = cell.get("runner_arguments", [])
+                profiles = [
+                    arguments[index + 1]
+                    for index, argument in enumerate(arguments[:-1])
+                    if argument == "--execution-profile"
+                ]
+                self.assertEqual(
+                    len(profiles),
+                    1,
+                    f"{matrix_path.name}:{cell['id']} must declare one execution profile",
+                )
+                if profiles[0] == "direct_benchbase":
+                    direct_cells += 1
+                    self.assertEqual(
+                        cell["mode"],
+                        "benchbase_uninstrumented",
+                        f"{matrix_path.name}:{cell['id']} has a noncanonical baseline mode",
+                    )
+        self.assertGreater(direct_cells, 0)
 
     def test_resume_rejects_workload_parameter_drift(self) -> None:
         module = load_module()
@@ -418,6 +465,10 @@ class RegisteredEvaluationMatrixTest(unittest.TestCase):
 
             with (root / "summary.csv").open(newline="", encoding="utf-8") as stream:
                 rows = list(csv.DictReader(stream))
+            self.assertEqual(
+                [row["mode"] for row in rows],
+                ["benchbase_uninstrumented", "full_e2e"],
+            )
             self.assertEqual(
                 list(rows[0]),
                 [

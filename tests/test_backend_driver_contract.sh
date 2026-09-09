@@ -161,4 +161,29 @@ SCRIPT
   fi
 done
 
+# Exercise the real query wrapper: the pinned OceanBase client can return
+# success but omit a large buffered result. Streaming must preserve every row.
+(
+  . "$ROOT/scripts/backends/oceanbase_mysql.sh"
+  BLACKBOX_DATABASE_CONTAINER=test-database
+  BLACKBOX_DB_USER=test-user
+  BLACKBOX_DB_PASSWORD=test-password
+  BLACKBOX_DOCKER=mock_oceanbase_docker
+  # shellcheck disable=SC2317 # Invoked indirectly through BLACKBOX_DOCKER.
+  mock_oceanbase_docker() {
+    local argument streaming=0
+    for argument in "$@"; do
+      [[ $argument != --quick ]] || streaming=1
+    done
+    if [[ ${MOCK_QUERY_FAILURE:-0} != 0 ]]; then return 19; fi
+    if (( streaming )); then seq 1 100000; fi
+  }
+  rows=$(blackbox_backend_database_query 'SELECT payload FROM large_table' | wc -l)
+  [[ $rows == 100000 ]] || { echo "large OceanBase scan lost rows" >&2; exit 1; }
+  MOCK_QUERY_FAILURE=1
+  status=0
+  blackbox_backend_database_query 'SELECT payload FROM large_table' >/dev/null || status=$?
+  [[ $status == 19 ]] || { echo "OceanBase query failure was masked" >&2; exit 1; }
+)
+
 echo "backend driver contract tests passed"

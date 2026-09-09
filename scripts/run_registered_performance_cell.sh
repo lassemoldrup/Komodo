@@ -107,7 +107,6 @@ for value in "$REPETITION" "$LOADER_TIMEOUT" "$WORKLOAD_TIMEOUT" "$STACK_TIMEOUT
   [[ $value =~ ^[1-9][0-9]*$ ]] || { printf 'positive integer parameter is invalid\n' >&2; exit 2; }
 done
 [[ $RESOURCE_INTERVAL =~ ^[0-9]+([.][0-9]+)?$ ]]
-[[ $HIGH_WATER_THRESHOLD =~ ^[0-9]+([.][0-9]+)?$ ]]
 [[ $EVIDENCE_RETENTION == compact || $EVIDENCE_RETENTION == full ]] || {
   printf 'evidence retention must be compact or full\n' >&2
   exit 2

@@ -258,6 +258,37 @@ class YugabyteYsqlBackendAssetsTest(unittest.TestCase):
         self.assertIn("c.relreplident::text", driver)
         self.assertNotRegex(driver, r"\|\|\s*c\.relreplident(?:\s|FROM)")
 
+    def test_schema_readiness_retries_complete_exact_validation(self) -> None:
+        driver = (
+            ROOT / "scripts" / "backends" / "yugabytedb_ysql.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("blackbox_backend_verify_schema_once()", driver)
+        self.assertIn("for (( attempt=1; attempt<=12; ++attempt )); do", driver)
+        self.assertIn("if blackbox_backend_verify_schema_once; then return 0; fi", driver)
+        self.assertIn("if (( attempt < 12 )); then sleep 5; fi", driver)
+
+    def test_attestation_retries_complete_input_capture(self) -> None:
+        driver = (
+            ROOT / "scripts" / "backends" / "yugabytedb_ysql.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("blackbox_backend_capture_attestation_inputs_once()", driver)
+        self.assertIn(
+            'blackbox_backend_capture_attestation_inputs_once "$1" "$2"', driver
+        )
+
+    def test_ysql_queries_use_detached_file_transport(self) -> None:
+        driver = (
+            ROOT / "scripts" / "backends" / "yugabytedb_ysql.sh"
+        ).read_text(encoding="utf-8")
+        query = driver.split("blackbox_backend_ysql_query() {", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        self.assertIn("exec --detach", query)
+        self.assertIn("--file", query)
+        self.assertIn("--output", query)
+        self.assertIn("$remote_status", query)
+        self.assertIn("$BLACKBOX_DOCKER cp", query)
+
     def test_generic_lifecycle_has_no_backend_name_or_physical_sql_branch(self) -> None:
         generic = "\n".join(
             path.read_text(encoding="utf-8")

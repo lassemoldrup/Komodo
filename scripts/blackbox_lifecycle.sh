@@ -261,12 +261,24 @@ blackbox_capture_loader_observations() {
   }
   local query_specs=()
   mapfile -t query_specs <<<"$encoded_queries"
-  local encoded_query query observation identity result
+  local encoded_query query observation identity result normalized_result attempt
   for encoded_query in "${query_specs[@]}"; do
     query=$(printf '%s' "$encoded_query" | base64 --decode) || return 1
     observation=$(jq -er '.observation' <<<"$query") || return 1
-    result=$(blackbox_database_query "$(jq -er '.sql' <<<"$query")") || return 1
-    result=${result//[[:space:]]/}
+    result=
+    for (( attempt=1; attempt<=3; ++attempt )); do
+      if result=$(blackbox_database_query "$(jq -er '.sql' <<<"$query")"); then
+        normalized_result=${result//[[:space:]]/}
+        if [[ $normalized_result =~ ^[0-9]+$ ]]; then
+          result=$normalized_result
+          break
+        fi
+      fi
+      if (( attempt < 3 )); then
+        blackbox_log "retrying incomplete loader validation query ($attempt/3)"
+        sleep 5
+      fi
+    done
     [[ $result =~ ^[0-9]+$ ]] || {
       blackbox_die "loader validation query did not return a nonnegative integer: $result"
       return 1
@@ -418,16 +430,43 @@ blackbox_capture_bootstrap_scan() {
   : >"$output_path"
   local query_specs=()
   mapfile -t query_specs <<<"$encoded_queries"
-  local encoded_query query input_bytes
+  local encoded_query query table expected_rows actual_rows input_bytes attempt
+  local query_output
+  query_output=$(mktemp /tmp/blackbox-bootstrap-query.XXXXXX) || return 1
   for encoded_query in "${query_specs[@]}"; do
     query=$(printf '%s' "$encoded_query" | base64 --decode) || return 1
-    blackbox_database_query "$(jq -er '.sql' <<<"$query")" >>"$output_path" || return 1
+    table=$(jq -er '.table' <<<"$query") || return 1
+    expected_rows=$(jq -er --arg table "$table" '
+      .declared_table_row_counts[] | select(.table == $table) | .row_count
+    ' "$BLACKBOX_LOADER_DECLARED_COUNTS_FILE") || return 1
+    actual_rows=-1
+    for (( attempt=1; attempt<=3; ++attempt )); do
+      : >"$query_output"
+      if blackbox_database_query "$(jq -er '.sql' <<<"$query")" >"$query_output"; then
+        actual_rows=$(wc -l <"$query_output") || return 1
+        if (( actual_rows == expected_rows )); then break; fi
+      fi
+      if (( attempt < 3 )); then
+        blackbox_log \
+          "retrying incomplete bootstrap scan for $table: expected $expected_rows rows, found $actual_rows ($attempt/3)"
+        sleep 5
+      fi
+    done
+    if (( actual_rows != expected_rows )); then
+      blackbox_die \
+        "bootstrap scan for $table returned $actual_rows rows, expected $expected_rows"
+      rm -f -- "$query_output"
+      return 1
+    fi
+    cat "$query_output" >>"$output_path" || return 1
     input_bytes=$(wc -c <"$output_path") || return 1
     if (( input_bytes > BLACKBOX_BOOTSTRAP_MAX_INPUT_BYTES )); then
       blackbox_die "bootstrap scan exceeded input byte limit"
+      rm -f -- "$query_output"
       return 1
     fi
   done
+  rm -f -- "$query_output"
 }
 
 
@@ -544,14 +583,19 @@ blackbox_session_has_processes() {
 
 
 blackbox_active_external_connections() {
-  local count
-  count=$(blackbox_backend_active_external_connections) || return 1
-  count=${count//[[:space:]]/}
-  [[ $count =~ ^[0-9]+$ ]] || {
-    blackbox_die "invalid active-connection count: $count"
-    return 1
-  }
-  printf '%s\n' "$count"
+  local count attempt
+  for (( attempt=1; attempt<=3; ++attempt )); do
+    if count=$(blackbox_backend_active_external_connections); then
+      count=${count//[[:space:]]/}
+      if [[ $count =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$count"
+        return 0
+      fi
+    fi
+    if (( attempt < 3 )); then sleep 0.2; fi
+  done
+  blackbox_die "invalid active-connection count: $count"
+  return 1
 }
 
 

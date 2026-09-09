@@ -89,6 +89,86 @@ blackbox_backend_start_connector() {
   blackbox_compose up --detach --no-deps --force-recreate debezium-oracle
 }
 
+blackbox_backend_sqlplus_query() {
+  local connection=$1 sql=$2 local_output local_script local_status local_runner
+  local local_log remote_output remote_script remote_status remote_runner remote_log
+  local query_status=0 deadline
+  local_output=$(mktemp /tmp/blackbox-oracle-query.XXXXXX) || return 1
+  local_script=$(mktemp /tmp/blackbox-oracle-script.XXXXXX) || {
+    rm -f -- "$local_output"
+    return 1
+  }
+  local_status=$(mktemp /tmp/blackbox-oracle-status.XXXXXX) || return 1
+  local_runner=$(mktemp /tmp/blackbox-oracle-runner.XXXXXX) || return 1
+  local_log=$(mktemp /tmp/blackbox-oracle-log.XXXXXX) || return 1
+  remote_output="/tmp/blackbox-oracle-query-${BASHPID}-${RANDOM}.out"
+  remote_script="/tmp/blackbox-oracle-script-${BASHPID}-${RANDOM}.sql"
+  remote_status="/tmp/blackbox-oracle-status-${BASHPID}-${RANDOM}"
+  remote_runner="/tmp/blackbox-oracle-runner-${BASHPID}-${RANDOM}"
+  remote_log="/tmp/blackbox-oracle-log-${BASHPID}-${RANDOM}"
+  printf '%s\n' \
+    'whenever oserror exit failure rollback' \
+    'whenever sqlerror exit failure rollback' \
+    'set heading off feedback off pagesize 0 linesize 32767 trimspool on tab off' \
+    'set termout off' \
+    'set flush on arraysize 5000 rowprefetch 1000' \
+    "spool $remote_output" "$sql" 'spool off' 'exit' >"$local_script"
+  chmod 0644 "$local_script" || query_status=$?
+  printf '%s\n' '#!/usr/bin/env bash' 'set +e' \
+    'sqlplus -s -L "$1" "@$2" >"$4" 2>&1' \
+    'query_status=$?' \
+    'printf "%s\n" "$query_status" >"${3}.tmp"' \
+    'mv "${3}.tmp" "$3"' >"$local_runner"
+  chmod 0755 "$local_runner" || query_status=$?
+  if (( query_status == 0 )); then
+    $BLACKBOX_DOCKER cp "$local_script" "cdc-oracle:$remote_script" \
+      >/dev/null || query_status=$?
+  fi
+  if (( query_status == 0 )); then
+    $BLACKBOX_DOCKER cp "$local_runner" "cdc-oracle:$remote_runner" \
+      >/dev/null || query_status=$?
+  fi
+  if (( query_status == 0 )); then
+    $BLACKBOX_DOCKER exec --detach cdc-oracle "$remote_runner" \
+      "$connection" "$remote_script" "$remote_status" "$remote_log" \
+      >/dev/null || query_status=$?
+  fi
+  if (( query_status == 0 )); then
+    deadline=$(( $(date +%s) + 600 ))
+    while ! $BLACKBOX_DOCKER cp "cdc-oracle:$remote_status" "$local_status" \
+        >/dev/null 2>&1; do
+      if (( $(date +%s) >= deadline )); then
+        query_status=124
+        break
+      fi
+      sleep 1
+    done
+  fi
+  if (( query_status == 0 )); then
+    query_status=$(tr -d '[:space:]' <"$local_status")
+    [[ $query_status =~ ^[0-9]+$ ]] || query_status=1
+  fi
+  if (( query_status != 0 )); then
+    if $BLACKBOX_DOCKER cp "cdc-oracle:$remote_log" "$local_log" \
+        >/dev/null 2>&1; then
+      cat "$local_log" >&2
+    fi
+  fi
+  if (( query_status == 0 )); then
+    $BLACKBOX_DOCKER cp "cdc-oracle:$remote_output" "$local_output" \
+      >/dev/null || query_status=$?
+  fi
+  if (( query_status == 0 )); then
+    cat "$local_output" || query_status=$?
+  fi
+  $BLACKBOX_DOCKER exec cdc-oracle rm -f -- "$remote_output" "$remote_script" \
+    "$remote_status" "$remote_runner" "$remote_log" \
+    >/dev/null 2>&1 || true
+  rm -f -- "$local_output" "$local_script" "$local_status" "$local_runner" \
+    "$local_log"
+  return "$query_status"
+}
+
 blackbox_backend_admin_query() {
   local sql=$1
   $BLACKBOX_DOCKER exec -i cdc-oracle sqlplus -s / as sysdba <<SQL
@@ -110,10 +190,8 @@ blackbox_backend_database() {
   # SQL*Plus requires coordinator statements on separate physical lines even
   # when each statement is semicolon-terminated.
   sql=${sql//;/$';\n'}
-  $BLACKBOX_DOCKER exec -i cdc-oracle sqlplus -s \
-    "blackbox_application/${BLACKBOX_DB_PASSWORD}@localhost:1521/FREEPDB1" <<SQL
-whenever sqlerror exit failure rollback
-set heading off feedback off pagesize 0 linesize 32767 trimspool on tab off
+  blackbox_backend_sqlplus_query \
+    "blackbox_application/${BLACKBOX_DB_PASSWORD}@localhost:1521/FREEPDB1" "
 set colsep '	'
 ALTER SESSION SET CURRENT_SCHEMA=BLACKBOX_OWNER;
 ALTER SESSION SET TIME_ZONE='+00:00';
@@ -122,8 +200,7 @@ ALTER SESSION SET NLS_DATE_LANGUAGE='AMERICAN';
 ALTER SESSION SET NLS_COMP=BINARY;
 ALTER SESSION SET NLS_SORT=BINARY;
 $sql
-exit
-SQL
+"
 }
 
 blackbox_backend_database_query() { blackbox_backend_database --execute "$1"; }
@@ -157,16 +234,30 @@ SELECT 'COLUMN'||CHR(9)||'benchbase.'||LOWER(table_name)||CHR(9)||LOWER(column_n
        COALESCE(char_used,'-')||CHR(9)||identity_column
   FROM dba_tab_columns WHERE owner='BLACKBOX_OWNER' ORDER BY table_name,column_id;
 SELECT 'PRIMARY'||CHR(9)||'benchbase.'||LOWER(c.table_name)||CHR(9)||LOWER(c.column_name)||CHR(9)||c.position
-  FROM dba_constraints p JOIN dba_cons_columns c
+  FROM all_constraints p JOIN all_cons_columns c
     ON c.owner=p.owner AND c.constraint_name=p.constraint_name
  WHERE p.owner='BLACKBOX_OWNER' AND p.constraint_type='P'
  ORDER BY c.table_name,c.position;"
 }
 
 blackbox_backend_verify_schema() {
-  blackbox_backend_capture_schema_metadata |
-    python3 "$BLACKBOX_ROOT/scripts/backends/oracle_catalog.py" \
-      --adapter "$BLACKBOX_ROOT/protocol/adapters/${BLACKBOX_BENCHMARK}.json"
+  local metadata diagnostic attempt
+  metadata=$(mktemp /tmp/blackbox-oracle-catalog.XXXXXX)
+  diagnostic=$(mktemp /tmp/blackbox-oracle-catalog-error.XXXXXX)
+  for (( attempt=1; attempt<=12; ++attempt )); do
+    : >"$diagnostic"
+    if blackbox_backend_capture_schema_metadata >"$metadata" &&
+       python3 "$BLACKBOX_ROOT/scripts/backends/oracle_catalog.py" \
+         --adapter "$BLACKBOX_ROOT/protocol/adapters/${BLACKBOX_BENCHMARK}.json" \
+         <"$metadata" 2>"$diagnostic"; then
+      rm -f -- "$metadata" "$diagnostic"
+      return 0
+    fi
+    if (( attempt < 12 )); then sleep 5; fi
+  done
+  cat "$diagnostic" >&2
+  rm -f -- "$metadata" "$diagnostic"
+  return 1
 }
 
 blackbox_backend_count_table() {
@@ -208,13 +299,18 @@ blackbox_backend_wait_for_connector_progress() {
 }
 
 blackbox_backend_capture_attestation_inputs() {
-  local tables_file=$1 facts_file=$2 metadata_file privilege_file
+  local tables_file=$1 facts_file=$2 metadata_file privilege_file diagnostic_file
+  local attempt captured=0
   metadata_file=$(mktemp /tmp/blackbox-oracle-schema.XXXXXX)
   privilege_file=$(mktemp /tmp/blackbox-oracle-privileges.XXXXXX)
-  blackbox_backend_capture_schema_metadata >"$metadata_file" || return 1
-  python3 "$BLACKBOX_RECORD_TOOL" attestation-tables \
-    --benchmark "$BLACKBOX_BENCHMARK" >"$tables_file" || return 1
-  blackbox_backend_admin_query "
+  diagnostic_file=$(mktemp /tmp/blackbox-oracle-attestation-error.XXXXXX)
+  for (( attempt=1; attempt<=12; ++attempt )); do
+    : >"$diagnostic_file"
+    if blackbox_backend_capture_schema_metadata >"$metadata_file" &&
+       python3 "$BLACKBOX_ROOT/scripts/backends/oracle_catalog.py" \
+         --adapter "$BLACKBOX_ROOT/protocol/adapters/${BLACKBOX_BENCHMARK}.json" \
+         <"$metadata_file" >/dev/null 2>"$diagnostic_file" &&
+       blackbox_backend_admin_query "
 ALTER SESSION SET CONTAINER=FREEPDB1;
 SELECT grantee||CHR(9)||privilege FROM dba_sys_privs
  WHERE grantee IN ('BLACKBOX_APPLICATION','C##BLACKBOX_LOGMINER')
@@ -222,7 +318,20 @@ SELECT grantee||CHR(9)||privilege FROM dba_sys_privs
  WHERE grantee IN ('BLACKBOX_APPLICATION','C##BLACKBOX_LOGMINER')
  UNION ALL SELECT grantee||CHR(9)||owner||'.'||table_name||':'||privilege FROM dba_tab_privs
  WHERE grantee IN ('BLACKBOX_APPLICATION','C##BLACKBOX_LOGMINER')
- ORDER BY 1;" >"$privilege_file" || return 1
+ ORDER BY 1;" >"$privilege_file" && [[ -s $privilege_file ]]; then
+      captured=1
+      break
+    fi
+    if (( attempt < 12 )); then sleep 5; fi
+  done
+  if (( captured == 0 )); then
+    cat "$diagnostic_file" >&2
+    blackbox_die "Oracle schema/capture attestation inputs remained incomplete"
+    rm -f -- "$metadata_file" "$privilege_file" "$diagnostic_file"
+    return 1
+  fi
+  python3 "$BLACKBOX_RECORD_TOOL" attestation-tables \
+    --benchmark "$BLACKBOX_BENCHMARK" >"$tables_file" || return 1
   local image_digest roster_digest table_digest privilege_digest
   image_digest=$($BLACKBOX_DOCKER inspect --format '{{.Image}}' "$BLACKBOX_DATABASE_CONTAINER") || return 1
   image_digest=${image_digest#sha256:}
@@ -250,7 +359,7 @@ SELECT grantee||CHR(9)||privilege FROM dba_sys_privs
       {name:"online_redo_large_group_bytes",canonical_value:"536870912"},
       {name:"table_supplemental_logging",canonical_value:"ALL_COLUMNS"},
       {name:"log_mining_strategy",canonical_value:"online_catalog"},
-      {name:"log_mining_batch_size_default",canonical_value:"20000"},
+      {name:"log_mining_batch_size_default",canonical_value:"1000"},
       {name:"log_mining_sleep_profile",canonical_value:"0_200_1000_200"},
       {name:"physical_capture_profile",canonical_value:"oracle_logminer_all_columns_v1"},
       {name:"connector_class",canonical_value:"io.debezium.connector.oracle.OracleConnector"},
@@ -266,7 +375,7 @@ SELECT grantee||CHR(9)||privilege FROM dba_sys_privs
       {name:"table_definition_sha256",canonical_value:$tables},
       {name:"dedicated_privileges_sha256",canonical_value:$privileges}
     ]' >"$facts_file"
-  rm -f -- "$metadata_file" "$privilege_file"
+  rm -f -- "$metadata_file" "$privilege_file" "$diagnostic_file"
 }
 
 blackbox_backend_status() {

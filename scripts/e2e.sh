@@ -919,6 +919,8 @@ run_loader_and_close_bootstrap() {
         ($loader.observed_table_row_counts | sort_by(.table)) ==
         ($bootstrap.table_row_counts | sort_by(.table))
       ' >/dev/null; then
+    blackbox_log "independent loader counts: $(jq -c '.observed_table_row_counts' <<<"$loader_validation")"
+    blackbox_log "canonical scan counts: $(jq -c '.table_row_counts' <<<"$manifest")"
     close_failed_run BOOTSTRAP_STATE_MISMATCH \
       "canonical scan counts differ from loader declaration and independent SQL" 1
     return 1

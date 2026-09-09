@@ -388,9 +388,10 @@ BenchBase checkout, the same admitted SI contract, evidence-compatible
 schema, deterministic loaded bytes, scale, mix, seed, terminal count, rate,
 warmup, and measured duration:
 
-- `benchbase_uninstrumented` omits `<blackbox>` completely. It uses ordinary
-  benchmark SQL, `Worker`, and retry behavior, with no client capture/encoding,
-  marker, Redis publication, Debezium consumer, or C++ monitor.
+- `benchbase_uninstrumented` uses explicit `<blackbox><mode>disabled</mode>`
+  while retaining the backend, declared-isolation, and benchmark contract. It
+  uses ordinary benchmark SQL with no client capture/encoding, marker, Redis
+  publication, Debezium consumer, or C++ monitor.
 - `full_e2e` enables audited client capture and canonical encoding, marker and
   Redis publication, backend-selected CDC collection by external Debezium Server, and
   the C++ monitor's assembly/normalization of raw Debezium records, joiner, and
@@ -595,6 +596,19 @@ durability claims remain outside the audited result.
 **MariaDB** — clients need `--skip-ssl`; the 11.8+ client requires TLS and the
 listeners here are plaintext.
 
+**OceanBase CDC batching** — new experiments use source batch `512`, source queue
+`2048`, and Redis sink batch `256` in
+`debezium/application-oceanbase-mysql.properties`. These bounded defaults replace
+the previous `4/32/3` transport settings; database transaction boundaries, CDC
+ordering and capture semantics are unchanged. Offset flush remains `0` and poll
+interval remains `50 ms`. A four-condition, single-run 600-second YCSB op1 pilot
+found that this batching configuration eliminated sustained matching backlog at
+approximately 2,200 client TPS; monitor RSS stayed near 20 MiB. This is not a
+guarantee for every workload or record size. Validate longer runs and other
+benchmarks before broader claims, and monitor connector memory as well as monitor
+RSS. Frozen experiment snapshots retain their recorded settings; do not edit old
+snapshots or overwrite old results to apply the new default.
+
 **YugabyteDB** — the accepted assets create the complete empty `benchbase`
 schema, apply the backend-selected replica-identity profile, create one explicit
 publication, and only then create one run-owned `pgoutput` logical slot with
@@ -610,6 +624,11 @@ buffer to 1 MiB. This forces prompt IntentDB flush/cleanup and bounds hot-key
 conflict scans. The pinned release has no IntentDB-only write-buffer flag, so
 this profile is a measured workaround rather than the preferred permanent
 engine fix.
+
+**Oracle connector default** — use the pinned, unmodified Debezium Server image
+in `docker-compose.yml`. The experimental 100 ms LogMiner pause image is not a
+default and must not be silently used for future experiments. Together with the
+OceanBase `512/2048/256` batching settings above, this is the agreed baseline.
 
 **Oracle** — the pinned database-lifetime prerequisite creates ARCHIVELOG,
 force/minimal supplemental logging, and the LogMiner principal. The separate

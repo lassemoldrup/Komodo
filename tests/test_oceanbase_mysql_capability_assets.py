@@ -117,6 +117,24 @@ class OceanBaseMysqlCapabilityAssetsTest(unittest.TestCase):
         self.assertNotIn("bootstrap.servers", connector)
         self.assertNotRegex(connector, r"(?i)(flink|oms)")
 
+    def test_cdc_throughput_defaults_preserve_capture_semantics(self) -> None:
+        path = ROOT / "debezium" / "application-oceanbase-mysql.properties"
+        settings = dict(
+            line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#") and "=" in line
+        )
+        self.assertEqual(settings["debezium.source.max.batch.size"], "512")
+        self.assertEqual(settings["debezium.source.max.queue.size"], "2048")
+        self.assertEqual(settings["debezium.sink.redis.batch.size"], "256")
+        self.assertGreater(int(settings["debezium.source.max.queue.size"]),
+                           int(settings["debezium.source.max.batch.size"]))
+        self.assertEqual(settings["debezium.source.offset.flush.interval.ms"], "0")
+        self.assertEqual(settings["debezium.source.poll.interval.ms"], "50")
+        self.assertEqual(settings["debezium.source.tasks.max"], "1")
+        self.assertEqual(settings["debezium.source.provide.transaction.metadata"], "true")
+        self.assertEqual(settings["debezium.source.event.processing.failure.handling.mode"], "fail")
+        self.assertEqual(settings["debezium.source.skipped.operations"], "none")
+
     def test_pre_binlog_schema_gate_uses_the_adapter_table_roster(self) -> None:
         initializer = (
             CONTRACT / "source" / "initialize-before-binlog.sh"

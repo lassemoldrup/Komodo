@@ -157,20 +157,85 @@ blackbox_backend_start_connector() {
     "$BLACKBOX_CONNECTOR_SERVICE"
 }
 
+blackbox_backend_ysql_query() {
+  local username=$1 password=$2 sql=$3 temporary local_query local_output
+  local local_status local_runner local_log token remote_query remote_output
+  local remote_status remote_runner remote_log query_status=0 deadline tab=$'\t'
+  temporary=$(mktemp -d /tmp/blackbox-yugabyte-query.XXXXXX) || return 1
+  local_query="$temporary/query.sql"
+  local_output="$temporary/output"
+  local_status="$temporary/status"
+  local_runner="$temporary/runner"
+  local_log="$temporary/log"
+  token="${BASHPID}-${RANDOM}"
+  remote_query="/tmp/blackbox-yugabyte-query-$token.sql"
+  remote_output="/tmp/blackbox-yugabyte-output-$token"
+  remote_status="/tmp/blackbox-yugabyte-status-$token"
+  remote_runner="/tmp/blackbox-yugabyte-runner-$token"
+  remote_log="/tmp/blackbox-yugabyte-log-$token"
+  [[ $sql == *';' ]] || sql+=';'
+  printf '%s\n' "$sql" >"$local_query"
+  printf '%s\n' '#!/usr/bin/env bash' 'set +e' \
+    "PGPASSWORD=\"\$2\" /home/yugabyte/bin/ysqlsh --host yugabytedb_ysql --username \"\$1\" --dbname benchbase --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align --field-separator=\"$tab\" --file \"\$3\" --output \"\$4\" >\"\$6\" 2>&1" \
+    'query_status=$?' \
+    'printf "%s\n" "$query_status" >"${5}.tmp"' \
+    'mv "${5}.tmp" "$5"' >"$local_runner"
+  chmod 0644 "$local_query" || query_status=$?
+  chmod 0755 "$local_runner" || query_status=$?
+  if (( query_status == 0 )); then
+    $BLACKBOX_DOCKER cp "$local_query" \
+      "$BLACKBOX_DATABASE_CONTAINER:$remote_query" >/dev/null || query_status=$?
+  fi
+  if (( query_status == 0 )); then
+    $BLACKBOX_DOCKER cp "$local_runner" \
+      "$BLACKBOX_DATABASE_CONTAINER:$remote_runner" >/dev/null || query_status=$?
+  fi
+  if (( query_status == 0 )); then
+    $BLACKBOX_DOCKER exec --detach "$BLACKBOX_DATABASE_CONTAINER" \
+      "$remote_runner" "$username" "$password" "$remote_query" \
+      "$remote_output" "$remote_status" "$remote_log" \
+      >/dev/null || query_status=$?
+  fi
+  if (( query_status == 0 )); then
+    deadline=$(( $(date +%s) + 600 ))
+    while ! $BLACKBOX_DOCKER cp \
+        "$BLACKBOX_DATABASE_CONTAINER:$remote_status" "$local_status" \
+        >/dev/null 2>&1; do
+      if (( $(date +%s) >= deadline )); then
+        query_status=124
+        break
+      fi
+      sleep 1
+    done
+  fi
+  if (( query_status == 0 )); then
+    query_status=$(tr -d '[:space:]' <"$local_status")
+    [[ $query_status =~ ^[0-9]+$ ]] || query_status=1
+  fi
+  if (( query_status != 0 )); then
+    if $BLACKBOX_DOCKER cp "$BLACKBOX_DATABASE_CONTAINER:$remote_log" \
+        "$local_log" >/dev/null 2>&1; then
+      cat "$local_log" >&2
+    fi
+  else
+    $BLACKBOX_DOCKER cp "$BLACKBOX_DATABASE_CONTAINER:$remote_output" \
+      "$local_output" >/dev/null || query_status=$?
+    if (( query_status == 0 )); then cat "$local_output" || query_status=$?; fi
+  fi
+  $BLACKBOX_DOCKER exec "$BLACKBOX_DATABASE_CONTAINER" rm -f -- \
+    "$remote_query" "$remote_output" "$remote_status" "$remote_runner" \
+    "$remote_log" >/dev/null 2>&1 || true
+  rm -r -- "$temporary"
+  return "$query_status"
+}
+
 blackbox_backend_admin_query() {
-  blackbox_compose exec -T yugabytedb_ysql bin/ysqlsh \
-    --host yugabytedb_ysql --username yugabyte --dbname benchbase \
-    --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align \
-    --field-separator=$'\t' --command "$1"
+  blackbox_backend_ysql_query yugabyte '' "$1"
 }
 
 blackbox_backend_database() {
-  local arguments=("$@")
-  blackbox_compose exec -T \
-    -e PGPASSWORD="$BLACKBOX_DB_PASSWORD" yugabytedb_ysql bin/ysqlsh \
-    --host yugabytedb_ysql --username "$BLACKBOX_DB_USER" --dbname benchbase \
-    --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align \
-    --field-separator=$'\t' "${arguments[@]}"
+  [[ ${1:-} == --execute || ${1:-} == --command ]] || return 2
+  blackbox_backend_ysql_query "$BLACKBOX_DB_USER" "$BLACKBOX_DB_PASSWORD" "$2"
 }
 
 blackbox_backend_database_query() {
@@ -256,7 +321,7 @@ blackbox_backend_capture_security_catalog() {
     SELECT line FROM security_lines ORDER BY line"
 }
 
-blackbox_backend_verify_schema() {
+blackbox_backend_verify_schema_once() {
   blackbox_backend_capture_schema_metadata |
     python3 "$BLACKBOX_ROOT/scripts/backends/yugabytedb_ysql_catalog.py" \
       --benchmark "$BLACKBOX_BENCHMARK" \
@@ -421,6 +486,15 @@ blackbox_backend_verify_schema() {
   fi
 }
 
+blackbox_backend_verify_schema() {
+  local attempt
+  for (( attempt=1; attempt<=12; ++attempt )); do
+    if blackbox_backend_verify_schema_once; then return 0; fi
+    if (( attempt < 12 )); then sleep 5; fi
+  done
+  return 1
+}
+
 blackbox_backend_verify_uninstrumented_schema() {
   blackbox_backend_capture_schema_metadata |
     python3 "$BLACKBOX_ROOT/scripts/backends/yugabytedb_ysql_catalog.py" \
@@ -541,7 +615,7 @@ blackbox_backend_wait_for_connector_progress() {
      ${stock_count//[[:space:]]/} == 0 ]]
 }
 
-blackbox_backend_capture_attestation_inputs() {
+blackbox_backend_capture_attestation_inputs_once() {
   local tables_file=$1 facts_file=$2 metadata_file
   metadata_file=$(mktemp /tmp/blackbox-yugabyte-schema.XXXXXX) || return 1
   blackbox_backend_capture_schema_metadata >"$metadata_file" || return 1
@@ -645,6 +719,17 @@ blackbox_backend_capture_attestation_inputs() {
       {name:"dedicated_privileges_sha256",canonical_value:$privileges}
     ]' >"$facts_file"
   rm -f -- "$metadata_file"
+}
+
+blackbox_backend_capture_attestation_inputs() {
+  local attempt
+  for (( attempt=1; attempt<=12; ++attempt )); do
+    if blackbox_backend_capture_attestation_inputs_once "$1" "$2"; then
+      return 0
+    fi
+    if (( attempt < 12 )); then sleep 5; fi
+  done
+  return 1
 }
 
 blackbox_backend_status() {
