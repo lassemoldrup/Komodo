@@ -4,6 +4,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import tempfile
@@ -214,7 +215,7 @@ def monitor_command(executable, port, timeout_ms, extra_arguments=None):
 
 
 def run_monitor(
-    executable, port, timeout_ms, process_timeout=3.0, extra_arguments=None
+    executable, port, timeout_ms, process_timeout=3.0, extra_arguments=None, extra_env=None
 ):
     started = time.monotonic()
     result = subprocess.run(
@@ -223,6 +224,7 @@ def run_monitor(
         text=True,
         timeout=process_timeout,
         check=False,
+        env={**os.environ, **(extra_env or {})},
     )
     return result, time.monotonic() - started
 
@@ -726,12 +728,15 @@ def check_workload_rss_window(executable):
                     for sid, fields in entries])]))
         return resp_array(streams)
 
-    for enabled, mode in ((False, "audited"), (True, "audited"), (True, "join-only")):
+    for enabled, mode, profile in ((False, "audited", False), (True, "audited", True),
+                                   (True, "join-only", False)):
         xreads = 0
         statuses = []
+        deadline = None
+        final_sent = False
 
         def handler(_connection_id, command):
-            nonlocal xreads
+            nonlocal xreads, deadline, final_sent
             if command[0] == b"EVAL": return resp_integer(1)
             if command[0] == b"XADD":
                 statuses.append(json.loads(command[-1]))
@@ -743,17 +748,30 @@ def check_workload_rss_window(executable):
                 return reply([["2-0", ["payload", json.dumps(attestation)]],
                               ["3-0", ["payload", json.dumps(bootstrap)]]],
                              schema + fence("RUN_START", 0) + fence("LOAD_FINISHED", 1))
-            if xreads == 3:
+            if xreads >= 3 and not final_sent:
                 assert any(s["lifecycle_state"] == "LOAD_FINISHED_SEEN" for s in statuses)
-                time.sleep(0.35) # Worker must sample while the main thread waits on Redis.
+                if deadline is None:
+                    deadline = time.monotonic() + (2.6 if profile else 0.35)
+                if time.monotonic() < deadline:
+                    time.sleep(0.1)
+                    return b"*-1\r\n"
+                if profile:
+                    # Samples must be durable before the final artifact exists.
+                    assert not path.exists()
+                    live = [json.loads(line) for line in journal.read_text().splitlines()]
+                    assert len([p for p in live if p["stage"] == "workload"]) >= 2
+                final_sent = True
                 return reply([["4-0", ["payload", json.dumps(done)]],
                               ["5-0", ["payload", json.dumps(final)]]], fence("END_FENCE", 2))
             return b"*-1\r\n"
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "metrics.json"
+            journal = Path(str(path) + ".memory-timeline.jsonl")
             with ScriptedRedis(handler) as server:
-                result, _ = run_monitor(executable, server.port, 5000, extra_arguments=[
+                result, _ = run_monitor(executable, server.port, 15000, process_timeout=18,
+                    extra_env={"BLACKBOX_MONITOR_MEMORY_PROFILE": "on" if profile else "off"},
+                    extra_arguments=[
                     "--metrics-output", str(path), "--processing-mode", mode,
                     "--workload-rss-sampling", "on" if enabled else "off"])
             metrics = json.loads(path.read_text())
@@ -764,6 +782,21 @@ def check_workload_rss_window(executable):
             assert process["workload_rss_sampling_started"] is enabled
             assert process["workload_rss_sampling_valid"] is enabled
             assert process["workload_rss_sample_errors"] == 0
+            if profile:
+                timeline = [json.loads(line) for line in journal.read_text().splitlines()]
+                assert metrics["memory_profile"]["sample_interval_ms"] == 1000
+                assert metrics["memory_profile"]["sample_errors"] == 0
+                assert metrics["memory_profile"]["timeline_storage"] == "jsonl"
+                assert metrics["memory_profile"]["sample_count"] == len(timeline)
+                assert "timeline" not in metrics["memory_profile"]
+                regular = [p for p in timeline if p["stage"] == "workload"]
+                assert len(regular) >= 2
+                assert 1000 <= regular[1]["elapsed_ms"] - regular[0]["elapsed_ms"] < 2500
+                assert all(p["epoch_ms"] > 0 and p["rss_kib"] > 0 for p in timeline)
+                assert all(p["key_count"] == p["snapshot_keys"] == 0 for p in timeline)
+                assert all(p["reclaimed_key_count"] == 0 for p in timeline)
+            else:
+                assert not journal.exists()
             if enabled:
                 assert process["workload_sampled_peak_rss_kib"] > 0
                 assert process["workload_rss_samples"] >= 3

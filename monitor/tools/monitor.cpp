@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <exception>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -552,6 +553,8 @@ assemblerMetricsJson(const blackbox::DebeziumAssemblerMetrics &metrics) {
       {"key_index_capacity_bytes", profile->key_index_capacity_bytes},
       {"key_descriptor_capacity_bytes", profile->key_descriptor_capacity_bytes},
       {"key_payload_capacity_bytes", profile->key_payload_capacity_bytes},
+      {"key_free_id_capacity_bytes", profile->key_free_id_capacity_bytes},
+      {"deferred_deleted_key_capacity_bytes", profile->deferred_deleted_key_capacity_bytes},
       {"value_index_capacity_bytes", profile->value_index_capacity_bytes},
       {"value_descriptor_capacity_bytes", profile->value_descriptor_capacity_bytes},
       {"value_payload_capacity_bytes", profile->value_payload_capacity_bytes},
@@ -611,6 +614,8 @@ checkerMetricsJson(const blackbox::CheckerAdapterMetrics &metrics) {
            {"interned_value_bytes", engine.interned_value_bytes},
            {"reclaimed_value_count", engine.reclaimed_value_count},
            {"reclaimed_value_bytes", engine.reclaimed_value_bytes},
+           {"reclaimed_key_count", engine.reclaimed_key_count},
+           {"reclaimed_key_bytes", engine.reclaimed_key_bytes},
            {"current_snapshot_keys", engine.current_snapshot_keys},
            {"history_entries", engine.history_entries},
            {"history_deltas", engine.history_deltas},
@@ -926,6 +931,7 @@ void writeAtomically(const std::string &target,
 
 class MeasurementArtifact final {
 public:
+  static constexpr auto memory_sample_interval = std::chrono::seconds(1);
   void startWorkload() {
     workload_started_steady_ = std::chrono::steady_clock::now();
     next_memory_sample_ = {};
@@ -941,6 +947,13 @@ public:
     }
     started_steady_ = std::chrono::steady_clock::now();
     started_system_ = std::chrono::system_clock::now();
+    if (memory_profile_enabled_) {
+      memory_timeline_output_.open(*options_.metrics_output + ".memory-timeline.jsonl",
+                                   std::ios::out | std::ios::trunc);
+      if (!memory_timeline_output_) {
+        throw std::runtime_error("cannot open memory timeline output");
+      }
+    }
     if (getrusage(RUSAGE_SELF, &started_usage_) != 0) {
       throw std::runtime_error("cannot read initial process resource usage");
     }
@@ -964,12 +977,14 @@ public:
     if (!memory_profile_enabled_ || !options_.metrics_output) return;
     const auto now = std::chrono::steady_clock::now();
     if (!force && now < next_memory_sample_) return;
-    next_memory_sample_ = now + std::chrono::seconds(30);
+    next_memory_sample_ = now + memory_sample_interval;
     const auto started = std::chrono::steady_clock::now();
     const auto joiner = controller.joinerMetrics();
     const auto assembly = assembler.metrics();
     const auto &engine = joiner.checker.engine;
     Json point{
+        {"epoch_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+            (started_system_ + (now - started_steady_)).time_since_epoch()).count()},
         {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(now - started_steady_).count()},
         {"stage", controller.terminal() ? "final" : (workload_started_steady_ ? "workload" : "bootstrap")},
         {"workload_elapsed_ms", workload_started_steady_
@@ -980,6 +995,9 @@ public:
         {"key_count", engine.interned_key_count},
         {"key_bytes", engine.interned_key_bytes},
         {"snapshot_keys", engine.current_snapshot_keys},
+        {"reclaimed_key_count", engine.reclaimed_key_count},
+        {"pending_client_records", joiner.pending_client_records},
+        {"pending_cdc_slots", joiner.pending_cdc_slots},
         {"history_bytes", engine.history_logical_bytes},
         {"bootstrap_copy_bytes", joiner.bootstrap_state_bytes},
         {"checker_identity_bytes", joiner.checker.mapped_identity_bytes},
@@ -1003,7 +1021,12 @@ public:
     point["allocator_free_arena_bytes"] = allocator.fordblks;
     point["allocator_mmap_bytes"] = allocator.hblkhd;
 #endif
-    memory_timeline_.push_back(std::move(point));
+    memory_timeline_output_ << point.dump() << '\n';
+    memory_timeline_output_.flush();
+    if (!memory_timeline_output_) {
+      throw std::runtime_error("cannot append memory timeline output");
+    }
+    ++memory_profile_samples_;
     memory_profile_sample_nanoseconds_ +=
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - started).count();
@@ -1125,11 +1148,13 @@ public:
     result["identity_policy"] = "ordered_unique_input_v1";
     result["memory_profile"] = Json{
         {"enabled", memory_profile_enabled_},
-        {"sample_interval_ms", 30000},
+        {"sample_interval_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   memory_sample_interval).count()},
         {"sample_errors", memory_profile_sample_errors_},
         {"sampling_nanoseconds", memory_profile_sample_nanoseconds_},
         {"final_census_nanoseconds", memory_profile_census_nanoseconds_},
-        {"timeline", memory_timeline_},
+        {"timeline_storage", "jsonl"},
+        {"sample_count", memory_profile_samples_},
     };
     process["workload_rss_sampling_enabled"] = options_.workload_rss_sampling;
     process["workload_rss_sampling_started"] = workload_rss_.started();
@@ -1171,7 +1196,8 @@ private:
   bool memory_profile_enabled_ = false;
   std::optional<std::chrono::steady_clock::time_point> workload_started_steady_;
   std::chrono::steady_clock::time_point next_memory_sample_{};
-  Json memory_timeline_ = Json::array();
+  std::uint64_t memory_profile_samples_ = 0;
+  std::ofstream memory_timeline_output_;
   std::uint64_t memory_profile_sample_errors_ = 0;
   std::int64_t memory_profile_sample_nanoseconds_ = 0;
   std::int64_t memory_profile_census_nanoseconds_ = 0;

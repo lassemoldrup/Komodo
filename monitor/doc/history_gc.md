@@ -98,7 +98,16 @@ end-to-end monitor wall/CPU measurements include all of this work.
 Pruning releases history entries, their delta arrays, and value references.
 When no current snapshot entry or retained delta owns a value, its payload is
 freed and its ID slot recycled. Shared values remain alive until their last
-reference is released. Key interning and current state are unchanged. Identity
+reference is released. Current state remains intact. Absent keys whose last
+writer is strictly before the frontier are freed and their KeyIds and
+snapshot/last-writer slots reused. Deletions exactly at the frontier wait for
+its next advance because their WW bound can still matter. Candidates come from
+pruned deltas, without scanning all live keys on each GC call. A small deferred
+list retains at most the keys from one boundary transaction.
+Historical WW diagnostic bounds below the frontier may be forgotten; effective
+bounds and consistency verdicts for admitted transactions remain unchanged.
+Hash/vector capacities remain available for reuse; this is not automatic
+compaction or allocator trimming. Growing live data can still increase RSS. Identity
 retention follows the [prototype input contract](prototype_input_contract.md).
 An idle session can pin history until it advances or
 completes; no fixed bound on total memory is claimed. The existing resource
@@ -107,10 +116,19 @@ transaction before its subsequent GC step.
 
 The engine reports current `interned_value_count/bytes` and cumulative
 `reclaimed_value_count/bytes`. Repeated reclamation of a recycled ID counts
-again. GC-off preserves history references and does not trigger value reclamation.
+again. `reclaimed_key_count/bytes` similarly reports retired keys. GC-off
+preserves history references and does not trigger value or key reclamation.
 
-Set `BLACKBOX_MONITOR_MEMORY_PROFILE=on` to collect approximately 30-second
-RSS, allocator, payload and identity-accounting samples. Final metrics also
+Set `BLACKBOX_MONITOR_MEMORY_PROFILE=on` to collect approximately one-second
+RSS, live/retained key counts, pending evidence, allocator, payload and identity
+samples. Each point is flushed to `<metrics-output>.memory-timeline.jsonl` as
+it is collected. Final metrics declare `timeline_storage: jsonl` and the sample
+count, without retaining a growing duplicate JSON array in monitor memory.
+Earlier ten-second runs embedded the timeline in final metrics as well. Timestamps
+include monotonic elapsed time and its epoch-time mapping for alignment with
+the workload log. Sampling runs on the monitor thread between processing steps,
+so actual sample timestamps, not assumed exact one-second boundaries, must be
+used. The separate 100 ms sampler still measures workload peak RSS. Final metrics also
 include a unique-value reference census and container capacities under
 `checker.engine.memory_profile`. The census runs after workload RSS sampling
 stops; its temporary allocations do not contribute to the sampled peak. The
